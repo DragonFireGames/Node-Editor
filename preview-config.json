@@ -1,0 +1,5 @@
+{
+  "main": "editor.html",
+  "editor": true,
+  "name": "Proxy Browser IDE"
+}

@@ -1,0 +1,183 @@
+
+* { box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  margin: 0;
+  background: #1e1f22;
+  color: #e3e5e8;
+  user-select: none;
+  overflow: hidden;
+}
+
+/* Tab Strip Styling */
+/* DevTools content should be selectable even though browser chrome is not. */
+#devtools-panel,
+#devtools-panel * {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+#tab-strip {
+  display: flex;
+  align-items: center;
+  background: #111214;
+  padding: 6px 6px 0 6px;
+  gap: 4px;
+  border-bottom: 1px solid #2b2d31;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #1f2023;
+  padding: 6px 12px;
+  border-radius: 8px 8px 0 0;
+  max-width: 220px;
+  min-width: 140px;
+  font-size: 12px;
+  cursor: pointer;
+  color: #949ba4;
+  border: 1px solid transparent;
+  border-bottom: none;
+  transition: all 0.15s ease;
+  position: relative;
+}
+.tab[draggable="true"] { cursor: grab; }
+.tab.dragging { opacity: 0.45; cursor: grabbing; }
+.tab:hover { background: #1f3876; color: #dbdee1; }
+.tab.active { background: #2b2d31; color: #ffffff; border-color: #4e5058; font-weight: 500; }
+.tab-favicon { width: 14px; height: 14px; flex-shrink: 0; object-fit: contain; border-radius: 2px; }
+.tab-title { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tab-close {
+  width: 16px; height: 16px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; font-size: 10px; flex-shrink: 0; opacity: 0.7;
+}
+.tab-close:hover { background: rgba(255, 255, 255, 0.2); opacity: 1; color: #ff5f56; }
+
+#new-tab-btn {
+  background: none; border: none; color: #949ba4;
+  font-size: 14px; cursor: pointer; padding: 6px 10px; border-radius: 6px;
+  display: flex; align-items: center; justify-content: center; transition: background 0.15s;
+}
+#new-tab-btn:hover { background: #35363a; color: #fff; }
+
+#nav-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 12px; background: #2b2d31; border-bottom: 1px solid #1e1f22;
+}
+.nav-btn {
+  background: none; border: none; color: #dbdee1; font-size: 13px;
+  width: 28px; height: 28px; border-radius: 6px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; transition: background 0.15s, color 0.15s;
+}
+.nav-btn:disabled { color: #4e5058; cursor: not-allowed; }
+.nav-btn:not(:disabled):hover { background: rgba(255, 255, 255, 0.1); color: #fff; }
+.nav-btn.active-toggle { background: #5865f2; color: #ffffff; }
+
+/* Address Bar Form */
+#url-form { flex: 1; display: flex; position: relative; align-items: center; }
+#url-bar-container {
+  width: 100%; display: flex; align-items: center;
+  background: #1e1f22; border: 1px solid #383a40; border-radius: 20px;
+  padding: 0 12px; transition: border-color 0.2s, box-shadow 0.2s;
+}
+#url-bar-container:focus-within {
+  border-color: #5865f2; box-shadow: 0 0 0 2px rgba(88, 101, 242, 0.3);
+}
+.protocol-icon { color: #23a55a; font-size: 11px; margin-right: 8px; }
+.protocol-icon.http { color: #f0b232; }
+.protocol-icon.local { color: #5865f2; }
+#url-bar {
+  width: 100%; background: transparent; border: none;
+  padding: 6px 0; color: #f2f3f5; font-size: 13px; outline: none;
+}
+
+#bookmarks-bar {
+  display: flex; align-items: center; gap: 6px; padding: 4px 12px;
+  background: #232428; border-bottom: 1px solid #111214; font-size: 11px; overflow-x: auto;
+}
+.bookmark-btn {
+  display: flex; align-items: center; gap: 5px; background: #2b2d31;
+  color: #b5bac1; padding: 3px 8px; border-radius: 4px; cursor: pointer;
+  white-space: nowrap; transition: all 0.15s ease; border: 1px solid transparent;
+}
+.bookmark-btn:hover { background: #35373c; color: #ffffff; border-color: #404249; }
+.bookmark-favicon { width: 14px; height: 14px; min-width: 14px; min-height: 14px; max-width: 14px; max-height: 14px; object-fit: contain; flex: none; display: block; }
+
+.download-item { display:flex; gap:10px; padding:10px 12px; border-bottom:1px solid #2d2f34; }
+.download-item:last-child { border-bottom:none; }
+.download-item-icon { width:28px; height:28px; flex:none; display:flex; align-items:center; justify-content:center; color:#8b949e; }
+.download-preview-thumb { width:24px; height:24px; border-radius:2px; object-fit:cover; border:1px solid #3a3d43; background:#16171a; }
+.download-item-main { min-width:0; flex:1; }
+.download-item-top { display:flex; align-items:center; gap:8px; }
+.download-item-name { min-width:0; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#e5e7eb; font-size:11px; }
+.download-item-status { flex:none; color:#8b949e; font-size:10px; }
+.download-item-sub { margin-top:3px; color:#8b949e; font-size:10px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.download-progress-track { margin-top:6px; height:3px; border-radius:3px; overflow:hidden; background:#303238; }
+.download-progress-bar { height:100%; background:#5865f2; transition:width .1s linear; }
+
+#main-viewport-area { flex: 1; display: flex; position: relative; overflow: hidden; }
+
+#browser-chrome-reveal {
+  position: fixed; top: 0; left: 0; right: 0; height: 6px;
+  z-index: 30000; display: none;
+}
+body.browser-chrome-fullscreen #browser-chrome-reveal { display: block; }
+body.browser-chrome-fullscreen #tab-strip,
+body.browser-chrome-fullscreen #nav-bar,
+body.browser-chrome-fullscreen #bookmarks-bar { display: none; }
+body.browser-chrome-fullscreen #browser-chrome-reveal:hover + #main-viewport-area {}
+body.browser-chrome-fullscreen.chrome-hover-reveal #tab-strip,
+body.browser-chrome-fullscreen.chrome-hover-reveal #nav-bar,
+body.browser-chrome-fullscreen.chrome-hover-reveal #bookmarks-bar { display: flex; }
+
+#viewport-container { flex: 1; position: relative; background: #ffffff; height: 100%; }
+.tab-iframe { position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: none; display: none; }
+.tab-iframe.active { display: block; }
+
+#loading-progress {
+  position: absolute; top: 0; left: 0; height: 3px; background: #5865f2;
+  width: 0%; transition: width 0.2s ease, opacity 0.3s ease; z-index: 100;
+  box-shadow: 0 0 8px #5865f2;
+}
+
+/* Custom Context Menu */
+#custom-context-menu {
+  position: fixed; z-index: 10000; width: 220px; background: #2b2d31;
+  border: 1px solid #383a40; border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+  padding: 6px 0; display: none; font-size: 12px; color: #dbdee1;
+}
+.menu-item { padding: 7px 14px; cursor: pointer; display: flex; align-items: center; justify-content: space-between; }
+.menu-item:hover { background: #5865f2; color: #ffffff; }
+.menu-item.disabled { color: #4e5058; cursor: not-allowed; }
+.menu-item.disabled:hover { background: transparent; color: #4e5058; }
+.menu-separator { height: 1px; background: #383a40; margin: 4px 0; }
+.menu-shortcut { font-size: 10px; color: #949ba4; }
+.menu-item:hover .menu-shortcut { color: #e0e0e0; }
+
+/* Modals & Scrollbars */
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.7); display: none;
+  align-items: center; justify-content: center; z-index: 20000; backdrop-filter: blur(2px);
+}
+.modal-overlay.active { display: flex; }
+.modal-box {
+  background: #2b2d31; border: 1px solid #383a40; border-radius: 12px;
+  width: 90%; max-width: 680px; max-height: 85vh; display: flex; flex-direction: column;
+  box-shadow: 0 16px 32px rgba(0,0,0,0.5); overflow: hidden; color: #f2f3f5;
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #1e1f22; }
+::-webkit-scrollbar-thumb { background: #383a40; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #4e5058; }
+
+.bookmark-btn { user-select: none; }
+.bookmark-btn[draggable="true"] { cursor: grab; }
+.bookmark-btn.dragging { opacity: 0.45; cursor: grabbing; }

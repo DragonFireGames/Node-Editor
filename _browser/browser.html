@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Proxy Site Browser & DevTools Sandbox</title>
+    <script src="/_browser/style/tailwind.js"></script>
+    <link rel="stylesheet" href="/_browser/style/fontawesome.css">
+    <link rel="stylesheet" href="/_browser/style/browser.css">
+    <script src="/_browser/external/acorn.js"></script>
+    <script src="/_browser/external/acorn-walk.js"></script>
+    <script src="/_browser/external/astring.js"></script>
+    <script src="/_browser/external/jszip.js"></script>
+    <script src="/_browser/external/7zz.js"></script>
+    <script src="/_browser/external/peer.js"></script>
+    <script src="/_browser/lib/filesystem.js"></script>
+    <script src="/_browser/lib/network.js"></script>
+    <script src="/_browser/lib/emulator.js"></script>
+    <script src="/_browser/lib/npm.js"></script>
+    <script src="/_browser/lib/endpoints/app.js"></script>
+    <script src="/_browser/lib/endpoints/static.js"></script>
+    <script src="/_browser/lib/endpoints/peer.js" data-layer="peer"></script>
+    <script src="/_browser/lib/keepalive.js"></script>
+  </head>
+  <style>
+    .dt-subtab { border: 0; background: transparent; color: #9ca3af; padding: 3px 7px; border-radius: 3px; font-size: 10px; cursor: pointer; white-space: nowrap; }
+    .dt-subtab:hover { color: #fff; background: #2b2d31; }
+    .dt-subtab.active { color: #a5b4fc; background: #1e1f22; box-shadow: inset 0 -1px 0 #6366f1; }
+  </style>
+  <body>
+
+    <!-- Browser Header & Tab Strip -->
+    <div id="tab-strip">
+      <div id="tabs-list" class="flex gap-1"></div>
+      <button id="new-tab-btn" onclick="createNewTab(appSettings.defaultTab)" title="New Tab (Ctrl+T)">
+        <i class="fa-solid fa-plus"></i>
+      </button>
+    </div>
+
+    <!-- Browser Navigation Toolbar -->
+    <div id="nav-bar">
+      <button class="nav-btn" id="btn-back" onclick="goBack()" title="Back"><i class="fa-solid fa-arrow-left"></i></button>
+      <button class="nav-btn" id="btn-forward" onclick="goForward()" title="Forward"><i class="fa-solid fa-arrow-right"></i></button>
+      <button class="nav-btn" id="btn-reload" onclick="reloadCurrentTab()" title="Reload"><i class="fa-solid fa-rotate-right"></i></button>
+      <button class="nav-btn" id="btn-home" onclick="navigateTo(appSettings.defaultTab)" title="Home"><i class="fa-solid fa-house"></i></button>
+      
+      <!-- Address Bar -->
+      <form id="url-form" onsubmit="handleUrlSubmit(event)">
+        <div id="url-bar-container">
+          <i id="protocol-icon" class="fa-solid fa-lock protocol-icon"></i>
+          <input type="text" id="url-bar" autocomplete="off" spellcheck="false" placeholder="Type a URL or search string...">
+          <button type="button" onclick="toggleBookmarkCurrent()" class="text-xs text-gray-400 hover:text-yellow-400 px-1" title="Bookmark page">
+            <i id="bookmark-star" class="fa-regular fa-star"></i>
+          </button>
+        </div>
+      </form>
+
+      <!-- Toolbar Tools -->
+      <button class="nav-btn" id="btn-browser-fullscreen" onclick="toggleBrowserFullscreen()" title="Hide Browser Bar"><i class="fa-solid fa-expand"></i></button>
+      <button class="nav-btn" id="btn-devtools" onclick="browserDevTools.toggle()" title="Toggle DevTools (F12 / Ctrl+Shift+I)"><i class="fa-solid fa-terminal"></i></button>
+      <button class="nav-btn relative" id="btn-downloads" onclick="toggleDownloads()" title="Downloads"><i class="fa-solid fa-download"></i><span id="downloads-badge" class="hidden absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] px-0.5 rounded-full bg-blue-500 text-white text-[8px] leading-[14px] text-center"></span></button>
+      <button class="nav-btn" onclick="openModal('history-modal')" title="Browsing History"><i class="fa-solid fa-clock-rotate-left"></i></button>
+      <button class="nav-btn" onclick="openModal('settings-modal')" title="Proxy Settings"><i class="fa-solid fa-gear"></i></button>
+    </div>
+
+    <!-- Bookmarks Quick Bar -->
+    <div id="bookmarks-bar">
+      <span class="text-xs text-gray-500 font-semibold uppercase tracking-wider mr-1"><i class="fa-solid fa-bookmark text-yellow-500 mr-1"></i> Quick:</span>
+      <div id="bookmarks-list" class="flex gap-1 overflow-x-auto"></div>
+    </div>
+
+    <div id="browser-chrome-reveal" aria-hidden="true"></div>
+
+    <!-- Main Viewport -->
+    <div id="main-viewport-area">
+      <div id="viewport-container">
+        <div id="loading-progress"></div>
+      </div>
+
+    <div id="custom-context-menu"></div>
+    <div id="downloads-panel" class="hidden fixed top-[108px] right-3 z-[40000] w-[360px] max-w-[calc(100vw-24px)] rounded-lg border border-gray-700 bg-[#202124] shadow-2xl overflow-hidden">
+      <div class="flex items-center justify-between px-3 py-2 border-b border-gray-700">
+        <span class="text-xs font-semibold text-gray-200"><i class="fa-solid fa-download mr-2 text-gray-400"></i>Downloads</span>
+        <button class="text-[10px] text-gray-500 hover:text-gray-200" onclick="clearDownloads()">Clear history</button>
+      </div>
+      <div id="downloads-list" class="max-h-[360px] overflow-y-auto"></div>
+      <div id="downloads-empty" class="px-4 py-8 text-center text-xs text-gray-500">No downloads yet.</div>
+    </div>
+    <div id="toast-container" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 pointer-events-none"></div>
+
+    <!-- History Modal -->
+    <div id="history-modal" class="modal-overlay">
+      <div class="modal-box">
+        <div class="flex items-center justify-between p-4 border-b border-gray-700 bg-gray-800">
+          <h3 class="font-bold text-lg flex items-center gap-2 text-indigo-400"><i class="fa-solid fa-clock-rotate-left"></i> Browsing History</h3>
+          <button onclick="closeModal('history-modal')" class="text-gray-400 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
+        </div>
+        <div class="p-4 flex flex-col gap-3 overflow-y-auto max-h-[60vh]">
+          <div class="flex justify-between items-center">
+            <span class="text-xs text-gray-400">Recent Sites Visited</span>
+            <button onclick="clearHistoryLog()" class="text-xs text-rose-400 hover:text-rose-300"><i class="fa-solid fa-trash mr-1"></i> Clear History</button>
+          </div>
+          <div id="history-log-list" class="flex flex-col gap-1"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div id="settings-modal" class="modal-overlay">
+      <div class="modal-box max-w-md">
+        <div class="flex items-center justify-between p-4 border-b border-gray-700 bg-gray-800">
+          <h3 class="font-bold text-lg flex items-center gap-2 text-indigo-400"><i class="fa-solid fa-gear"></i> Proxy Configuration</h3>
+          <button onclick="closeModal('settings-modal')" class="text-gray-400 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
+        </div>
+        <div class="p-5 flex flex-col gap-4 text-xs">
+          <div>
+            <label class="block font-semibold mb-1 text-gray-300">Default Tab</label>
+            <input type="text" id="setting-default-tab" class="w-full bg-gray-900 border border-gray-700 rounded p-2 text-white outline-none" value="https://example.com">
+          </div>
+          <div>
+            <label class="block font-semibold mb-1 text-gray-300">CORS Worker Proxy Gateway URL</label>
+            <input type="text" id="setting-proxy-url" class="w-full bg-gray-900 border border-gray-700 rounded p-2 text-white outline-none" value="https://proxy.dragonfire7z.workers.dev/">
+            <p class="text-gray-500 mt-1">Requests to non-local origins are dynamically routed through this proxy gateway.</p>
+          </div>
+          <div class="flex items-center gap-2 pt-2 border-t border-gray-800">
+            <input type="checkbox" id="setting-obscure-url" class="rounded bg-gray-800 border-gray-700" checked>
+            <label for="setting-obscure-url" class="text-gray-300">Obscure URL with base64</label>
+          </div>
+          <div>
+            <label class="block font-semibold mb-1 text-gray-300">Fallback CORS Proxy URL</label>
+            <input type="text" id="setting-fallback-proxy-url" class="w-full bg-gray-900 border border-gray-700 rounded p-2 text-white outline-none" value="https://api.allorigins.win/raw?url=">
+          </div>
+          <div class="flex items-center gap-2 pt-2 border-t border-gray-800">
+            <input type="checkbox" id="setting-fallback-enable" class="rounded bg-gray-800 border-gray-700">
+            <label for="setting-fallback-enable" class="text-gray-300">Auto-try fallback proxy if primary worker fails</label>
+          </div>
+          <div class="flex items-center gap-2 pt-2 border-t border-gray-800">
+            <input type="checkbox" id="setting-clear-devtools-reload" class="rounded bg-gray-800 border-gray-700" checked onchange="appSettings.clearDevToolsOnReload=this.checked">
+            <label for="setting-clear-devtools-reload" class="text-gray-300">Clear Console & Network on reload</label>
+          </div>
+          <div class="flex items-center gap-2 pt-2 border-t border-gray-800">
+            <input type="checkbox" id="setting-autodownload" class="rounded bg-gray-800 border-gray-700">
+            <label for="setting-autodownload" class="text-gray-300">Automatically download files when ready</label>
+          </div>
+          <div>
+            <label class="block font-semibold mb-1 text-gray-300">Default Search Engine</label>
+            <select id="setting-search-engine" class="w-full bg-gray-900 border border-gray-700 rounded p-2 text-white outline-none">
+              <option value="https://mojeek.com/search?q=">Mojeek</option>
+              <option value="https://duckduckgo.com/html/?q=">DuckDuckGo HTML</option>
+              <option value="https://html.duckduckgo.com/html/?q=">DuckDuckGo Lite</option>
+            </select>
+          </div>
+          <div class="flex justify-end pt-2">
+            <button onclick="saveSettings()" class="bg-indigo-600 hover:bg-indigo-500 px-4 py-2 rounded font-semibold text-white">Save Settings</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="/_browser/console.js"></script>
+    <script src="/_browser/devtools.js"></script>
+    <script src="/_browser/browser.js"></script>
+  </body>
+</html>
