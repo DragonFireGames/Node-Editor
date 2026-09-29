@@ -442,15 +442,15 @@
           for (let i = args.length - 1; i >= 0 && !resolvedAbsolute; i--) {
             const path = args[i];
             if (typeof path !== 'string' || !path) continue;
-            resolvedPath = path + '/' + resolvedPath;
+            resolvedPath = path + (resolvedPath ? '/' + resolvedPath : '');
             resolvedAbsolute = path.startsWith('/');
           }
 
           resolvedPath = normalizePath(resolvedPath);
           if (resolvedAbsolute) {
-            return resolvedPath;
+            return resolvedPath.replace(/\/+$/, '') || '/';
           }
-          return normalizePath('/' + resolvedPath);
+          return normalizePath('/' + resolvedPath).replace(/\/+$/, '') || '/';
         };
 
         exports.isAbsolute = function(p) {
@@ -2754,7 +2754,7 @@
     var wait = t=>new Promise(r=>setTimeout(r,t));
     async function preloadModule(moduleSpecifier, currentFilePath) {
       await wait(0);
-      console.log(moduleSpecifier,currentFilePath);
+      //console.logText(moduleSpecifier,currentFilePath);
       const parentDir = dirname(currentFilePath);
       const location = await lookupFileInZip(moduleSpecifier, parentDir);
 
@@ -2954,7 +2954,7 @@
         cached.loaded = false;
         moduleCache.delete(resolvedPath);
         console.error(`[Module Execution Error] at ${resolvedPath}:`, err);
-        console.log(err.stack);
+        console.error(err.stack);
         throw err;
       }
 

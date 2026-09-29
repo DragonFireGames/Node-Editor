@@ -44,6 +44,7 @@
     workbench: null,
     dirty: false,
     monacoPromise: null,
+    previews: null,
     terminalTabs: new Map(),
     browserTabs: new Map(),
     environment: {},
@@ -199,6 +200,16 @@
     if ($('statusLeft')) $('statusLeft').textContent = state.fs ? `FileSystem: ${state.fs.listFilesSync().length} files` : 'FileSystem: loading…';
     if ($('statusRight')) $('statusRight').textContent = `CWD: ${state.nodeEmulator?.cwd || '/'}` + (state.dirty ? ' • Unsaved' : '');
     if ($('projectName')) $('projectName').textContent = state.projectName || 'Workspace';
+    const save = $('saveProjectBtn');
+    if (save) {
+      const canSave = !!state.fs?.canSave?.() && state.saveProjectPermission !== 'denied';
+      save.disabled = !canSave;
+      save.title = canSave ? 'Save changes to the original project location' : 'Save Project is unavailable for this workspace';
+    }
+  }
+  async function refreshSaveProjectState() {
+    state.saveProjectPermission = state.fs?.canSave?.() ? await state.fs.permissionState?.() : 'denied';
+    updateStatus();
   }
   function renameProject() {
     const el = $('projectName');
@@ -243,7 +254,7 @@
       icon: fileIcon(path),
       kind: 'file',
       path,
-      view: 'edit',
+      view: null,
       model: null,
       editor: null,
       listener: null
@@ -274,29 +285,26 @@
     g.viewBar.innerHTML = '';
     const previous = g.__renderedTab;
     if (previous?.kind === 'builtin' && previous._viewElement?.parentNode === g.viewBody) {
-      previous._viewElement.remove();
+      previous._viewElement.style.display = 'none';
       return;
     }
     g.viewBody.innerHTML = '';
   }
   function renderViewBar(g, t) {
     g.viewBar.innerHTML = '';
-    if (!t || t.kind !== 'file') {
+    if (!t || t.kind !== 'file' || !state.previews) {
       g.viewBar.style.display = 'none';
       return;
     }
     g.viewBar.style.display = '';
-    const views = ['edit'];
-    const m = mime(t.path);
-    if (m === 'text/markdown') views.push('preview');
-    if (m.startsWith('image/')) views.push('preview');
-    views.push('raw');
-    for (const v of views) {
+    const file = { path: t.path, name: basename(t.path), mime: mime(t.path), id: t.id };
+    const views = state.previews.getViews(file);
+    for (const view of views) {
       const b = document.createElement('button');
-      b.className = 'view-button' + (t.view === v ? ' active' : '');
-      b.textContent = v[0].toUpperCase() + v.slice(1);
+      b.className = 'view-button' + (t.view === view.id ? ' active' : '');
+      b.textContent = view.label || view.id;
       b.onclick = () => {
-        t.view = v;
+        t.view = view.id;
         activate(t, g);
       };
       g.viewBar.appendChild(b);
@@ -329,6 +337,7 @@
       } catch (_) {}
     }
     t.editor = null;
+    state.previews?.dispose(t);
   }
   async function activate(t, g) {
     g.active = t?.id || null;
@@ -339,10 +348,16 @@
     }
     disposeTabView(t);
     clearView(g);
+    if (t.kind === 'file') {
+      const file = { path: t.path, name: basename(t.path), mime: mime(t.path), id: t.id };
+      const views = state.previews?.getViews(file) || [];
+      if (!t.view || !views.some(v => v.id === t.view)) t.view = state.previews?.getDefaultView(file)?.id || null;
+    }
     renderViewBar(g, t);
     if (t.kind === 'builtin') {
       if (t._viewElement) {
-        g.viewBody.appendChild(t._viewElement);
+        if (t._viewElement.parentNode !== g.viewBody) g.viewBody.appendChild(t._viewElement);
+        t._viewElement.style.display = '';
         g.__renderedTab = t;
         if (t.builtin === 'terminal') {
           const terminal = state.terminalTabs.get(t.id);
@@ -361,92 +376,14 @@
       return;
     }
     g.__renderedTab = t;
-    if (t.view === 'preview') return renderPreview(t, g);
-    if (t.view === 'raw') return renderRaw(t, g);
-    return renderEdit(t, g);
-  }
-  async function renderEdit(t, g) {
-    const host = document.createElement('div');
-    host.className = 'editor-view active';
-    g.viewBody.appendChild(host);
-    const ta = document.createElement('textarea');
-    ta.className = 'editor-textarea';
-    ta.spellcheck = false;
-    ta.value = state.fs.readFileSync(t.path, 'utf8') || '';
-    host.appendChild(ta);
-    const apply = text => {
-      if (state.fs.readFileSync(t.path, 'utf8') !== text) {
-        state.fs.writeFileSync(t.path, text);
-        state.dirty = true;
-        updateStatus();
-      }
-    };
-    ta.addEventListener('input', () => apply(ta.value));
-    try {
-      const monaco = await ensureMonaco();
-      if (g.active !== t.id || !g.viewBody.contains(host)) return;
-      const model = t.model && !t.model.isDisposed() ? t.model : monaco.editor.createModel(ta.value, language(t.path));
-      if (model.getValue() !== ta.value) {
-        model.setValue(ta.value);
-      }
-      t.model = model;
-      const ed = monaco.editor.create(host, {
-        model,
-        theme: 'vs-dark',
-        automaticLayout: true,
-        minimap: {
-          enabled: false
-        },
-        fontSize: 13,
-        scrollBeyondLastLine: false
-      });
-      t.editor = ed;
-      ta.classList.add('hidden');
-      if (!t.listener) t.listener = model.onDidChangeContent(() => {
-        apply(model.getValue());
-      });
-    } catch (e) {}
-  }
-  function renderRaw(t, g) {
-    const host = document.createElement('div');
-    host.className = 'editor-view active';
-    g.viewBody.appendChild(host);
-    const ta = document.createElement('textarea');
-    ta.className = 'editor-textarea';
-    ta.spellcheck = false;
-    ta.value = state.fs.readFileSync(t.path, 'utf8') || '';
-    host.appendChild(ta);
-    ta.addEventListener('input', () => {
-      state.fs.writeFileSync(t.path, ta.value);
-      state.dirty = true;
-      updateStatus();
-    });
-  }
-  async function renderPreview(t, g) {
-    const m = mime(t.path);
-    if (m === 'text/markdown') {
-      const host = document.createElement('div');
-      host.className = 'editor-view active editor-markdown';
-      host.textContent = state.fs.readFileSync(t.path, 'utf8') || '';
-      g.viewBody.appendChild(host);
-      return;
+    const file = { path: t.path, name: basename(t.path), mime: mime(t.path), id: t.id };
+    if (state.previews?.getView(file, t.view)) {
+      return state.previews.render(file, t.view, g.viewBody, g);
     }
-    if (m.startsWith('image/')) {
-      const data = state.fs.readFileSync(t.path, 'binary');
-      const url = URL.createObjectURL(new Blob([data], {
-        type: m
-      }));
-      const img = document.createElement('img');
-      img.className = 'editor-image';
-      img.src = url;
-      img.onload = () => URL.revokeObjectURL(url);
-      g.viewBody.appendChild(img);
-      return;
-    }
-    const pre = document.createElement('pre');
-    pre.className = 'editor-binary';
-    pre.textContent = 'Preview not available for this file type.';
-    g.viewBody.appendChild(pre);
+    const fallback = document.createElement('div');
+    fallback.className = 'editor-binary';
+    fallback.textContent = `No editor or preview available for ${file.name}`;
+    g.viewBody.appendChild(fallback);
   }
   function openFile(path, target) {
     path = normalize(path);
@@ -1182,6 +1119,7 @@
   }
   async function replaceFileSystem(fs, name, openFirst = true) {
     state.fs = fs;
+    state.saveProjectPermission = 'denied';
     state.projectName = name;
     state.projectKey = name;
     state.dirty = false;
@@ -1206,6 +1144,7 @@
     } else {
       openBuiltin('welcome', state.workbench.getFirstLeaf());
     }
+    await refreshSaveProjectState();
     updateStatus();
   }
   function closeImportModal() {
@@ -1244,7 +1183,21 @@
     modal.querySelector('.editor-modal-close').onclick = cleanup;
     const zipInput = modal.querySelector('.import-input-zip');
     const filesInput = modal.querySelector('.import-input-files');
-    modal.querySelector('[data-source="zip"]').onclick = () => zipInput.click();
+    modal.querySelector('[data-source="zip"]').onclick = async () => {
+      if (window.showOpenFilePicker) {
+        try {
+          const [handle] = await showOpenFilePicker({
+            multiple: false,
+            types: [{ description: 'ZIP project', accept: { 'application/zip': ['.zip'] } }]
+          });
+          if (handle) await importFileSystemSource(handle, handle.name.replace(/\.zip$/i, ''));
+          return;
+        } catch (e) {
+          if (e?.name === 'AbortError') return;
+        }
+      }
+      zipInput.click();
+    };
     modal.querySelector('[data-source="files"]').onclick = () => filesInput.click();
     modal.querySelector('[data-source="folder"]').onclick = async () => {
       if (window.showDirectoryPicker) {
@@ -1336,10 +1289,13 @@
       });
     }
     explorer?.addEventListener('contextmenu', e => e.stopPropagation());
+    state.previews = new EditorPreviewManager(state);
+    for (const provider of window.EditorPreviewProviders || []) state.previews.register(provider);
     state.workbench = new Workbench($('editorWorkbench'), {
       onActivate: activate,
       onBuiltin: (kind, g) => openBuiltin(kind, g),
       onClose: (t, g) => {
+        state.previews?.dispose(t);
         t.model?.dispose();
         t.editor?.dispose();
         state.workbench.removeTab(g, t.id);
@@ -1364,6 +1320,26 @@
       if (f) openZipFile(f).catch(logError);
     });
     $('newZipBtn').onclick = () => newProject().catch(logError);
+    $('saveProjectBtn').onclick = async () => {
+      try {
+        if (!state.fs?.canSave?.()) return;
+        const permission = await state.fs.permissionState?.();
+        if (permission === 'denied') {
+          state.saveProjectPermission = 'denied';
+          updateStatus();
+          return;
+        }
+        await state.fs.save();
+        state.dirty = false;
+        await refreshSaveProjectState();
+      } catch (e) {
+        if (e?.name === 'NotAllowedError' || e?.name === 'SecurityError') {
+          state.saveProjectPermission = 'denied';
+          updateStatus();
+        }
+        logError(e);
+      }
+    };
     $('saveZipBtn').onclick = async () => {
       try {
         const blob = await state.fs.exportZip();

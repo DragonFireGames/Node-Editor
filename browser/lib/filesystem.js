@@ -141,7 +141,17 @@
       return Array.from(this.directories).filter(Boolean);
     }
 
+    canSave() {
+      return !!this.provider?.canSave;
+    }
+
+    async permissionState() {
+      if (!this.canSave()) return 'denied';
+      return await this.provider.permissionState?.() || 'granted';
+    }
+
     async save() {
+      if (!this.canSave()) throw new Error('This workspace does not have a writable File System API source.');
       return await this.provider.save();
     }
 
@@ -153,6 +163,7 @@
   class DirectoryHandleProvider {
     constructor(dirHandle, sync) {
       this.dirHandle = dirHandle;
+      this.canSave = true;
       this.sync = sync;
       this.cache = new Map();
       this.directories = new Set(['']);
@@ -218,6 +229,10 @@
         await curr.removeEntry(fileName);
       } catch (e) {}
     }
+    async permissionState() {
+      if (typeof this.dirHandle?.queryPermission !== 'function') return 'granted';
+      try { return await this.dirHandle.queryPermission({ mode: 'readwrite' }); } catch (_) { return 'denied'; }
+    }
     async save() {
       for (const [path, binary] of this.cache) {
         await this._persistFile(path, binary);
@@ -234,6 +249,7 @@
   class ZipFileHandleProvider {
     constructor(fileHandle, sync) {
       this.fileHandle = fileHandle;
+      this.canSave = true;
       this.sync = sync;
       this.cache = new Map();
       this.directories = new Set(['']);
@@ -276,6 +292,10 @@
       this.writing = true;
       try { await this.save(); } finally { this.writing = false; }
     }
+    async permissionState() {
+      if (typeof this.fileHandle?.queryPermission !== 'function') return 'granted';
+      try { return await this.fileHandle.queryPermission({ mode: 'readwrite' }); } catch (_) { return 'denied'; }
+    }
     async save() {
       for (const dir of this.directories) if (dir) this.zip.folder(dir);
       this.cache.forEach((data, path) => this.zip.file(path, data));
@@ -295,6 +315,7 @@
   class ZipProvider {
     constructor(zipInstance, sync) {
       this.zip = zipInstance;
+      this.canSave = false;
       this.sync = sync;
       this.cache = new Map();
       this.directories = new Set(['']);

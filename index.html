@@ -8,13 +8,25 @@
 <script src="browser/lib/endpoints/static.js"></script>
 <script src="browser/console.js"></script>
 <script src="editor/file-icons.js"></script>
+<script src="editor/previews/manager.js"></script>
+<script src="editor/previews/vendor/showdown.js"></script>
+<script src="editor/previews/hdr.js"></script>
+<script src="editor/previews/obj.js"></script>
+<script src="editor/previews/markdown.js"></script>
+<script src="editor/previews/html.js"></script>
+<script src="editor/previews/image.js"></script>
+<script src="editor/previews/audio.js"></script>
+<script src="editor/previews/video.js"></script>
+<script src="editor/previews/monaco.js"></script>
+<script src="editor/previews/raw.js"></script>
+<script src="editor/previews/piskel.js"></script>
 <script src="editor/file-manager.js"></script>
 <script src="editor/terminal.js"></script>
 <script src="editor/run-config.js"></script>
 <script src="editor/workbench.js"></script>
 <script src="editor/editor.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.0/min/vs/loader.js"></script><style>.import-source-modal{width:min(560px,calc(100vw - 40px));box-sizing:border-box}.import-dropzone{border:2px dashed #555;padding:32px 20px;text-align:center;color:#aaa;cursor:pointer;margin:16px 0}.import-dropzone.dragover{border-color:#0f0;color:#0f0;background:#ffffff08}.editor-modal-actions{display:flex;gap:8px;justify-content:center}.editor-modal-actions button{background:#333;color:#eee;border:1px solid #444;padding:8px 12px;cursor:pointer}.editor-modal-actions button:hover{background:#444}.editor-modal-close{background:none;border:0;color:#aaa;font-size:22px;cursor:pointer}.editor-modal-close:hover{color:#fff}</style></head><body>
-<div id="toolbar"><div class="toolbar-left"><button id="uploadZipBtn">Upload ZIP</button><button id="newZipBtn">New Project</button></div><div class="toolbar-center"><span id="projectName">Workspace</span></div><div class="toolbar-right"><button id="runBtn">Run</button><button id="runConfigBtn">Run Config</button><button id="saveZipBtn">Save ZIP</button></div></div>
+<div id="toolbar"><div class="toolbar-left"><button id="uploadZipBtn">Upload ZIP</button><button id="newZipBtn">New Project</button></div><div class="toolbar-center"><span id="projectName">Workspace</span></div><div class="toolbar-right"><button id="runBtn">Run</button><button id="runConfigBtn">Run Config</button><button id="saveProjectBtn" disabled>Save Project</button><button id="saveZipBtn">Export ZIP</button></div></div>
 <div id="main"><div id="activityBar" aria-label="Activity Bar">
   <button class="activity-button active" id="activityExplorer" title="Explorer" aria-label="Explorer">
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4.5A1.5 1.5 0 0 1 4.5 3h6.1l1.6 2H19.5A1.5 1.5 0 0 1 21 6.5v12A1.5 1.5 0 0 1 19.5 20h-15A1.5 1.5 0 0 1 3 18.5z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M3.5 6.5h17" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
