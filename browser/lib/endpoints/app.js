@@ -3616,7 +3616,25 @@
     async handleRequest(request,type) {
       if (!this.emulator?.context?.handleRequest) return null;
       var response = await this.emulator.context.handleRequest(request, type);
-      if (response) Object.setPrototypeOf(response, Response.prototype);
+      if (!response) return null;
+
+      // The Node runtime lives in a separate iframe realm. Keep its own
+      // properties, but hand the browser a Response created in this realm.
+      if (Object.getPrototypeOf(response) !== Response.prototype) {
+        const descriptors = Object.getOwnPropertyDescriptors(response);
+        const fixed = new Response(await response.arrayBuffer(), {
+          status: response.status,
+          statusText: response.statusText,
+          headers: new Headers(response.headers)
+        });
+
+        for (const key of Reflect.ownKeys(descriptors)) {
+          if (key in fixed) continue;
+          try { Object.defineProperty(fixed, key, descriptors[key]); } catch (_) {}
+        }
+        response = fixed;
+      }
+
       return response;
     }
     async handleSocket(absoluteUrl, protocols) {
