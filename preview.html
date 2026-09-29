@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Standalone Browser</title>
+  <style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#111}#browser{display:block;width:100%;height:100%;border:0}</style>
+  <script src="browser/lib/network.js"></script>
+  <script src="browser/external/peer.js"></script>
+  <script src="browser/lib/endpoints/peer.js" data-layer="new URLSearchParams(window.location.search).get('peerLayer')"></script>
+  <script>
+    (async function() {
+      const query = new URLSearchParams(location.search);
+      const peerLayer = query.get('peerLayer') || 'peer';
+      const target = query.get('u') || '';
+
+      const primaryProxy = new ProxyNetworkEndpoint(
+        'https://proxy.dragonfire7z.workers.dev/',
+        true
+      );
+
+      const fallbackProxy = new ProxyNetworkEndpoint('', true, false);
+
+      const defaultFallback = new NetworkEndpoint();
+      const directFallbackRequest = defaultFallback.handleRequest.bind(defaultFallback);
+
+      defaultFallback.handleRequest = async function(request, type) {
+        try {
+          const url = new URL(request.url);
+          if (url.protocol === 'http:' || url.protocol === 'https:') return null;
+        } catch (_) {}
+
+        return await directFallbackRequest(request, type);
+      };
+
+      defaultFallback.__browserDefaultFallback = true;
+
+      const network = new Network();
+
+      network.appendEndpoint(primaryProxy);
+      network.appendEndpoint(fallbackProxy);
+      network.appendEndpoint(defaultFallback);
+
+      network.__browserBaseEndpoints = {
+        primary: primaryProxy,
+        fallback: fallbackProxy,
+        defaultFallback
+      };
+
+      // Peer is added only to the preview's network.
+      const peerEndpoint = new PeerEndpoint();
+      network.prependEndpoint(peerEndpoint);
+
+      window.__sharedBrowserNetwork = network;
+      window.browserNetwork = network;
+    })();
+  </script>
+</head>
+<body><iframe id="browser"></iframe></body>
+<script>
+  (function(){
+    const query = new URLSearchParams(location.search);
+    const peerLayer = query.get('peerLayer') || 'peer';
+    const target = query.get('u') || '';
+
+    const childQuery = new URLSearchParams();
+
+    if (target) {
+      childQuery.set('start', target);
+      childQuery.set('default', target);
+    }
+    const frame = document.getElementById('browser');
+    if (frame) {
+      frame.src = 'browser/browser.html' +
+        (childQuery.toString() ? '?' + childQuery.toString() : '');
+    }
+  })();
+</script>
+</html>

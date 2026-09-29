@@ -19,7 +19,7 @@
     <script src="lib/npm.js"></script>
     <script src="lib/endpoints/app.js"></script>
     <script src="lib/endpoints/static.js"></script>
-    <script src="lib/endpoints/peer.js" data-layer="peer"></script>
+    <script src="lib/endpoints/peer.js" data-layer="new URLSearchParams(window.location.search).get('peerLayer')"></script>
     <script src="lib/keepalive.js"></script>
   </head>
   <style>

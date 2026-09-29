@@ -56,6 +56,9 @@
     previews: null,
     terminalTabs: new Map(),
     browserTabs: new Map(),
+    peerServers: new Map(),
+    peerRuntimeEndpoint: null,
+    peerSettings: {layer: '', pagePath: '/'},
     environment: {},
     behavior: {
       autoSaveOnRun: false,
@@ -139,6 +142,21 @@
   function makeProjectId() {
     return crypto.randomUUID?.() || 'project-' + Date.now() + '-' + Math.random().toString(36).slice(2);
   }
+  function makePeerLayer() {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    if (crypto.getRandomValues) {
+      const values = new Uint32Array(6);
+      crypto.getRandomValues(values);
+      return Array.from(values, value => chars[value % chars.length]).join('');
+    }
+    return Array.from({length: 6}, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+  }
+  function normalizePeerPagePath(value) {
+    let path = String(value ?? '').trim();
+    if (!path) return '/';
+    if (!path.startsWith('/')) path = '/' + path;
+    return path;
+  }
   function loadProjectMetadata() {
     const meta = readEditorJson(EDITOR_PROJECT_PATH);
     if (meta?.id && String(meta.id).trim()) state.projectId = String(meta.id).trim();
@@ -146,14 +164,26 @@
       state.projectName = String(meta.name).trim();
       state.projectKey = state.projectName;
     }
+    state.peerSettings = {
+      layer: String(meta?.peerLayer || '').trim() || makePeerLayer(),
+      pagePath: normalizePeerPagePath(meta?.pagePath)
+    };
     if (!state.projectId) state.projectId = makeProjectId();
     return meta;
   }
   function saveProjectMetadata() {
     if (!state.fs) return;
     if (!state.projectId) state.projectId = makeProjectId();
+    if (!state.peerSettings) state.peerSettings = {layer: makePeerLayer(), pagePath: '/'};
+    state.peerSettings.layer = String(state.peerSettings.layer || makePeerLayer()).trim();
+    state.peerSettings.pagePath = normalizePeerPagePath(state.peerSettings.pagePath);
     state.fs.mkdirSync?.(EDITOR_DIR);
-    state.fs.writeFileSync(EDITOR_PROJECT_PATH, JSON.stringify({id: state.projectId, name: state.projectName}, null, 2));
+    state.fs.writeFileSync(EDITOR_PROJECT_PATH, JSON.stringify({
+      id: state.projectId,
+      name: state.projectName,
+      peerLayer: state.peerSettings.layer,
+      pagePath: state.peerSettings.pagePath
+    }, null, 2));
   }
   function loadEditorConfig() {
     const config = readEditorJson(EDITOR_CONFIG_PATH);
@@ -307,7 +337,16 @@
       try {
         try {
           fs.mkdirSync?.(EDITOR_DIR);
-          fs.writeFileSync(EDITOR_PROJECT_PATH, JSON.stringify({id: projectId, name: projectName}, null, 2));
+          const peerSettings = state.projectId === projectId && state.peerSettings ? {
+            layer: String(state.peerSettings.layer || makePeerLayer()).trim(),
+            pagePath: normalizePeerPagePath(state.peerSettings.pagePath)
+          } : {layer: makePeerLayer(), pagePath: '/'};
+          fs.writeFileSync(EDITOR_PROJECT_PATH, JSON.stringify({
+            id: projectId,
+            name: projectName,
+            peerLayer: peerSettings.layer,
+            pagePath: peerSettings.pagePath
+          }, null, 2));
         } catch (_) {}
         const blob = await fs.exportZip();
         const cache = await caches.open(PROJECT_CACHE_NAME);
@@ -499,7 +538,8 @@
       run: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M7 5v14l11-7z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>',
       environment: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="7" cy="7" r="2" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="17" cy="17" r="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8.5 8.5 15.5 15.5M15.5 8.5 8.5 15.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
       settings: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
-      welcome: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M4 5h16v14H4z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M7 9h10M7 13h7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>'
+      welcome: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M4 5h16v14H4z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M7 9h10M7 13h7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
+      peer: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="6" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="18" cy="7" r="3" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="18" cy="17" r="3" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m8.5 10.8 6-2.7M8.5 13.2l6 2.7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>'
     };
     return icons[kind] || '';
   }
@@ -508,7 +548,7 @@
       id: 'builtin:' + kind + ':' + Math.random().toString(36).slice(2),
       kind: 'builtin',
       builtin: kind,
-      title: kind === 'browser' ? 'Browser' : kind === 'terminal' ? 'Terminal' : kind === 'run' ? 'Run Configuration' : kind === 'settings' ? 'Settings' : kind === 'environment' ? 'Environment Variables' : 'Welcome',
+      title: kind === 'browser' ? 'Browser' : kind === 'peer' ? 'Peer Server' : kind === 'terminal' ? 'Terminal' : kind === 'run' ? 'Run Configuration' : kind === 'settings' ? 'Settings' : kind === 'environment' ? 'Environment Variables' : 'Welcome',
       icon: builtinIcon(kind),
       view: 'edit'
     };
@@ -551,7 +591,7 @@
     card.innerHTML = '<h2>Welcome</h2><p>Choose what you want to add to this pane.</p>';
     const actions = document.createElement('div');
     actions.className = 'workbench-empty-actions';
-    for (const [k, label] of [['browser', 'Browser'], ['terminal', 'Terminal'], ['run', 'Run Configuration'], ['environment', 'Environment Variables'], ['welcome', 'Welcome']]) {
+    for (const [k, label] of [['browser', 'Browser'], ['peer', 'Peer Server'], ['terminal', 'Terminal'], ['run', 'Run Configuration'], ['environment', 'Environment Variables'], ['welcome', 'Welcome']]) {
       const b = document.createElement('button');
       b.textContent = label;
       b.onclick = () => openBuiltin(k, g);
@@ -600,6 +640,7 @@
         return;
       }
       if (t.builtin === 'browser') renderBrowser(g, t);
+      else if (t.builtin === 'peer') renderPeerServer(g, t);
       else if (t.builtin === 'terminal') renderTerminal(g, t);
       else if (t.builtin === 'run') renderRunConfig(g);
       else if (t.builtin === 'environment') renderEnvironment(g);
@@ -801,6 +842,179 @@
     if (!isBrowserFrameReady(info.frame)) throw new Error('Browser tab was created but its load API is not ready.');
     return net;
   }
+  function peerServerDomain() {
+    return String(state.runConfig?.config?.domain || 'http://localhost:3000/').trim();
+  }
+  function peerServerOrigin() {
+    const domain = peerServerDomain();
+    try { return new URL(domain).origin; } catch (_) { return domain.replace(/\/+$/, ''); }
+  }
+  function getPeerRuntimeEndpoint() {
+    if (!state.peerRuntimeEndpoint) {
+      state.peerRuntimeEndpoint = {
+        enabled: true,
+        __editorPeerRuntimeEndpoint: true,
+        async handleRequest(request, type) {
+          const endpoint = state.staticEndpoint || state.nodeEmulator?.endpoint;
+          if (!endpoint || typeof endpoint.handleRequest !== 'function') return null;
+          return await endpoint.handleRequest(request, type);
+        },
+        async handleSocket(url, protocols) {
+          const endpoint = state.staticEndpoint || state.nodeEmulator?.endpoint;
+          if (!endpoint || typeof endpoint.handleSocket !== 'function') return null;
+          return await endpoint.handleSocket(url, protocols);
+        }
+      };
+    }
+    return state.peerRuntimeEndpoint;
+  }
+  async function preparePeerEndpoint() {
+    const net = state.browserNetwork || await ensureBrowser();
+    state.runConfig?.detect?.();
+    const c = state.runConfig?.config || {};
+    await setupRuntime(net);
+    if (c.serverType === 'node') {
+      if (!state.nodeEmulator) throw new Error('Node runtime is not ready.');
+      const terminal = getOrOpenTerminal();
+      const terminalView = state.terminalTabs.get(terminal.id);
+      terminalView?.attach(state.nodeEmulator);
+      if (c.nodeCommand) await terminalView?.runCommand(c.nodeCommand);
+      const ready = await state.nodeEmulator.waitForServer?.(10000, 50);
+      if (!ready) throw new Error('Node command finished, but no listening server was created.');
+    }
+    return getPeerRuntimeEndpoint();
+  }
+  async function stopPeerServer(t) {
+    const info = state.peerServers.get(t?.id);
+    if (!info) return;
+    state.peerServers.delete(t.id);
+    try { await info.server?.close?.(); } catch (_) {}
+    if (!state.peerServers.size) { try { window.keepAlive?.disable?.(); } catch (_) {} }
+    try { info.frame?.remove(); } catch (_) {}
+    info.server = null;
+    if (info.status) info.status.textContent = 'Stopped';
+    if (info.runButton) info.runButton.disabled = false;
+    if (info.stopButton) info.stopButton.disabled = true;
+    if (info.openButton) info.openButton.disabled = true;
+    if (info.layer) info.layer.disabled = false;
+    if (info.pagePath) info.pagePath.disabled = false;
+    if (info.result) info.result.value = '';
+  }
+  function renderPeerServer(g, t) {
+    const wrap = document.createElement('div');
+    wrap.className = 'builtin-peer-server';
+    const title = document.createElement('h2');
+    title.textContent = 'Peer Server';
+    const description = document.createElement('p');
+    description.textContent = 'Run this project as a PeerJS-backed server. Other browsers can open the generated Preview URL with the same peer layer.';
+    const form = document.createElement('div');
+    form.className = 'peer-server-form';
+    const layerLabel = document.createElement('label');
+    layerLabel.textContent = 'Peer Layer';
+    const layer = document.createElement('input');
+    layer.type = 'text'; layer.value = 'peer'; layer.placeholder = 'peer'; layer.autocomplete = 'off';
+    const domainLabel = document.createElement('label');
+    domainLabel.textContent = 'Project Domain';
+    const domain = document.createElement('input');
+    domain.type = 'text'; domain.readOnly = true;
+    const pathLabel = document.createElement('label');
+    pathLabel.textContent = 'Page Path';
+    const pagePath = document.createElement('input');
+    pagePath.type = 'text'; pagePath.placeholder = '/'; pagePath.autocomplete = 'off';
+    const actions = document.createElement('div');
+    actions.className = 'peer-server-actions';
+    const run = document.createElement('button');
+    run.textContent = 'Run Peer Server'; run.className = 'primary';
+    const stop = document.createElement('button');
+    stop.textContent = 'Stop'; stop.disabled = true;
+    const open = document.createElement('button');
+    open.textContent = 'Open Result in New Tab'; open.disabled = true;
+    actions.append(run, stop, open);
+    const status = document.createElement('div');
+    status.className = 'peer-server-status'; status.textContent = 'Stopped';
+    const result = document.createElement('input');
+    result.className = 'peer-server-result'; result.readOnly = true; result.placeholder = 'Preview URL';
+    form.append(layerLabel, layer, domainLabel, domain, pathLabel, pagePath, actions, status, result);
+    wrap.append(title, description, form);
+    g.viewBody.appendChild(wrap);
+    const savedPeerLayer = String(state.peerSettings?.layer || '').trim() || makePeerLayer();
+    const savedPagePath = normalizePeerPagePath(state.peerSettings?.pagePath);
+    state.peerSettings = {layer: savedPeerLayer, pagePath: savedPagePath};
+    saveProjectMetadata();
+    const info = {server:null,frame:null,status,runButton:run,stopButton:stop,openButton:open,result,layer,domain,pagePath,layerValue:savedPeerLayer,resultUrl:''};
+    layer.value = savedPeerLayer;
+    pagePath.value = savedPagePath;
+    const updateDomain = () => { domain.value = peerServerDomain(); };
+    const buildResult = () => {
+      const url = new URL('preview.html', location.href);
+      const path = normalizePeerPagePath(pagePath.value);
+      url.searchParams.set('peerLayer', layer.value.trim());
+      url.searchParams.set('u', peerServerOrigin() + path);
+      return url.href;
+    };
+    const savePeerSettings = () => {
+      state.peerSettings.layer = layer.value.trim() || state.peerSettings.layer || makePeerLayer();
+      state.peerSettings.pagePath = normalizePeerPagePath(pagePath.value);
+      layer.value = state.peerSettings.layer;
+      pagePath.value = state.peerSettings.pagePath;
+      saveProjectMetadata();
+      state.markDirty?.('editor/project.json');
+    };
+    const fail = message => { status.textContent = message; status.classList.add('error'); };
+    layer.addEventListener('input', () => { status.classList.remove('error'); savePeerSettings(); if (!info.server) result.value = ''; });
+    pagePath.addEventListener('input', () => { savePeerSettings(); if (!info.server) result.value = ''; });
+    run.onclick = async () => {
+      savePeerSettings();
+      const selectedLayer = state.peerSettings.layer;
+      if (!selectedLayer || info.server) return;
+      status.classList.remove('error'); run.disabled = true; stop.disabled = true; open.disabled = true; result.value = '';
+      status.textContent = 'Starting project…'; updateDomain();
+      try {
+        const frame = document.createElement('iframe');
+        frame.className = 'peer-host-frame';
+        frame.src = 'browser/peer-host.html?peerLayer=' + encodeURIComponent(selectedLayer);
+        wrap.appendChild(frame); info.frame = frame;
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('Peer server host failed to initialize.')), 10000);
+          frame.addEventListener('load', () => { clearTimeout(timer); resolve(); }, {once:true});
+        });
+        const hostWindow = frame.contentWindow;
+        if (typeof hostWindow.peerServerExists === 'function' && await hostWindow.peerServerExists(domain.value.trim())) throw new Error('pick a new layer');
+        const endpoint = await preparePeerEndpoint();
+        if (!endpoint) throw new Error('Project runtime endpoint is not available.');
+        const server = await hostWindow.createPeerServer(endpoint, peerServerDomain());
+        try { await server.ready; }
+        catch (error) {
+          if (/unavailable-id|already registered/i.test(String(error?.message || error))) throw new Error('pick a new layer');
+          throw error;
+        }
+        info.server = server; info.hostWindow = hostWindow; info.layerValue = selectedLayer;
+        state.peerServers.set(t.id, info);
+        server.addEventListener?.('close', () => {
+          if (state.peerServers.get(t.id)?.server === server) void stopPeerServer(t);
+        });
+        try { window.keepAlive?.enable?.(); window.keepAlive?.start?.(); } catch (_) {}
+        result.value = buildResult(); info.resultUrl = result.value; status.textContent = 'Running';
+        stop.disabled = false; open.disabled = false; layer.disabled = true; pagePath.disabled = true;
+      } catch (error) {
+        try { await info.server?.close?.(); } catch (_) {}
+        try { info.frame?.remove(); } catch (_) {}
+        info.server = null; info.frame = null; info.hostWindow = null;
+        layer.disabled = false; run.disabled = false; stop.disabled = true; open.disabled = true;
+        fail(/pick a new layer/i.test(String(error?.message || error)) ? 'pick a new layer' : String(error?.message || error));
+      }
+    };
+    stop.onclick = () => stopPeerServer(t);
+    open.onclick = () => { if (info.server && result.value) window.open(result.value, '_blank', 'noopener'); };
+    updateDomain();
+    const existing = state.peerServers.get(t.id);
+    if (existing) {
+      const savedLayer = existing.layerValue || savedPeerLayer;
+      const savedResult = existing.resultUrl || existing.result?.value || '';
+      Object.assign(existing, {status,runButton:run,stopButton:stop,openButton:open,result,layer,domain,pagePath});
+      layer.value = savedLayer; pagePath.value = savedPagePath; result.value = savedResult; layer.disabled = true; pagePath.disabled = true; run.disabled = true; stop.disabled = false; open.disabled = !savedResult; status.textContent = 'Running';
+    }
+  }
   function renderTerminal(g, t) {
     const wrap = document.createElement('div');
     wrap.className = 'builtin-terminal';
@@ -997,7 +1211,7 @@
     card.innerHTML = '<h2>Welcome</h2><p>Create a new project from the toolbar or open a built-in tool here.</p>';
     const actions = document.createElement('div');
     actions.className = 'workbench-empty-actions';
-    for (const [kind, label] of [['browser', 'Browser'], ['terminal', 'Terminal'], ['run', 'Run Configuration'], ['environment', 'Environment Variables']]) {
+    for (const [kind, label] of [['browser', 'Browser'], ['peer', 'Peer Server'], ['terminal', 'Terminal'], ['run', 'Run Configuration'], ['environment', 'Environment Variables']]) {
       const b = document.createElement('button');
       b.textContent = label;
       b.onclick = () => openBuiltin(kind, g);
@@ -1090,6 +1304,12 @@
         throw e;
       }
       for (const t of state.terminalTabs.values()) t.attach(emulator);
+    }
+    // A runtime restart invalidates WebSocket backends created by the old runtime.
+    // Keep the PeerServer itself alive, but make existing peer sockets reconnect
+    // against the newly-created runtime endpoint.
+    for (const info of state.peerServers.values()) {
+      try { info.server?.resetRuntime?.(); } catch (_) {}
     }
     state.runConfig?.refreshEndpointList?.();
     state.runDebugRefresh?.();
@@ -1387,6 +1607,12 @@
     state.browserFrame = null;
     for (const info of state.browserTabs.values()) { try { info?.frame?.remove(); } catch (_) {} }
     state.browserTabs.clear();
+    for (const info of state.peerServers.values()) {
+      try { void info?.server?.close?.(); } catch (_) {}
+      try { info?.frame?.remove(); } catch (_) {}
+    }
+    state.peerServers.clear();
+    try { window.keepAlive?.disable?.(); } catch (_) {}
   }
   async function replaceFileSystem(fs, name, openFirst = true, options = {}) {
     saveWorkspaceLayout();
@@ -1732,6 +1958,7 @@
       onBuiltin: (kind, g) => openBuiltin(kind, g),
       onLayoutChange: () => scheduleWorkspaceLayoutSave(),
       onClose: (t, g) => {
+        if (t?.builtin === 'peer') void stopPeerServer(t);
         state.previews?.dispose(t);
         t.model?.dispose();
         t.editor?.dispose();

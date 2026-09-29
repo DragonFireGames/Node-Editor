@@ -279,7 +279,7 @@
       document.querySelectorAll('.workbench-builtin-menu').forEach(x => x.remove());
       const menu = document.createElement('div');
       menu.className = 'workbench-builtin-menu';
-      menu.innerHTML = '<button data-kind="browser">Browser</button><button data-kind="terminal">Terminal</button><button data-kind="run">Run Configuration</button><button data-kind="environment">Environment Variables</button><button data-kind="welcome">Welcome</button>';
+      menu.innerHTML = '<button data-kind="browser">Browser</button><button data-kind="peer">Peer Server</button><button data-kind="terminal">Terminal</button><button data-kind="run">Run Configuration</button><button data-kind="environment">Environment Variables</button><button data-kind="welcome">Welcome</button>';
       const r = anchor.getBoundingClientRect();
       menu.style.left = Math.min(r.left, innerWidth - 210) + 'px';
       menu.style.top = r.bottom + 2 + 'px';

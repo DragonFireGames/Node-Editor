@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><title>Peer Server Host</title>
+<script src="lib/network.js"></script>
+<script src="external/peer.js"></script>
+<script>window.__peerLayer = new URLSearchParams(location.search).get('peerLayer') || 'peer';</script>
+<script src="lib/endpoints/peer.js"></script>
+<script>
+window.createPeerServer = async function(endpoint, domain){
+  if (typeof PeerServer !== 'function') throw new Error('PeerServer is unavailable.');
+  return new PeerServer(endpoint, domain);
+};
+</script></head><body></body></html>

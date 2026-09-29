@@ -7,7 +7,7 @@
     throw new Error("PeerJS is required before peer.js.");
   }
 
-  const layer = (v=>{try{return eval(v)}catch(e){return v}})(document.currentScript.getAttribute('data-layer')) || "peer";
+  const layer = window.__peerLayer || (v=>{try{return eval(v)}catch(e){return v}})(document.currentScript.getAttribute('data-layer')) || "peer";
   console.log(`Peer layer '${layer}'`);
 
   const clientPeerId = layer + "-client-" + randomId();
@@ -598,6 +598,18 @@
       this.sockets.delete(message.id);
       if (entry.backend && typeof entry.backend.closeClient === 'function') {
         try { entry.backend.closeClient(message.code || 1000,message.reason || ''); } catch (_) {}
+      }
+    }
+
+    resetRuntime() {
+      if (this.closed) return;
+      for (const [id,entry] of this.sockets) {
+        entry.closed = true;
+        this.sockets.delete(id);
+        if (entry.backend && typeof entry.backend.closeClient === 'function') {
+          try { entry.backend.closeClient(1012,'Server restarting.'); } catch (_) {}
+        }
+        try { entry.connection?.send?.({type:'socket-close',id:id,code:1012,reason:'Server restarting.'}); } catch (_) {}
       }
     }
 
