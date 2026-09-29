@@ -5,6 +5,8 @@
       this.onActivate = options.onActivate || (() => {});
       this.onClose = options.onClose || (() => {});
       this.onBuiltin = options.onBuiltin || (() => {});
+      this.onLayoutChange = options.onLayoutChange || (() => {});
+      this.restoring = false;
       this.groups = new Map();
       this.nextId = 1;
       this.dragInfo = null;
@@ -16,6 +18,64 @@
       this.root.addEventListener('drop', e => this.handleDrop(e));
       document.addEventListener('dragend', () => this.hideDropPreview());
       this.createGroup();
+    }
+    notifyLayoutChange() {
+      if (!this.restoring) this.onLayoutChange(this.serialize());
+    }
+    serializeNode(node) {
+      if (!node) return null;
+      if (node.type === 'group') {
+        return {
+          type: 'group',
+          tabs: node.group.tabs.map(t => t.kind === 'file' ? {kind:'file', path:t.path, view:t.view} : {kind:'builtin', builtin:t.builtin}),
+          active: node.group.tabs.findIndex(t => t.id === node.group.active)
+        };
+      }
+      return {type:'split', dir:node.dir, ratio:node.ratio || .5, a:this.serializeNode(node.a), b:this.serializeNode(node.b)};
+    }
+    serialize() {
+      this.ensureRoot();
+      return {version:1, root:this.serializeNode(this.rootNode)};
+    }
+    restore(layout, makeTab) {
+      if (!layout?.root || typeof makeTab !== 'function') return false;
+      this.restoring = true;
+      try {
+        this.groups.clear();
+        this.nextId = 1;
+        const build = data => {
+          if (!data) return null;
+          if (data.type === 'group') {
+            const g = this.createGroup();
+            for (const tabData of data.tabs || []) {
+              const tab = makeTab(tabData);
+              if (!tab) continue;
+              tab.group = g;
+              g.tabs.push(tab);
+            }
+            if (g.tabs.length) g.active = g.tabs[Math.max(0, Math.min(data.active ?? 0, g.tabs.length - 1))]?.id || g.tabs[0].id;
+            return {type:'group', group:g};
+          }
+          if (data.type === 'split') {
+            const a = build(data.a), b = build(data.b);
+            if (!a) return b;
+            if (!b) return a;
+            const split = {type:'split', id:'split-'+this.nextId++, dir:data.dir === 'vertical' ? 'vertical' : 'horizontal', a, b, ratio:Math.max(.12, Math.min(.88, Number(data.ratio) || .5)), parent:null};
+            a.parent = split;
+            b.parent = split;
+            return split;
+          }
+          return null;
+        };
+        const root = build(layout.root);
+        if (!root) return false;
+        root.parent = null;
+        this.rootNode = root;
+        this.rebuild();
+        return true;
+      } finally {
+        this.restoring = false;
+      }
     }
     createGroup() {
       const g = {
@@ -39,6 +99,7 @@
         group: this.createGroup()
       };
       this.rebuild();
+      this.notifyLayoutChange();
     }
     ensureRoot() {
       if (!this.rootNode) this.rootNode = {
@@ -148,6 +209,7 @@
         removeEventListener('mousemove', move);
         removeEventListener('mouseup', up);
         document.body.classList.remove('resizing');
+        this.notifyLayoutChange();
       };
       addEventListener('mousemove', move);
       addEventListener('mouseup', up);
@@ -250,6 +312,7 @@
       g.active = id;
       this.renderGroup(g);
       this.onActivate(t, g);
+      this.notifyLayoutChange();
     }
     removeTab(g, id) {
       const idx = g.tabs.findIndex(x => x.id === id);
@@ -267,6 +330,7 @@
         this.renderGroup(g);
       }
       if (!g.tabs.length) this.collapseEmptyGroup(g);
+      else this.notifyLayoutChange();
     }
     showEmpty(g) {
       this.onActivate(null, g);
@@ -443,6 +507,7 @@
         if (parent.a === targetNode) parent.a = split; else parent.b = split;
       } else this.rootNode = split;
       this.rebuild();
+      this.notifyLayoutChange();
       return newGroup;
     }
     moveTab(tab, source, target) {
@@ -459,6 +524,7 @@
       this.renderGroup(target);
       this.activateTab(target, tab.id);
       if (!source.tabs.length) this.collapseEmptyGroup(source);
+      else this.notifyLayoutChange();
     }
   }
   window.Workbench = Workbench;

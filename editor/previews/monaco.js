@@ -51,6 +51,9 @@
             wordWrap: 'off'
           });
           ctx.tab.editor = editor;
+          ctx.addCleanup?.(() => {
+            try { editor.dispose(); } catch (_) {}
+          });
           if (!ctx.tab.listener) ctx.tab.listener = model.onDidChangeContent(() => {
             if (ctx.tab.view !== 'edit' || !ctx.state.fs) return;
             ctx.writeText(model.getValue());

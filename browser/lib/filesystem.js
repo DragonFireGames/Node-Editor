@@ -155,6 +155,33 @@
       return await this.provider.save();
     }
 
+    async saveAs(suggestedName = 'workspace.zip') {
+      if (typeof showSaveFilePicker !== 'function') throw new Error('The File System Access API is unavailable.');
+      if (typeof JSZip === 'undefined') throw new Error('JSZip library required.');
+      const handle = await showSaveFilePicker({
+        suggestedName,
+        types: [{ description: 'ZIP project', accept: { 'application/zip': ['.zip'] } }]
+      });
+      if (!handle) return false;
+      const blob = await this.exportZip();
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      const provider = new ZipFileHandleProvider(handle, this.sync);
+      await provider.init();
+      this.provider = provider;
+      this.sourceMode = 2;
+      this.directories = new Set(['']);
+      for (const path of provider.directories || []) this._addParentDirectories(path);
+      for (const rawPath of provider.cache.keys()) {
+        const path = this._normalize(rawPath);
+        const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+        if (parent) this._addParentDirectories(parent);
+      }
+      this.provider.directories = this.directories;
+      return true;
+    }
+
     async exportZip() {
       return await this.provider.exportZip();
     }

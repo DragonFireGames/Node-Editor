@@ -42,6 +42,7 @@
       const view = this.getView(file, id);
       if (!view) return false;
       const tab = group?.tabs?.find(t => t.id === file.id) || file;
+      const activation = tab._viewActivation || 0;
       const context = {
         state: this.state,
         file,
@@ -54,12 +55,10 @@
         exists: path => !!this.state.fs?.existsSync(path || file.path),
         writeText: (value, path = file.path) => {
           this.state.fs.writeFileSync(path, value);
-          this.state.dirty = true;
           this.state.markDirty?.(path);
         },
         writeBinary: (value, path = file.path) => {
           this.state.fs.writeFileSync(path, value);
-          this.state.dirty = true;
           this.state.markDirty?.(path);
         },
         resolvePath: relative => {
@@ -81,18 +80,18 @@
           return url;
         },
         markDirty: path => {
-          this.state.dirty = true;
           this.state.markDirty?.(path || file.path);
           this.state.updateStatus?.();
         },
-        isActive: () => group?.active === file.id && host.isConnected && tab.view === id,
+        isActive: () => group?.active === file.id && host.isConnected && tab.view === id && tab._viewActivation === activation,
         addCleanup: cleanup => {
           if (typeof cleanup !== 'function') return;
           (tab._previewCleanups ||= []).push(cleanup);
         }
       };
+      if (!context.isActive()) return false;
       await view.create(context);
-      return true;
+      return context.isActive();
     }
     dispose(file) {
       for (const cleanup of file?._previewCleanups || []) {
