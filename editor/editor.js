@@ -354,7 +354,6 @@
       if (t.builtin === 'browser') renderBrowser(g, t);
       else if (t.builtin === 'terminal') renderTerminal(g, t);
       else if (t.builtin === 'run') renderRunConfig(g);
-      else if (t.builtin === 'settings') renderSettings(g);
       else if (t.builtin === 'environment') renderEnvironment(g);
       else renderWelcome(g);
       t._viewElement = g.viewBody.lastElementChild || null;
@@ -489,7 +488,7 @@
     const frame = document.createElement('iframe');
     frame.id = 'browser-frame-' + g.id;
     const initialBrowserUrl = state.runConfig?.publicUrl?.() || 'http://localhost:3000/';
-    frame.src = '/_browser/browser.html?start=' + encodeURIComponent(initialBrowserUrl) + '&default=' + encodeURIComponent(initialBrowserUrl) + '&defer=1';
+    frame.src = 'browser/browser.html?start=' + encodeURIComponent(initialBrowserUrl) + '&default=' + encodeURIComponent(initialBrowserUrl) + '&defer=1';
     const bar = document.createElement('div');
     bar.className = 'builtin-browser-toolbar';
     const status = document.createElement('span');
@@ -670,40 +669,6 @@
   }
   function saveBehaviorSettings() {
     saveEditorSettings();
-  }
-  function renderSettings(g) {
-    const div = document.createElement('div');
-    div.className = 'editor-settings-page';
-    div.innerHTML = '<div class=editor-settings-header><h2>Settings</h2><p>Editor and workspace behavior. Run configuration is kept separately.</p></div><div class=editor-settings-section><h3>Saving</h3><label><input id=setting-auto-save type=checkbox> Save project before Run</label><label><input id=setting-auto-clear type=checkbox> Clear terminal before Run</label></div><div class=editor-settings-section><h3>Workspace</h3><label><input id=setting-confirm-replace type=checkbox> Confirm before replacing the workspace</label><label><input id=setting-confirm-delete type=checkbox> Confirm before deleting files and folders</label><label><input id=setting-show-hidden type=checkbox> Show hidden folders</label></div>';
-    g.viewBody.appendChild(div);
-    const a = div.querySelector('#setting-auto-save'), c = div.querySelector('#setting-auto-clear'), r = div.querySelector('#setting-confirm-replace'), d = div.querySelector('#setting-confirm-delete'), h = div.querySelector('#setting-show-hidden');
-    a.checked = state.behavior.autoSaveOnRun;
-    c.checked = state.behavior.autoClearTerminal;
-    r.checked = state.behavior.confirmBeforeReplace;
-    d.checked = state.behavior.confirmBeforeDelete;
-    h.checked = state.behavior.showHiddenFolders;
-    const sync = () => saveBehaviorSettings();
-    a.onchange = () => {
-      state.behavior.autoSaveOnRun = a.checked;
-      sync();
-    };
-    c.onchange = () => {
-      state.behavior.autoClearTerminal = c.checked;
-      sync();
-    };
-    r.onchange = () => {
-      state.behavior.confirmBeforeReplace = r.checked;
-      sync();
-    };
-    d.onchange = () => {
-      state.behavior.confirmBeforeDelete = d.checked;
-      sync();
-    };
-    h.onchange = () => {
-      state.behavior.showHiddenFolders = h.checked;
-      state.fileManager?.setShowHiddenFolders(h.checked);
-      sync();
-    };
   }
   function environmentStorageKey() {
     return 'editor.environment.' + (state.projectKey || 'default');
@@ -1076,7 +1041,7 @@
   function renderSidebarSettings() {
     const tree = $('tree');
     tree.classList.remove('activity-collapsed');
-    tree.innerHTML = '<div class="editor-settings-page sidebar-settings"><div class="editor-settings-header"><h2>Settings</h2><p>Editor and workspace behavior.</p></div><div class="editor-settings-section"><h3>Saving</h3><label><input id="setting-auto-save" type="checkbox"> Save project before Run</label><label><input id="setting-auto-clear" type="checkbox"> Clear terminal before Run</label></div><div class="editor-settings-section"><h3>Workspace</h3><label><input id="setting-confirm-replace" type="checkbox"> Confirm before replacing the workspace</label><label><input id="setting-confirm-delete" type="checkbox"> Confirm before deleting files and folders</label></div></div>';
+    tree.innerHTML = '<div class="editor-settings-page sidebar-settings"><div class="editor-settings-header"><h2>Settings</h2><p>Editor and workspace behavior.</p></div><div class="editor-settings-section"><h3>Saving</h3><label><input id="setting-auto-save" type="checkbox"> Save project before Run</label><label><input id="setting-auto-clear" type="checkbox"> Clear terminal before Run</label></div><div class="editor-settings-section"><h3>Workspace</h3><label><input id="setting-confirm-replace" type="checkbox"> Confirm before replacing the workspace</label><label><input id="setting-confirm-delete" type="checkbox"> Confirm before deleting files and folders</label><label><input id="setting-show-hidden" type="checkbox"> Show hidden folders</label></div></div>';
     const a = $('setting-auto-save'), c = $('setting-auto-clear'), r = $('setting-confirm-replace'), d = $('setting-confirm-delete'), h = $('setting-show-hidden');
     a.checked = state.behavior.autoSaveOnRun;
     c.checked = state.behavior.autoClearTerminal;
