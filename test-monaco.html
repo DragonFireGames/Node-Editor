@@ -1,0 +1,4 @@
+<!doctype html><html><body><div id="e" style="height:500px"></div><script src="editor/previews/vendor/monaco/vs/loader.js"></script><script>
+require.config({paths:{vs:'editor/previews/vendor/monaco/vs'}});
+require(['vs/editor/editor.main'], function(){document.body.dataset.monaco='ok'; monaco.editor.create(document.getElementById('e'),{value:'hello',language:'javascript'});}, function(e){document.body.dataset.error=String(e);});
+</script></body></html>

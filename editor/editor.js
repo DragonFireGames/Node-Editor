@@ -44,6 +44,7 @@
     workbench: null,
     dirty: false,
     monacoPromise: null,
+    ensureMonaco,
     previews: null,
     terminalTabs: new Map(),
     browserTabs: new Map(),
@@ -228,7 +229,7 @@
       if (typeof require !== 'function') return reject(new Error('Monaco loader unavailable'));
       require.config({
         paths: {
-          vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.0/min/vs'
+          vs: 'editor/previews/vendor/monaco/vs'
         }
       });
       require(['vs/editor/editor.main'], () => resolve(window.monaco), reject);
