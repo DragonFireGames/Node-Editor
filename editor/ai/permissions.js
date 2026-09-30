@@ -4,7 +4,7 @@
   const DEFAULTS = {
     readFiles: 'always', searchFiles: 'always', createFiles: 'ask', modifyFiles: 'ask', deleteFiles: 'ask',
     runCommands: 'ask', runScripts: 'ask', runProject: 'ask', readOutput: 'always',
-    readEditor: 'always', modifyEditor: 'ask', browser: 'ask'
+    readEditor: 'always', modifyEditor: 'ask', browser: 'ask', network: 'ask'
   };
   function load() {
     try {

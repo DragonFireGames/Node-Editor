@@ -2391,6 +2391,80 @@ window.getAIBrowserOutput = function(options={}) {
 };
 window.clearAIBrowserOutput = function(){ window.__aiBrowserOutput = []; };
 
+function aiSerializeValue(value, depth=0, seen=new WeakSet()) {
+  if (value === undefined) return '[undefined]';
+  if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return value;
+  if (typeof value === 'bigint') return String(value) + 'n';
+  if (typeof value === 'function') return String(value);
+  if (depth > 3) return '[Object]';
+  if (typeof value === 'object') {
+    if (seen.has(value)) return '[Circular]';
+    seen.add(value);
+    try {
+      if (value.outerHTML) return String(value.outerHTML).slice(0, 30000);
+      if (Array.isArray(value)) return value.slice(0, 100).map(v => aiSerializeValue(v, depth + 1, seen));
+      const out = {};
+      for (const key of Object.keys(value).slice(0, 100)) {
+        try { out[key] = aiSerializeValue(value[key], depth + 1, seen); } catch (_) { out[key] = '[Unreadable]'; }
+      }
+      return out;
+    } finally { seen.delete(value); }
+  }
+  return String(value);
+}
+
+window.getAIBrowserTabs = function() {
+  return tabs.map((tab, index) => ({
+    id: tab.id,
+    index,
+    active: tab.id === activeTabId,
+    title: String(tab.title || ''),
+    url: String(tab.url || tab.page?.history?.[tab.page.historyIndex] || '')
+  }));
+};
+window.openAIBrowserTab = function(url, activate=true) {
+  return createNewTab(String(url || appSettings.defaultTab), activate !== false)?.id || null;
+};
+window.switchAIBrowserTab = function(tabId) {
+  const tab = tabs.find(t => t.id === tabId);
+  if (!tab) throw new Error('Browser tab not found: ' + tabId);
+  switchTab(tab.id);
+  return {id:tab.id,title:tab.title,url:tab.url,active:true};
+};
+window.navigateAIBrowserTab = async function(tabId, url) {
+  const tab = tabs.find(t => t.id === tabId) || getActiveTab();
+  if (!tab) throw new Error('No browser tab is available.');
+  await navigateToInTab(tab, String(url || ''), true);
+  return {id:tab.id,title:tab.title,url:tab.url};
+};
+window.closeAIBrowserTab = function(tabId) {
+  const tab = tabs.find(t => t.id === tabId);
+  if (!tab) throw new Error('Browser tab not found: ' + tabId);
+  closeTab(tab.id);
+  return {closed:tab.id};
+};
+window.reloadAIBrowserTab = async function(tabId) {
+  const tab = tabs.find(t => t.id === tabId) || getActiveTab();
+  if (!tab) throw new Error('No browser tab is available.');
+  await navigateToInTab(tab, tab.url || appSettings.defaultTab, false, true, true);
+  return {id:tab.id,url:tab.url,reloaded:true};
+};
+window.getAIBrowserHTML = function(tabId, maxChars=100000) {
+  const tab = tabs.find(t => t.id === tabId) || getActiveTab();
+  if (!tab?.iframe?.contentDocument?.documentElement) throw new Error('Browser tab has no rendered document yet.');
+  const html = String(tab.iframe.contentDocument.documentElement.outerHTML || '');
+  const limit = Math.max(1000, Math.min(500000, Number(maxChars) || 100000));
+  return {id:tab.id,url:tab.url,title:tab.title,html:html.slice(0,limit),truncated:html.length>limit,totalLength:html.length};
+};
+window.runAIBrowserConsole = async function(tabId, code) {
+  const tab = tabs.find(t => t.id === tabId) || getActiveTab();
+  if (!tab?.page?.runCommand) throw new Error('Browser tab console is not available.');
+  const text = String(code || '').trim();
+  if (!text) throw new Error('Console command is empty.');
+  const result = await tab.page.runCommand(text);
+  return {id:tab.id,code:text,value:aiSerializeValue(result?.value),result:aiSerializeValue(result)};
+};
+
 setBrowserChromeHidden(browserChromeFullscreen);
 
 // Global Key Bindings Handler (F12, DevTools, Ctrl Shortcuts)
