@@ -12,6 +12,8 @@
       this.onDelete = options.onDelete || (() => {});
       this.showHiddenFolders = !!options.showHiddenFolders;
       this.selectedNode = null;
+      this.selectedNodes = new Set();
+      this.selectionAnchor = null;
       this.collapsedPaths = new Set();
       this.projectName = options.projectName || (() => 'Workspace');
       this.root = {
@@ -31,6 +33,22 @@
         this.performContextAction(action).catch(err => this.report(err));
       });
       document.body.addEventListener('click', () => this.hideContextMenu());
+      document.addEventListener('keydown', e => {
+        if (['INPUT','TEXTAREA'].includes(document.activeElement?.tagName)) return;
+        if ((e.key === 'a' || e.key === 'A') && (e.ctrlKey || e.metaKey)) {
+          e.preventDefault();
+          const visible = this.visibleNodes();
+          this.selectedNodes = new Set(visible.map(n => n.path));
+          this.selectedNode = visible.at(-1) || null;
+          this.selectionAnchor = this.selectedNode;
+          this.updateSelectionUI();
+          return;
+        }
+        if ((e.key === 'Delete' || e.key === 'Backspace') && this.selectedNodes.size) {
+          e.preventDefault();
+          this.deleteSelected().catch(err => this.report(err));
+        }
+      });
       this.fileInput?.addEventListener('change', e => {
         const files = e.target.files;
         if (files?.length) this.uploadFiles(files, this.selectedNode || this.root).catch(err => this.report(err));
@@ -40,6 +58,8 @@
     setFileSystem(fs) {
       this.fs = fs;
       this.selectedNode = null;
+      this.selectedNodes.clear();
+      this.selectionAnchor = null;
       this.collapsedPaths.clear();
       this.buildTree();
     }
@@ -175,12 +195,12 @@
         if (li && container.contains(li)) {
           const node = this.nodeByPath.get(li.dataset.path);
           if (node) {
-            this.select(node);
+            if (!this.selectedNodes.has(node.path)) this.select(node, {preserve:true});
             this.showContextMenu(e.clientX, e.clientY);
             return;
           }
         }
-        this.selectedNode = null;
+        this.clearSelection();
         this.showContextMenu(e.clientX, e.clientY);
       };
       container.ondragover = e => {
@@ -215,8 +235,12 @@
         }
         const files = e.dataTransfer.files;
         if (files.length) return this.uploadFiles(files, targetNode).catch(err => this.report(err));
-        const src = e.dataTransfer.getData('text/plain');
-        if (src) this.handleMove(src, targetNode).catch(err => this.report(err));
+        const raw = e.dataTransfer.getData('application/x-file-manager-paths') || e.dataTransfer.getData('text/plain');
+        if (raw) {
+          let paths;
+          try { paths = JSON.parse(raw); } catch (_) { paths = [raw]; }
+          this.handleMoveMany(paths, targetNode).catch(err => this.report(err));
+        }
       };
     }
     renderNode(node) {
@@ -243,11 +267,11 @@
           li.prepend(arrow);
         }
         li.appendChild(document.createTextNode(child.name + (child.isDir ? '/' : '')));
-        if (this.selectedNode?.path === child.path) li.classList.add('selected-file');
+        if (this.selectedNodes.has(child.path)) li.classList.add('selected-file');
         li.onclick = e => {
           e.stopPropagation();
-          this.select(child);
-          if (!child.isDir) this.onOpen(child.path);
+          this.handleSelectionClick(child, e);
+          if (!child.isDir && !e.shiftKey && !(e.ctrlKey || e.metaKey)) this.onOpen(child.path);
         };
         li.ondblclick = e => {
           if (child.isDir) {
@@ -263,14 +287,19 @@
           if (e.target !== li) return;
           e.preventDefault();
           e.stopPropagation();
-          this.select(child);
+          if (!this.selectedNodes.has(child.path)) this.select(child, {preserve:true});
           this.showContextMenu(e.clientX, e.clientY);
         };
         li.draggable = true;
         li.ondragstart = e => {
-          e.dataTransfer.setData('text/plain', child.path);
+          if (!this.selectedNodes.has(child.path)) this.select(child);
+          const paths = [...this.selectedNodes];
+          e.dataTransfer.setData('text/plain', JSON.stringify(paths));
+          e.dataTransfer.setData('application/x-file-manager-paths', JSON.stringify(paths));
           e.dataTransfer.effectAllowed = 'move';
+          li.classList.add('dragging');
         };
+        li.ondragend = () => li.classList.remove('dragging');
         li.ondragover = e => {
           e.preventDefault();
           li.classList.add('draghover');
@@ -292,26 +321,69 @@
               return;
             }
           }
-          const src = e.dataTransfer.getData('text/plain');
-          if (src && src !== child.path) this.handleMove(src, child).catch(err => this.report(err));
+          const raw = e.dataTransfer.getData('application/x-file-manager-paths') || e.dataTransfer.getData('text/plain');
+          if (raw) {
+            let paths;
+            try { paths = JSON.parse(raw); } catch (_) { paths = [raw]; }
+            this.handleMoveMany(paths, child).catch(err => this.report(err));
+          }
         };
         if (child.isDir) li.appendChild(this.renderNode(child));
         ul.appendChild(li);
       }
       return ul;
     }
-    select(node) {
-      const previous = this.selectedNode;
+    visibleNodes() {
+      return [...this.tree.querySelectorAll('li[data-path]')]
+        .filter(li => li.offsetParent !== null)
+        .map(li => this.nodeByPath.get(li.dataset.path))
+        .filter(Boolean);
+    }
+    handleSelectionClick(node, e) {
+      const multi = e.ctrlKey || e.metaKey;
+      if (e.shiftKey) {
+        const visible = this.visibleNodes();
+        const anchor = this.selectionAnchor || this.selectedNode || node;
+        const a = visible.findIndex(n => n.path === anchor.path);
+        const b = visible.findIndex(n => n.path === node.path);
+        if (a < 0 || b < 0) return this.select(node);
+        const lo = Math.min(a, b), hi = Math.max(a, b);
+        this.selectedNodes.clear();
+        for (const n of visible.slice(lo, hi + 1)) this.selectedNodes.add(n.path);
+        this.selectedNode = node;
+      } else if (multi) {
+        if (this.selectedNodes.has(node.path)) {
+          this.selectedNodes.delete(node.path);
+          this.selectedNode = this.selectedNodes.size ? this.nodeByPath.get([...this.selectedNodes].at(-1)) : null;
+        } else {
+          this.selectedNodes.add(node.path);
+          this.selectedNode = node;
+        }
+        this.selectionAnchor = node;
+      } else {
+        this.select(node);
+      }
+      this.updateSelectionUI();
+    }
+    updateSelectionUI() {
+      this.tree.querySelectorAll('li[data-path]').forEach(li => {
+        li.classList.toggle('selected-file', this.selectedNodes.has(li.dataset.path));
+      });
+      this.onSelection(this.selectedNode, [...this.selectedNodes].map(p => this.nodeByPath.get(p)).filter(Boolean));
+    }
+    clearSelection() {
+      this.selectedNode = null;
+      this.selectedNodes.clear();
+      this.selectionAnchor = null;
+      this.updateSelectionUI();
+    }
+    select(node, options = {}) {
+      if (!node) return this.clearSelection();
+      if (!options.preserve) this.selectedNodes.clear();
+      this.selectedNodes.add(node.path);
       this.selectedNode = node;
-      if (previous && previous.path !== node?.path) {
-        const oldEl = [...this.tree.querySelectorAll('li[data-path]')].find(li => li.dataset.path === previous.path);
-        oldEl?.classList.remove('selected-file');
-      }
-      if (node) {
-        const el = [...this.tree.querySelectorAll('li[data-path]')].find(li => li.dataset.path === node.path);
-        el?.classList.add('selected-file');
-      }
-      this.onSelection(node);
+      this.selectionAnchor = node;
+      this.updateSelectionUI();
     }
     collapseAll() {
       this.collapsedPaths.clear();
@@ -325,9 +397,10 @@
     showContextMenu(x, y) {
       if (!this.contextMenu) return;
       this.contextMenu.innerHTML = '<ul></ul>';
-      const ul = this.contextMenu.firstChild, n = this.selectedNode, items = [];
+      const ul = this.contextMenu.firstChild, n = this.selectedNode, selected = [...this.selectedNodes].map(p => this.nodeByPath.get(p)).filter(Boolean), items = [];
       if (n) {
-        items.push(['rename', 'Rename'], ['delete', 'Delete']);
+        if (selected.length > 1) items.push(['delete', `Delete ${selected.length} Items`], ['duplicate', `Duplicate ${selected.length} Items`]);
+        else items.push(['rename', 'Rename'], ['delete', 'Delete']);
         if (n.isDir) items.push(['flatten', 'Flatten']); else items.push(['copyFile', 'Copy'], ['download', 'Download']);
       }
       items.push(['newFile', 'New File'], ['newFolder', 'New Folder'], ['upload', 'Upload File']);
@@ -352,7 +425,10 @@
           this.beginInlineRename(n);
           break;
         case 'delete':
-          await this.deleteNode(n);
+          await this.deleteSelected();
+          break;
+        case 'duplicate':
+          await this.duplicateSelected();
           break;
         case 'flatten':
           await this.flattenNode(n);
@@ -568,6 +644,46 @@
       }
       this.refresh();
       this.onDelete(old, isDir);
+    }
+    async deleteSelected() {
+      const nodes = [...this.selectedNodes].map(p => this.nodeByPath.get(p)).filter(n => n && n !== this.root);
+      if (!nodes.length) return;
+      if (!confirm(`Are you sure you want to delete ${nodes.length} selected item${nodes.length === 1 ? '' : 's'}? This action is permanent.`)) return;
+      for (const node of nodes.sort((a,b) => b.path.length - a.path.length)) {
+        if (!this.nodeByPath.has(node.path)) continue;
+        if (node.isDir) this.fs.deleteDirectorySync?.(node.path);
+        else {
+          this.fs.deleteFileSync(node.path);
+          if (this.fs.existsSync(node.path + '.piskel')) this.fs.deleteFileSync(node.path + '.piskel');
+        }
+        this.onDelete(node.path, node.isDir);
+      }
+      this.clearSelection();
+      this.refresh();
+    }
+    async duplicateSelected() {
+      const nodes = [...this.selectedNodes].map(p => this.nodeByPath.get(p)).filter(Boolean);
+      for (const node of nodes) {
+        const ext = !node.isDir && node.name.includes('.') ? '.' + node.name.split('.').pop() : '';
+        const stem = ext ? node.name.slice(0, -ext.length) : node.name;
+        let i = 1, name;
+        do { name = `${stem} (${i++})${ext}`; }
+        while (this.fs.existsSync((this.targetBase(node) ? this.targetBase(node) + '/' : '') + name));
+        await this.copyNode(node, name);
+      }
+      this.refresh();
+    }
+    async handleMoveMany(paths, dstNode) {
+      const unique = [...new Set(paths)].map(p => this.nodeByPath.get(p)).filter(Boolean);
+      const targetBase = this.targetBase(dstNode);
+      const moving = new Set(unique.map(n => n.path));
+      for (const node of unique) {
+        if (node === dstNode || (dstNode?.path && dstNode.path.startsWith(node.path + '/'))) continue;
+        const newPath = targetBase ? targetBase + '/' + node.name : node.name;
+        if (moving.has(newPath)) continue;
+        await this.movePath(node.path, newPath, node.isDir);
+      }
+      this.clearSelection();
     }
     async flattenNode(node) {
       if (!node.isDir) return;

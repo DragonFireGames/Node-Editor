@@ -641,6 +641,193 @@
       this.output('npm uninstall complete.');
     }
 
+    async audit(args = [], fix = false) {
+      this.ensureReady();
+      const options = this.parseOptions(args);
+      const root = this.loadRootManifest();
+      if (!root.manifest) throw new NpmError('npm audit requires package.json.', 'ENOLOCK');
+
+      const lockText = this.readText(this.projectPath('package-lock.json'));
+      if (!lockText) throw new NpmError('npm audit requires package-lock.json.', 'ENOLOCK');
+      let lock;
+      try { lock = JSON.parse(lockText); }
+      catch (_) { throw new NpmError('package-lock.json contains invalid JSON.', 'EBADLOCK'); }
+
+      const rootManifest = root.manifest;
+      const omitDev = options.production || options.omitDev;
+      const groups = omitDev ? ['dependencies', 'optionalDependencies'] : ['dependencies', 'devDependencies', 'optionalDependencies'];
+      const direct = {};
+      for (const group of groups) Object.assign(direct, rootManifest[group] || {});
+
+      const packages = lock.packages && typeof lock.packages === 'object' ? lock.packages : {};
+      const versions = {};
+      for (const [path, entry] of Object.entries(packages)) {
+        if (!path || !path.startsWith('node_modules/') || !entry || !entry.version) continue;
+        const name = path.slice(path.lastIndexOf('node_modules/') + 'node_modules/'.length);
+        if (!name || name.includes('/node_modules/')) continue;
+        versions[name] = versions[name] || [];
+        versions[name].push(String(entry.version));
+      }
+      for (const [name, range] of Object.entries(direct)) {
+        if (!versions[name]) {
+          const installed = this.readText(this.projectPath(`node_modules/${name}/package.json`));
+          if (installed) {
+            try {
+              const pkg = JSON.parse(installed);
+              if (pkg.version) versions[name] = [String(pkg.version)];
+            } catch (_) {}
+          }
+        }
+      }
+
+      const body = {};
+      for (const [name, list] of Object.entries(versions)) body[name] = [...new Set(list)];
+      if (!Object.keys(body).length) {
+        if (options.json) {
+          this.output(JSON.stringify({ auditReportVersion: 2, metadata: { vulnerabilities: 0, dependencies: 0 }, vulnerabilities: {}, actions: [] }, null, 2));
+        } else {
+          this.output('found 0 vulnerabilities');
+        }
+        return { vulnerabilities: {}, actions: [] };
+      }
+
+      const response = await this.network.request(`${this.registry}/-/npm/v1/security/advisories/bulk`, this.registry + '/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify(body)
+      }, 'npm:audit');
+      if (!response) throw new NpmError('Network request failed while running npm audit.', 'ENETWORK');
+      if (!response.ok) throw new NpmError(`HTTP ${response.status} while running npm audit.`, 'EHTTP');
+
+      let advisories;
+      try {
+        advisories = await response.json();
+      } catch (_) {
+        throw new NpmError('Registry returned invalid audit data.', 'EBADAUDIT');
+      }
+
+      const vulnerabilities = {};
+      for (const [name, records] of Object.entries(advisories || {})) {
+        const list = Array.isArray(records) ? records : [records];
+        for (const advisory of list) {
+          const versionsFound = versions[name] || [];
+          const affected = versionsFound.filter(v => versionSatisfies(v, advisory.vulnerable_versions || '*'));
+          if (!affected.length) continue;
+          const existing = vulnerabilities[name] || {
+            name,
+            severity: advisory.severity || 'unknown',
+            isDirect: Object.prototype.hasOwnProperty.call(direct, name),
+            via: [],
+            effects: [],
+            range: advisory.vulnerable_versions || '*',
+            nodes: [],
+            fixAvailable: false,
+            advisories: []
+          };
+          existing.via.push({
+            source: advisory.id,
+            title: advisory.title || `Security advisory for ${name}`,
+            url: advisory.url || null,
+            severity: advisory.severity || 'unknown',
+            range: advisory.vulnerable_versions || '*'
+          });
+          existing.nodes.push(...affected);
+          existing.advisories.push(advisory);
+          const patched = advisory.patched_versions;
+          if (patched && patched !== '<0.0.0') {
+            existing.fixAvailable = true;
+          }
+          vulnerabilities[name] = existing;
+        }
+      }
+
+      for (const vuln of Object.values(vulnerabilities)) {
+        vuln.nodes = [...new Set(vuln.nodes)];
+        vuln.via = vuln.via.filter((item, index, arr) => arr.findIndex(x => x.source === item.source) === index);
+        vuln.advisories = vuln.advisories.filter((item, index, arr) => arr.findIndex(x => x.id === item.id) === index);
+      }
+
+      const severityRank = { info: 0, low: 1, moderate: 2, high: 3, critical: 4, unknown: 0 };
+      const minSeverity = String(options.auditLevel || 'low').toLowerCase();
+      const minRank = severityRank[minSeverity] ?? 1;
+      const count = Object.values(vulnerabilities).reduce((n, v) => n + v.nodes.length, 0);
+      const metadata = {
+        vulnerabilities: Object.keys(vulnerabilities).length,
+        dependencies: Object.keys(body).length,
+        vulnerableDependencies: count
+      };
+
+      const report = {
+        auditReportVersion: 2,
+        metadata,
+        vulnerabilities,
+        actions: []
+      };
+
+      if (!fix) {
+        if (options.json) {
+          this.output(JSON.stringify(report, null, 2));
+        } else if (!Object.keys(vulnerabilities).length) {
+          this.output('found 0 vulnerabilities');
+        } else {
+          this.output(`found ${count} vulnerable package${count === 1 ? '' : 's'}`);
+          for (const vuln of Object.values(vulnerabilities)) {
+            this.output(`  ${vuln.name} ${vuln.nodes.join(', ')} — ${vuln.severity}`);
+            for (const advisory of vuln.via) {
+              this.output(`    ${advisory.title}${advisory.url ? ` (${advisory.url})` : ''}`);
+            }
+          }
+          const blocking = Object.values(vulnerabilities).filter(v => (severityRank[v.severity] ?? 0) >= minRank);
+          if (blocking.length) this.output(`
+npm audit found ${blocking.length} package${blocking.length === 1 ? '' : 's'} with severity ${minSeverity} or higher.`);
+        }
+        return report;
+      }
+
+      const changed = [];
+      for (const vuln of Object.values(vulnerabilities)) {
+        if (!vuln.isDirect) continue;
+        const advisory = vuln.advisories[0];
+        if (!advisory || !advisory.patched_versions || advisory.patched_versions === '<0.0.0') continue;
+        const currentRange = direct[vuln.name];
+        let targetRange = advisory.patched_versions;
+        let targetVersion = null;
+        try {
+          const metadata = await this.fetchMetadata(vuln.name);
+          const candidates = Object.keys(metadata.versions || {}).filter(v => {
+            if (!parseVersion(v) || parseVersion(v).prerelease.length) return false;
+            if (!versionSatisfies(v, targetRange)) return false;
+            if (!options.force && !versionSatisfies(v, currentRange)) return false;
+            return true;
+          }).sort(compareVersions).reverse();
+          targetVersion = candidates[0] || null;
+        } catch (_) {}
+
+        if (!targetVersion) continue;
+        const group = groups.find(g => rootManifest[g] && Object.prototype.hasOwnProperty.call(rootManifest[g], vuln.name));
+        if (!group) continue;
+        const oldRange = rootManifest[group][vuln.name];
+        rootManifest[group][vuln.name] = options.force ? `^${targetVersion}` : `^${targetVersion}`;
+        changed.push({ name: vuln.name, from: oldRange, to: rootManifest[group][vuln.name], version: targetVersion, force: !!options.force });
+      }
+
+      if (!changed.length) {
+        if (options.json) this.output(JSON.stringify(report, null, 2));
+        else this.output('npm audit fix found no automatically fixable direct dependencies.');
+        return report;
+      }
+
+      this.saveRootManifest(rootManifest);
+      await this.install([]);
+      report.actions = changed;
+      if (options.json) this.output(JSON.stringify(report, null, 2));
+      else {
+        for (const action of changed) this.output(`updated ${action.name} to ${action.version}`);
+        this.output('npm audit fix complete.');
+      }
+      return report;
+    }
+
     async prune(options = {}) {
       const { manifest } = this.loadRootManifest();
       if (!manifest) return;
@@ -878,16 +1065,23 @@
         noSave: false,
         production: false,
         force: false,
-        quiet: false
+        quiet: false,
+        json: false,
+        auditLevel: 'low',
+        omitDev: false
       };
       const list = Array.isArray(args) ? args : splitCommand(args);
-      for (const arg of list) {
+      for (let i = 0; i < list.length; i++) {
+        const arg = list[i];
+        if (arg === '--audit-level' && list[i + 1]) { options.auditLevel = list[++i]; continue; }
         if (arg === '--save-dev' || arg === '-D') options.saveDev = true;
         else if (arg === '--save-exact' || arg === '-E') options.saveExact = true;
         else if (arg === '--no-save') options.noSave = true;
-        else if (arg === '--production' || arg === '--omit=dev') options.production = true;
         else if (arg === '--force' || arg === '-f') options.force = true;
         else if (arg === '--quiet' || arg === '-q') options.quiet = true;
+        else if (arg === '--json') options.json = true;
+        else if (arg === '--production' || arg === '--omit=dev') { options.production = true; options.omitDev = true; }
+        else if (arg.startsWith('--audit-level=')) options.auditLevel = arg.slice('--audit-level='.length);
         else if (arg === '--legacy-peer-deps' || arg === '--ignore-scripts') {}
         else if (arg.startsWith('--')) {}
         else options.positionals.push(arg);
@@ -928,12 +1122,15 @@
           return await this.ci(commandArgs);
         case 'prune':
           return await this.prune(commandArgs);
+        case 'audit':
+          if (commandArgs[0] === 'fix') return await this.audit(commandArgs.slice(1), true);
+          return await this.audit(commandArgs, false);
         case '--version':
         case '-v':
           this.output('npm 1.0.0-browser');
           return;
         default:
-          throw new NpmError(`Unknown command '${commandName}'. Supported commands: install, uninstall, update, init, view, ls, ci, prune, run, start.`);
+          throw new NpmError(`Unknown command '${commandName}'. Supported commands: install, uninstall, update, init, view, ls, ci, prune, audit, run, start.`);
       }
     }
   }

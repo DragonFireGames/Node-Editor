@@ -5,6 +5,8 @@
 const DEFAULT_FAVICON = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%239aa0a6' stroke-width='2'><circle cx='12' cy='12' r='10'/><line x1='2' y1='12' x2='22' y2='12'/><path d='M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z'/></svg>";
 
 // Configurable Proxy Settings
+const browserQuery = new URLSearchParams(window.location.search);
+
 let appSettings = {
   primaryProxy: "https://proxy.dragonfire7z.workers.dev/",
   fallbackProxy: "",
@@ -734,21 +736,27 @@ async function updateTabMetadata(tab) {
 
 const menuEl = document.getElementById('custom-context-menu');
 
-let browserChromeFullscreen = false;
+let browserChromeFullscreen = ['1', 'true', 'yes'].includes(String(browserQuery.get('hideBrowserBar') || '').toLowerCase());
 let browserChromeRevealTimer = null;
 
 function setBrowserChromeReveal(visible) {
   document.body.classList.toggle('chrome-hover-reveal', visible);
 }
 
-function toggleBrowserFullscreen() {
-  browserChromeFullscreen = !browserChromeFullscreen;
+function setBrowserChromeHidden(hidden) {
+  browserChromeFullscreen = !!hidden;
   document.body.classList.toggle('browser-chrome-fullscreen', browserChromeFullscreen);
-  document.getElementById('btn-browser-fullscreen')?.querySelector('i')?.classList.toggle('fa-expand', !browserChromeFullscreen);
-  document.getElementById('btn-browser-fullscreen')?.querySelector('i')?.classList.toggle('fa-compress', browserChromeFullscreen);
+  const icon = document.getElementById('btn-browser-fullscreen')?.querySelector('i');
+  icon?.classList.toggle('fa-expand', !browserChromeFullscreen);
+  icon?.classList.toggle('fa-compress', browserChromeFullscreen);
   const button = document.getElementById('btn-browser-fullscreen');
   if (button) button.title = browserChromeFullscreen ? 'Show Browser Bar' : 'Hide Browser Bar';
   if (!browserChromeFullscreen) setBrowserChromeReveal(false);
+}
+
+function toggleBrowserFullscreen() {
+  setBrowserChromeHidden(!browserChromeFullscreen);
+  document.body.classList.toggle('browser-chrome-fullscreen', browserChromeFullscreen);
 }
 
 function showBrowserBarOnHover() {
@@ -1061,6 +1069,116 @@ function createNewPage(iframe,parentPage=null) {
     });
 
     return page2;
+  });
+
+  page.interceptEvent('embed-create',function(obj){
+    if (!obj.embed || obj.embed.__embedFrame) return obj.embed?.__embedFrame || null;
+
+    var embed = obj.embed;
+
+    // The real <embed> remains exactly where the page put it. Do not wrap or
+    // reparent it: that can change the replaced element's intrinsic layout
+    // size and makes getBoundingClientRect() collapse to 0x0.
+    var frame = document.createElement('iframe');
+    frame.setAttribute('data-embed-frame','1');
+    frame.setAttribute('frameborder','0');
+    frame.style.position = 'fixed';
+    frame.style.border = '0';
+    frame.style.margin = '0';
+    frame.style.padding = '0';
+    frame.style.background = 'transparent';
+    frame.style.zIndex = '2147483646';
+    frame.style.display = 'block';
+    frame.style.visibility = 'visible';
+    frame.style.opacity = '1';
+
+    // Render the emulated document in a separate overlay. The <embed>'s CSS
+    // controls its placeholder only; it must not leak visibility/opacity into
+    // the renderer, since the renderer is the thing replacing it visually.
+    // The embed belongs to an emulated page, so the renderer must live in
+    // that same document. Appending it to the editor's document makes the
+    // frame invisible/mispositioned because its coordinates are relative to
+    // the embedded page's viewport.
+    var ownerDocument = embed.ownerDocument || document;
+    var ownerWindow = ownerDocument.defaultView || window;
+    ownerDocument.body?.appendChild(frame);
+    embed.style.opacity = '0';
+    embed.style.pointerEvents = 'none';
+    embed.__embedFrame = frame;
+
+    function syncBounds(){
+      if (!embed.isConnected || !frame.isConnected) return;
+      var r = embed.getBoundingClientRect();
+      var style = ownerWindow.getComputedStyle ? ownerWindow.getComputedStyle(embed) : null;
+      var visible = !style || (style.visibility !== 'hidden' && style.visibility !== 'collapse' && style.display !== 'none');
+      frame.style.left = r.left + 'px';
+      frame.style.top = r.top + 'px';
+      frame.style.width = Math.max(0,r.width) + 'px';
+      frame.style.height = Math.max(0,r.height) + 'px';
+      frame.style.display = 'block';
+      frame.style.visibility = visible ? 'visible' : 'hidden';
+      frame.style.opacity = visible ? '1' : '0';
+      frame.style.pointerEvents = visible ? 'auto' : 'none';
+    }
+    embed.__syncEmbedBounds = syncBounds;
+    ownerWindow.addEventListener('resize',syncBounds);
+    ownerWindow.addEventListener('scroll',syncBounds,true);
+    var embedStyleObserver = ownerWindow.MutationObserver ? new ownerWindow.MutationObserver(syncBounds) : null;
+    if (embedStyleObserver) {
+      embedStyleObserver.observe(embed,{attributes:true,attributeFilter:['style','class','hidden']});
+      embed.__embedStyleObserver = embedStyleObserver;
+    }
+    syncBounds();
+    var syncAttempts = 0;
+    function retrySync(){
+      syncBounds();
+      if (++syncAttempts < 120) ownerWindow.requestAnimationFrame?.(retrySync);
+    }
+    ownerWindow.requestAnimationFrame?.(retrySync);
+    ownerWindow.setTimeout?.(syncBounds,0);
+    ownerWindow.setTimeout?.(syncBounds,50);
+
+    var page2 = createNewPage(frame,page);
+    page.addChild(page2);
+    return page2;
+  });
+
+  page.interceptEvent('embed-navigate',async function(obj){
+    var embed = obj.embed;
+    if (!embed) return;
+
+    var frame = embed.__embedFrame;
+    var page2 = frame?.pageEmulator;
+    if (!page2) {
+      page2 = createNewPage(frame,page);
+      page.addChild(page2);
+    }
+
+    var navigationId = obj.navigationId;
+    if (navigationId !== undefined && embed.__embedNavigationId !== navigationId) return;
+    if (!obj.src) return;
+
+    var baseUrl = page.location?.url || page.location?.origin || 'http://localhost:3000/';
+    var targetUrl;
+    try {
+      targetUrl = new URL(obj.src,baseUrl);
+    } catch(e) {
+      return;
+    }
+
+    page2.setLocation(targetUrl.href,targetUrl.origin);
+    if (page2.tab) page2.tab.url = targetUrl.href;
+
+    const res = await page2.network.request(targetUrl.href,targetUrl.origin,{},'embed');
+    if (navigationId !== undefined && embed.__embedNavigationId !== navigationId) return;
+    if (!res || !res.ok) return;
+
+    var rawHtml = await window.getDocumentContent(res,targetUrl.href,targetUrl.origin,obj);
+    if (navigationId !== undefined && embed.__embedNavigationId !== navigationId) return;
+
+    page2.rawDocument = String(rawHtml || '');
+    await page2.setDocument(rawHtml, true, targetUrl.href);
+    embed.__syncEmbedBounds?.();
   });
 
   page.interceptEvent('iframe-navigate',async function(obj){
@@ -2208,7 +2326,6 @@ function saveSettings() {
 // Browser embedding/startup contract.
 // Standalone pages use ?start=...; the editor uses ?defer=1 so the runtime
 // endpoint can be installed before the first navigation.
-const browserQuery = new URLSearchParams(window.location.search);
 let browserStartupDeferred = browserQuery.get('defer') === '1' || browserQuery.get('defer') === 'true';
 
 function normalizeBrowserStartupUrl(url) {
@@ -2247,7 +2364,10 @@ async function loadBrowserURL(url = appSettings.defaultTab, activate = true) {
 
 window.getStartupUrl = getStartupUrl;
 window.setBrowserDefaultTab = setBrowserDefaultTab;
+window.setBrowserChromeHidden = setBrowserChromeHidden;
 window.loadBrowserURL = loadBrowserURL;
+
+setBrowserChromeHidden(browserChromeFullscreen);
 
 // Global Key Bindings Handler (F12, DevTools, Ctrl Shortcuts)
 installBrowserChromeInteractions();

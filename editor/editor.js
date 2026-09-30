@@ -52,6 +52,7 @@
     workbench: null,
     dirty: false,
     monacoPromise: null,
+    builtins: {},
     ensureMonaco,
     previews: null,
     terminalTabs: new Map(),
@@ -65,7 +66,8 @@
       autoClearTerminal: false,
       confirmBeforeReplace: true,
       confirmBeforeDelete: true,
-      showHiddenFolders: false
+      showHiddenFolders: false,
+      hideBrowserBar: true
     }
   };
   const $ = id => document.getElementById(id);
@@ -440,6 +442,22 @@
       return false;
     }
   }
+  async function exportProject() {
+    if (!state.fs) return false;
+    try {
+      const blob = await state.fs.exportZip();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = (state.projectName || 'workspace') + '.zip';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      noteSaved();
+      return true;
+    } catch (e) {
+      logError(e);
+      return false;
+    }
+  }
   async function confirmWorkspaceSwitch(action) {
     if (!state.dirty) return true;
     return await new Promise(resolve => {
@@ -531,25 +549,46 @@
       listener: null
     };
   }
-  function builtinIcon(kind) {
-    const icons = {
-      browser: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="4" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M3 8h18M7 12h10M7 16h6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
-      terminal: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="4" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m7 9 3 3-3 3M12 15h5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
-      run: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M7 5v14l11-7z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>',
-      environment: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="7" cy="7" r="2" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="17" cy="17" r="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8.5 8.5 15.5 15.5M15.5 8.5 8.5 15.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
-      settings: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
-      welcome: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M4 5h16v14H4z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M7 9h10M7 13h7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
-      peer: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="6" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="18" cy="7" r="3" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="18" cy="17" r="3" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m8.5 10.8 6-2.7M8.5 13.2l6 2.7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>'
+  
+  function getBuiltin(kind) {
+    state.builtins ||= {};
+    if (state.builtins[kind]) return state.builtins[kind];
+    const factory = window.EditorBuiltinFactories?.[kind];
+    if (!factory) return null;
+    const ctx = {
+      state,
+      $,
+      basename,
+      mime,
+      fileIcon,
+      runConfigured,
+      logError,
+      openBuiltin,
+      setupRuntime,
+      getBuiltin,
+      makePeerLayer,
+      normalizePeerPagePath,
+      saveProjectMetadata,
+      readLegacyEditorConfig,
+      loadProcessEnv,
+      saveProcessEnv,
+      applyEditorEnvironment,
+      markDirty,
+      ensureBrowser: () => getBuiltin('browser')?.ensure(),
+      getOrOpenTerminal: () => getBuiltin('terminal')?.getOrOpenTerminal()
     };
-    return icons[kind] || '';
+    return state.builtins[kind] = factory(ctx);
   }
   function makeBuiltinTab(kind) {
+    const builtin = getBuiltin(kind);
+    const titles = { welcome: 'Welcome', browser: 'Browser', peer: 'Peer Server', terminal: 'Terminal', run: 'Run Configuration', environment: 'Environment Variables' };
+    const welcomeIcon = '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M4 5h16v14H4z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M7 9h10M7 13h7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
     return {
       id: 'builtin:' + kind + ':' + Math.random().toString(36).slice(2),
       kind: 'builtin',
       builtin: kind,
-      title: kind === 'browser' ? 'Browser' : kind === 'peer' ? 'Peer Server' : kind === 'terminal' ? 'Terminal' : kind === 'run' ? 'Run Configuration' : kind === 'settings' ? 'Settings' : kind === 'environment' ? 'Environment Variables' : 'Welcome',
-      icon: builtinIcon(kind),
+      title: builtin?.title || titles[kind] || kind,
+      icon: builtin?.icon || (kind === 'welcome' ? welcomeIcon : ''),
       view: 'edit'
     };
   }
@@ -639,11 +678,8 @@
         }
         return;
       }
-      if (t.builtin === 'browser') renderBrowser(g, t);
-      else if (t.builtin === 'peer') renderPeerServer(g, t);
-      else if (t.builtin === 'terminal') renderTerminal(g, t);
-      else if (t.builtin === 'run') renderRunConfig(g);
-      else if (t.builtin === 'environment') renderEnvironment(g);
+      const builtin = getBuiltin(t.builtin);
+      if (builtin?.render) builtin.render(g, t);
       else renderWelcome(g);
       t._viewElement = g.viewBody.lastElementChild || null;
       g.__renderedTab = t;
@@ -677,6 +713,10 @@
     } else state.workbench.activateTab(g, t.id);
   }
   function openBuiltin(kind, g = state.workbench.getFirstLeaf(), options = {}) {
+    if (kind === 'settings') {
+      showSidebar('settings');
+      return null;
+    }
     if (options.replace) {
       const t = makeBuiltinTab(kind);
       return state.workbench.replaceTab(g, t);
@@ -693,358 +733,17 @@
     } else state.workbench.activateTab(g, t.id);
     return t;
   }
-  function renderBrowser(g, t) {
-    const wrap = document.createElement('div');
-    wrap.className = 'builtin-browser';
-    const frame = document.createElement('iframe');
-    frame.id = 'browser-frame-' + g.id;
-    const initialBrowserUrl = state.runConfig?.publicUrl?.() || 'http://localhost:3000/';
-    frame.src = 'browser/browser.html?start=' + encodeURIComponent(initialBrowserUrl) + '&default=' + encodeURIComponent(initialBrowserUrl) + '&defer=1';
-    const bar = document.createElement('div');
-    bar.className = 'builtin-browser-toolbar';
-    const status = document.createElement('span');
-    status.className = 'browser-status';
-    status.textContent = 'Starting browser…';
-    const run = document.createElement('button');
-    run.textContent = 'Run';
-    run.onclick = () => runConfigured().catch(logError);
-    const full = document.createElement('button');
-    full.textContent = 'Fullscreen';
-    full.onclick = () => {
-      const active = wrap.classList.toggle('fullscreen');
-      full.textContent = active ? 'Exit Fullscreen' : 'Fullscreen';
-    };
-    bar.append(status, run, full);
-    wrap.append(frame, bar);
-    g.viewBody.appendChild(wrap);
-    const info = {
-      frame,
-      network: null,
-      ready: null
-    };
-    state.browserTabs.set(t.id, info);
-    let resolveReady, rejectReady;
-    info.ready = new Promise((resolve, reject) => {
-      resolveReady = resolve;
-      rejectReady = reject;
-    });
-    let done = false;
-    const finish = () => {
-      try {
-        const win = frame.contentWindow;
-        const net = win?.browserNetwork;
-        if (!net || typeof win.loadBrowserURL !== 'function') return;
-        state.browserFrame = frame;
-        state.browserNetwork = net;
-        info.network = net;
-        try {
-          window.__sharedBrowserNetwork = net;
-        } catch (_) {}
-        state.runConfig?.bindNetwork?.(net);
-        try {
-          const defaultUrl = state.runConfig?.publicUrl?.() || state.runConfig?.config?.domain || 'http://localhost:3000/';
-          win.setBrowserDefaultTab?.(defaultUrl);
-          // The Browser's very first tab is created with defer=1 so it cannot
-          // race the runtime endpoint during startup. If a static runtime is
-          // already installed (for example when reopening the Browser tab),
-          // start that deferred tab now. Node waits until its server is live
-          // and is navigated by runConfigured after terminalCommand.
-          if (state.staticEndpoint && typeof win.loadBrowserURL === 'function') {
-            void win.loadBrowserURL(defaultUrl, true).catch(() => {});
-          }
-        } catch (_) {}
-        state.runDebugRefresh?.();
-        status.textContent = 'Browser ready';
-        if (!done) {
-          done = true;
-          resolveReady(net);
-        }
-      } catch (e) {
-        if (!done) {
-          done = true;
-          rejectReady(e);
-        }
-      }
-    };
-    frame.addEventListener('load', finish);
-    const readyPoll = setInterval(() => {
-      if (done) {
-        clearInterval(readyPoll);
-        return;
-      }
-      finish();
-    }, 50);
-    setTimeout(() => {
-      clearInterval(readyPoll);
-      if (!done) {
-        done = true;
-        status.textContent = 'Browser failed to initialize';
-        rejectReady(new Error('Browser emulator did not initialize within 10 seconds.'));
-      }
-    }, 10000);
-    document.addEventListener('keydown', e => {
-      if (e.key === 'Escape' && wrap.classList.contains('fullscreen')) {
-        wrap.classList.remove('fullscreen');
-        full.textContent = 'Fullscreen';
-      }
-    });
-  }
-  function isBrowserFrameReady(frame) {
-    try {
-      return !!frame && !!frame.contentWindow && typeof frame.contentWindow.loadBrowserURL === 'function';
-    } catch (_) {
-      return false;
-    }
-  }
-  async function ensureBrowser() {
-    if (state.browserFrame && state.browserNetwork && isBrowserFrameReady(state.browserFrame)) return state.browserNetwork;
-
-    for (const [tabId, info] of state.browserTabs.entries()) {
-      if (!info) continue;
-      let net = info.network || null;
-      if (!net && info.ready) {
-        try {
-          net = await info.ready;
-        } catch (e) {
-          continue;
-        }
-      }
-      if (!net || !info.frame || !info.frame.contentWindow) continue;
-      state.browserNetwork = net;
-      state.browserFrame = info.frame;
-
-      // A workbench switch detaches the Browser view from the DOM without
-      // destroying it. Reattach that existing tab instead of creating another
-      // Browser and, importantly, keep its shared Network object.
-      for (const g of state.workbench.groups.values()) {
-        const t = g.tabs.find(x => x.id === tabId);
-        if (!t) continue;
-        if (t._viewElement && t._viewElement.parentNode !== g.viewBody) {
-          try {
-            state.workbench.activateTab(g, t.id);
-          } catch (_) {}
-        }
-        break;
-      }
-      if (isBrowserFrameReady(info.frame)) return net;
-    }
-
-    const g = state.workbench.getFirstLeaf();
-    const t = openBuiltin('browser', g);
-    const info = state.browserTabs.get(t.id);
-    if (!info) throw new Error('Browser tab could not be created.');
-    const net = await info.ready;
-    state.browserFrame = info.frame;
-    state.browserNetwork = net;
-    if (!isBrowserFrameReady(info.frame)) {
-      for (let i = 0; i < 100 && !isBrowserFrameReady(info.frame); i++) await new Promise(r => setTimeout(r, 50));
-    }
-    if (!isBrowserFrameReady(info.frame)) throw new Error('Browser tab was created but its load API is not ready.');
-    return net;
-  }
-  function peerServerDomain() {
-    return String(state.runConfig?.config?.domain || 'http://localhost:3000/').trim();
-  }
-  function peerServerOrigin() {
-    const domain = peerServerDomain();
-    try { return new URL(domain).origin; } catch (_) { return domain.replace(/\/+$/, ''); }
-  }
-  function getPeerRuntimeEndpoint() {
-    if (!state.peerRuntimeEndpoint) {
-      state.peerRuntimeEndpoint = {
-        enabled: true,
-        __editorPeerRuntimeEndpoint: true,
-        async handleRequest(request, type) {
-          const endpoint = state.staticEndpoint || state.nodeEmulator?.endpoint;
-          if (!endpoint || typeof endpoint.handleRequest !== 'function') return null;
-          return await endpoint.handleRequest(request, type);
-        },
-        async handleSocket(url, protocols) {
-          const endpoint = state.staticEndpoint || state.nodeEmulator?.endpoint;
-          if (!endpoint || typeof endpoint.handleSocket !== 'function') return null;
-          return await endpoint.handleSocket(url, protocols);
-        }
-      };
-    }
-    return state.peerRuntimeEndpoint;
-  }
-  async function preparePeerEndpoint() {
-    const net = state.browserNetwork || await ensureBrowser();
-    state.runConfig?.detect?.();
-    const c = state.runConfig?.config || {};
-    await setupRuntime(net);
-    if (c.serverType === 'node') {
-      if (!state.nodeEmulator) throw new Error('Node runtime is not ready.');
-      const terminal = getOrOpenTerminal();
-      const terminalView = state.terminalTabs.get(terminal.id);
-      terminalView?.attach(state.nodeEmulator);
-      if (c.nodeCommand) await terminalView?.runCommand(c.nodeCommand);
-      const ready = await state.nodeEmulator.waitForServer?.(10000, 50);
-      if (!ready) throw new Error('Node command finished, but no listening server was created.');
-    }
-    return getPeerRuntimeEndpoint();
-  }
-  async function stopPeerServer(t) {
-    const info = state.peerServers.get(t?.id);
-    if (!info) return;
-    state.peerServers.delete(t.id);
-    try { await info.server?.close?.(); } catch (_) {}
-    if (!state.peerServers.size) { try { window.keepAlive?.disable?.(); } catch (_) {} }
-    try { info.frame?.remove(); } catch (_) {}
-    info.server = null;
-    if (info.status) info.status.textContent = 'Stopped';
-    if (info.runButton) info.runButton.disabled = false;
-    if (info.stopButton) info.stopButton.disabled = true;
-    if (info.openButton) info.openButton.disabled = true;
-    if (info.layer) info.layer.disabled = false;
-    if (info.pagePath) info.pagePath.disabled = false;
-    if (info.result) info.result.value = '';
-  }
-  function renderPeerServer(g, t) {
-    const wrap = document.createElement('div');
-    wrap.className = 'builtin-peer-server';
-    const title = document.createElement('h2');
-    title.textContent = 'Peer Server';
-    const description = document.createElement('p');
-    description.textContent = 'Run this project as a PeerJS-backed server. Other browsers can open the generated Preview URL with the same peer layer.';
-    const form = document.createElement('div');
-    form.className = 'peer-server-form';
-    const layerLabel = document.createElement('label');
-    layerLabel.textContent = 'Peer Layer';
-    const layer = document.createElement('input');
-    layer.type = 'text'; layer.value = 'peer'; layer.placeholder = 'peer'; layer.autocomplete = 'off';
-    const domainLabel = document.createElement('label');
-    domainLabel.textContent = 'Project Domain';
-    const domain = document.createElement('input');
-    domain.type = 'text'; domain.readOnly = true;
-    const pathLabel = document.createElement('label');
-    pathLabel.textContent = 'Page Path';
-    const pagePath = document.createElement('input');
-    pagePath.type = 'text'; pagePath.placeholder = '/'; pagePath.autocomplete = 'off';
-    const actions = document.createElement('div');
-    actions.className = 'peer-server-actions';
-    const run = document.createElement('button');
-    run.textContent = 'Run Peer Server'; run.className = 'primary';
-    const stop = document.createElement('button');
-    stop.textContent = 'Stop'; stop.disabled = true;
-    const open = document.createElement('button');
-    open.textContent = 'Open Result in New Tab'; open.disabled = true;
-    actions.append(run, stop, open);
-    const status = document.createElement('div');
-    status.className = 'peer-server-status'; status.textContent = 'Stopped';
-    const result = document.createElement('input');
-    result.className = 'peer-server-result'; result.readOnly = true; result.placeholder = 'Preview URL';
-    form.append(layerLabel, layer, domainLabel, domain, pathLabel, pagePath, actions, status, result);
-    wrap.append(title, description, form);
-    g.viewBody.appendChild(wrap);
-    const savedPeerLayer = String(state.peerSettings?.layer || '').trim() || makePeerLayer();
-    const savedPagePath = normalizePeerPagePath(state.peerSettings?.pagePath);
-    state.peerSettings = {layer: savedPeerLayer, pagePath: savedPagePath};
-    saveProjectMetadata();
-    const info = {server:null,frame:null,status,runButton:run,stopButton:stop,openButton:open,result,layer,domain,pagePath,layerValue:savedPeerLayer,resultUrl:''};
-    layer.value = savedPeerLayer;
-    pagePath.value = savedPagePath;
-    const updateDomain = () => { domain.value = peerServerDomain(); };
-    const buildResult = () => {
-      const url = new URL('preview.html', location.href);
-      const path = normalizePeerPagePath(pagePath.value);
-      url.searchParams.set('peerLayer', layer.value.trim());
-      url.searchParams.set('u', peerServerOrigin() + path);
-      return url.href;
-    };
-    const savePeerSettings = () => {
-      state.peerSettings.layer = layer.value.trim() || state.peerSettings.layer || makePeerLayer();
-      state.peerSettings.pagePath = normalizePeerPagePath(pagePath.value);
-      layer.value = state.peerSettings.layer;
-      pagePath.value = state.peerSettings.pagePath;
-      saveProjectMetadata();
-      state.markDirty?.('editor/project.json');
-    };
-    const fail = message => { status.textContent = message; status.classList.add('error'); };
-    layer.addEventListener('input', () => { status.classList.remove('error'); savePeerSettings(); if (!info.server) result.value = ''; });
-    pagePath.addEventListener('input', () => { savePeerSettings(); if (!info.server) result.value = ''; });
-    run.onclick = async () => {
-      savePeerSettings();
-      const selectedLayer = state.peerSettings.layer;
-      if (!selectedLayer || info.server) return;
-      status.classList.remove('error'); run.disabled = true; stop.disabled = true; open.disabled = true; result.value = '';
-      status.textContent = 'Starting project…'; updateDomain();
-      try {
-        const frame = document.createElement('iframe');
-        frame.className = 'peer-host-frame';
-        frame.src = 'browser/peer-host.html?peerLayer=' + encodeURIComponent(selectedLayer);
-        wrap.appendChild(frame); info.frame = frame;
-        await new Promise((resolve, reject) => {
-          const timer = setTimeout(() => reject(new Error('Peer server host failed to initialize.')), 10000);
-          frame.addEventListener('load', () => { clearTimeout(timer); resolve(); }, {once:true});
-        });
-        const hostWindow = frame.contentWindow;
-        if (typeof hostWindow.peerServerExists === 'function' && await hostWindow.peerServerExists(domain.value.trim())) throw new Error('pick a new layer');
-        const endpoint = await preparePeerEndpoint();
-        if (!endpoint) throw new Error('Project runtime endpoint is not available.');
-        const server = await hostWindow.createPeerServer(endpoint, peerServerDomain());
-        try { await server.ready; }
-        catch (error) {
-          if (/unavailable-id|already registered/i.test(String(error?.message || error))) throw new Error('pick a new layer');
-          throw error;
-        }
-        info.server = server; info.hostWindow = hostWindow; info.layerValue = selectedLayer;
-        state.peerServers.set(t.id, info);
-        server.addEventListener?.('close', () => {
-          if (state.peerServers.get(t.id)?.server === server) void stopPeerServer(t);
-        });
-        try { window.keepAlive?.enable?.(); window.keepAlive?.start?.(); } catch (_) {}
-        result.value = buildResult(); info.resultUrl = result.value; status.textContent = 'Running';
-        stop.disabled = false; open.disabled = false; layer.disabled = true; pagePath.disabled = true;
-      } catch (error) {
-        try { await info.server?.close?.(); } catch (_) {}
-        try { info.frame?.remove(); } catch (_) {}
-        info.server = null; info.frame = null; info.hostWindow = null;
-        layer.disabled = false; run.disabled = false; stop.disabled = true; open.disabled = true;
-        fail(/pick a new layer/i.test(String(error?.message || error)) ? 'pick a new layer' : String(error?.message || error));
-      }
-    };
-    stop.onclick = () => stopPeerServer(t);
-    open.onclick = () => { if (info.server && result.value) window.open(result.value, '_blank', 'noopener'); };
-    updateDomain();
-    const existing = state.peerServers.get(t.id);
-    if (existing) {
-      const savedLayer = existing.layerValue || savedPeerLayer;
-      const savedResult = existing.resultUrl || existing.result?.value || '';
-      Object.assign(existing, {status,runButton:run,stopButton:stop,openButton:open,result,layer,domain,pagePath});
-      layer.value = savedLayer; pagePath.value = savedPagePath; result.value = savedResult; layer.disabled = true; pagePath.disabled = true; run.disabled = true; stop.disabled = false; open.disabled = !savedResult; status.textContent = 'Running';
-    }
-  }
-  function renderTerminal(g, t) {
-    const wrap = document.createElement('div');
-    wrap.className = 'builtin-terminal';
-    const out = document.createElement('div');
-    out.className = 'builtin-terminal-output';
-    const row = document.createElement('div');
-    row.className = 'builtin-terminal-input';
-    const prompt = document.createElement('span');
-    prompt.textContent = '$';
-    const input = document.createElement('input');
-    input.placeholder = 'node / npm / shell command';
-    const send = document.createElement('button');
-    send.textContent = 'Send';
-    row.append(prompt, input, send);
-    wrap.append(out, row);
-    g.viewBody.appendChild(wrap);
-    let terminal = state.terminalTabs.get(t.id);
-    if (!terminal) {
-      terminal = new NodeConsoleTerminal(out, input, send, prompt);
-      state.terminalTabs.set(t.id, terminal);
-    }
-    terminal.attach(state.nodeEmulator);
-    terminal.updatePrompt();
-  }
-  function renderRunConfig(g) {
-    const div = document.createElement('div');
-    div.className = 'run-config-page';
-    g.viewBody.appendChild(div);
-    state.runConfig.render(div, () => runConfigured().catch(logError));
-  }
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
   function loadBehaviorSettings() {
     try {
       const v = JSON.parse(localStorage.getItem('editor.behaviorSettings') || 'null');
@@ -1054,155 +753,7 @@
   function saveBehaviorSettings() {
     saveEditorSettings();
   }
-  function environmentStorageKey() {
-    return 'editor.environment.' + (state.projectKey || 'default');
-  }
-  function loadEnvironment() {
-    state.environment = {};
-    if (!loadProcessEnv()) {
-      const legacy = readLegacyEditorConfig();
-      if (legacy?.environment && typeof legacy.environment === 'object' && !Array.isArray(legacy.environment)) {
-        applyEditorEnvironment(legacy.environment);
-      } else {
-        try {
-          const v = JSON.parse(localStorage.getItem(environmentStorageKey()) || '{}');
-          state.environment = v && typeof v === 'object' && !Array.isArray(v) ? { ...v } : {};
-        } catch (_) {
-          state.environment = {};
-        }
-      }
-    }
-    saveEnvironmentToRuntime();
-  }
-  function saveEnvironmentToRuntime() {
-    if (state.nodeEmulator?.env) {
-      const env = state.nodeEmulator.env;
-      for (const key of Object.keys(env)) {
-        if (key !== 'NODE_ENV' && key !== 'USER') delete env[key];
-      }
-      Object.assign(env, state.environment);
-    }
-  }
-  function saveEnvironment() {
-    saveProcessEnv();
-    saveEnvironmentToRuntime();
-  }
-  function renderEnvironment(g) {
-    const div = document.createElement('div');
-    div.className = 'editor-environment-page';
-    div.innerHTML = '<div class="editor-environment-header"><h2>Environment Variables</h2><p>Variables are available through <code>process.env</code> when running a Node project in this workspace.</p></div><div class="editor-environment-toolbar"><button class="editor-environment-add">Add Variable</button><button class="editor-environment-import">Import</button><button class="editor-environment-export">Export .env</button><button class="editor-environment-clear">Clear All</button><input class="editor-environment-import-input" type="file" accept=".env,.txt,.json,application/json,text/plain" hidden></div><div class="editor-environment-table"><div class="editor-environment-row editor-environment-heading"><div>Name</div><div>Value</div><div></div></div><div class="editor-environment-rows"></div></div>';
-    const rows = div.querySelector('.editor-environment-rows');
-    const renderRows = () => {
-      rows.innerHTML = '';
-      const entries = Object.entries(state.environment).sort((a,b) => a[0].localeCompare(b[0]));
-      if (!entries.length) {
-        const empty = document.createElement('div');
-        empty.className = 'editor-environment-empty';
-        empty.textContent = 'No environment variables configured.';
-        rows.appendChild(empty);
-        return;
-      }
-      for (const [key, value] of entries) {
-        const row = document.createElement('div');
-        row.className = 'editor-environment-row';
-        const name = document.createElement('input');
-        const val = document.createElement('input');
-        const remove = document.createElement('button');
-        name.value = key;
-        val.value = String(value ?? '');
-        name.placeholder = 'VARIABLE_NAME';
-        val.placeholder = 'value';
-        remove.textContent = '×';
-        remove.title = 'Remove variable';
-        const saveRow = () => {
-          const nextKey = name.value.trim();
-          const nextValue = val.value;
-          if (!nextKey) return;
-          if (nextKey !== key) delete state.environment[key];
-          state.environment[nextKey] = nextValue;
-          saveEnvironment();
-          renderRows();
-        };
-        name.addEventListener('change', saveRow);
-        val.addEventListener('input', () => {
-          state.environment[key] = val.value;
-          saveEnvironment();
-        });
-        remove.onclick = () => {
-          delete state.environment[key];
-          saveEnvironment();
-          renderRows();
-        };
-        row.append(name, val, remove);
-        rows.appendChild(row);
-      }
-    };
-    div.querySelector('.editor-environment-add').onclick = () => {
-      let key = 'NEW_VARIABLE', i = 1;
-      while (Object.prototype.hasOwnProperty.call(state.environment, key)) key = 'NEW_VARIABLE_' + i++;
-      state.environment[key] = '';
-      saveEnvironment();
-      renderRows();
-      const last = rows.querySelector('.editor-environment-row:last-child input');
-      last?.focus();
-      last?.select();
-    };
-    div.querySelector('.editor-environment-clear').onclick = () => {
-      if (!Object.keys(state.environment).length || confirm('Clear all environment variables?')) {
-        state.environment = {};
-        saveEnvironment();
-        renderRows();
-      }
-    };
-    const importInput = div.querySelector('.editor-environment-import-input');
-    div.querySelector('.editor-environment-import').onclick = () => importInput?.click();
-    div.querySelector('.editor-environment-export').onclick = () => {
-      const lines = Object.entries(state.environment).map(([key, value]) => {
-        const safe = String(value ?? '').replace(/\r?\n/g, '\\n');
-        return `${key}=${safe}`;
-      });
-      const blob = new Blob([lines.join('\n') + (lines.length ? '\n' : '')], { type: 'text/plain' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = '.env';
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-    };
-    importInput.onchange = async () => {
-      const file = importInput.files?.[0];
-      importInput.value = '';
-      if (!file) return;
-      try {
-        const text = await file.text();
-        let imported = {};
-        if (/\.json$/i.test(file.name)) {
-          const value = JSON.parse(text || '{}');
-          if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Environment JSON must be an object.');
-          imported = Object.fromEntries(Object.entries(value).map(([k,v]) => [k, String(v ?? '')]));
-        } else {
-          for (const raw of text.split(/\r?\n/)) {
-            const line = raw.trim();
-            if (!line || line.startsWith('#')) continue;
-            const body = line.startsWith('export ') ? line.slice(7).trim() : line;
-            const i = body.indexOf('=');
-            if (i <= 0) continue;
-            const key = body.slice(0, i).trim();
-            let value = body.slice(i + 1).trim();
-            if ((value.startsWith('\"') && value.endsWith('\"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
-            imported[key] = value.replace(/\\n/g, '\n');
-          }
-        }
-        Object.assign(state.environment, imported);
-        saveEnvironment();
-        renderRows();
-      } catch (e) {
-        logError(e);
-      }
-    };
-    renderRows();
-    g.viewBody.appendChild(div);
-  }
+
   function renderWelcome(g) {
     const div = document.createElement('div');
     div.className = 'builtin-welcome';
@@ -1221,24 +772,7 @@
     div.appendChild(card);
     g.viewBody.appendChild(div);
   }
-  async function navigatePreview() {
-    const browser = state.browserFrame;
-    if (!browser) throw new Error('Browser tab is not ready.');
-    const c = state.runConfig?.config || ({});
-    let domain = String(c.domain || 'http://localhost:3000').trim();
-    if (!(/^[a-z][a-z0-9+.-]*:\/\//i).test(domain)) domain = 'http://' + domain;
-    domain = domain.replace(/\/+$/, '');
-    const publicPath = String(c.path || '/').trim() || '/';
-    const p = publicPath.startsWith('/') ? publicPath : '/' + publicPath;
-    const url = domain + (p === '/' ? '/' : p);
-    const win = browser.contentWindow;
-    const nav = win?.loadBrowserURL;
-    if (typeof nav === 'function') {
-      await nav(url, true);
-      return;
-    }
-    throw new Error('Browser load API is not ready.');
-  }
+  
   function detachRuntime(net) {
     if (!net) return;
     for (const ep of [state.staticEndpoint, state.nodeEmulator?.endpoint]) {
@@ -1315,16 +849,7 @@
     state.runDebugRefresh?.();
     updateStatus();
   }
-  function getOrOpenTerminal() {
-    for (const g of state.workbench.groups.values()) {
-      const t = g.tabs.find(x => x.kind === 'builtin' && x.builtin === 'terminal');
-      if (t) {
-        state.workbench.activateTab(g, t.id);
-        return t;
-      }
-    }
-    return openBuiltin('terminal', state.workbench.getFirstLeaf());
-  }
+  
   async function runConfigured() {
     if (!state.fs || !state.runConfig) return;
     state.runConfig.detect();
@@ -1342,12 +867,12 @@
     if (state.behavior.autoClearTerminal) for (const t of state.terminalTabs.values()) t.clear();
     let terminal = null;
     if (c.serverType === 'node') {
-      terminal = getOrOpenTerminal();
+      terminal = getBuiltin('terminal')?.getOrOpenTerminal();
     }
     await setupRuntime(net);
     if (c.serverType === 'node') {
       if (!state.nodeEmulator) throw new Error('Node runtime is not ready.');
-      terminal = terminal || getOrOpenTerminal();
+      terminal = terminal || getBuiltin('terminal')?.getOrOpenTerminal();
       const terminalView = state.terminalTabs.get(terminal.id);
       terminalView?.attach(state.nodeEmulator);
       if (c.nodeCommand) {
@@ -1356,8 +881,8 @@
       const serverReady = await state.nodeEmulator.waitForServer?.(10000, 50);
       if (!serverReady) throw new Error('Node command finished, but no listening server was created.');
     }
-    await ensureBrowser();
-    await navigatePreview();
+    await getBuiltin('browser')?.ensure();
+    await getBuiltin('browser')?.navigatePreview();
   }
   function onMove(oldPath, newPath, isDir) {
     for (const g of state.workbench.groups.values()) for (const t of g.tabs) {
@@ -1431,13 +956,14 @@
   function renderSidebarSettings() {
     const tree = $('tree');
     tree.classList.remove('activity-collapsed');
-    tree.innerHTML = '<div class="editor-settings-page sidebar-settings"><div class="editor-settings-header"><h2>Settings</h2><p>Editor and workspace behavior.</p></div><div class="editor-settings-section"><h3>Saving</h3><label><input id="setting-auto-save" type="checkbox"> Save project before Run</label><label><input id="setting-auto-clear" type="checkbox"> Clear terminal before Run</label></div><div class="editor-settings-section"><h3>Workspace</h3><label><input id="setting-confirm-replace" type="checkbox"> Confirm before replacing the workspace</label><label><input id="setting-confirm-delete" type="checkbox"> Confirm before deleting files and folders</label><label><input id="setting-show-hidden" type="checkbox"> Show hidden folders</label></div></div>';
-    const a = $('setting-auto-save'), c = $('setting-auto-clear'), r = $('setting-confirm-replace'), d = $('setting-confirm-delete'), h = $('setting-show-hidden');
+    tree.innerHTML = '<div class="editor-settings-page sidebar-settings"><div class="editor-settings-header"><h2>Settings</h2><p>Editor and workspace behavior.</p></div><div class="editor-settings-section"><h3>Saving</h3><label><input id="setting-auto-save" type="checkbox"> Save project before Run</label><label><input id="setting-auto-clear" type="checkbox"> Clear terminal before Run</label></div><div class="editor-settings-section"><h3>Workspace</h3><label><input id="setting-confirm-replace" type="checkbox"> Confirm before replacing the workspace</label><label><input id="setting-confirm-delete" type="checkbox"> Confirm before deleting files and folders</label><label><input id="setting-show-hidden" type="checkbox"> Show hidden folders</label></div><div class="editor-settings-section"><h3>Browser</h3><label><input id="setting-hide-browser-bar" type="checkbox"> Hide browser bar</label></div></div>';
+    const a = $('setting-auto-save'), c = $('setting-auto-clear'), r = $('setting-confirm-replace'), d = $('setting-confirm-delete'), h = $('setting-show-hidden'), b = $('setting-hide-browser-bar');
     a.checked = state.behavior.autoSaveOnRun;
     c.checked = state.behavior.autoClearTerminal;
     r.checked = state.behavior.confirmBeforeReplace;
     d.checked = state.behavior.confirmBeforeDelete;
     h.checked = state.behavior.showHiddenFolders;
+    b.checked = state.behavior.hideBrowserBar;
     a.onchange = () => {
       state.behavior.autoSaveOnRun = a.checked;
       saveBehaviorSettings();
@@ -1457,6 +983,13 @@
     h.onchange = () => {
       state.behavior.showHiddenFolders = h.checked;
       state.fileManager?.setShowHiddenFolders(h.checked);
+      saveBehaviorSettings();
+    };
+    b.onchange = () => {
+      state.behavior.hideBrowserBar = b.checked;
+      for (const info of state.browserTabs.values()) {
+        try { info.frame?.contentWindow?.setBrowserChromeHidden?.(b.checked); } catch (_) {}
+      }
       saveBehaviorSettings();
     };
   }
@@ -1533,8 +1066,8 @@
       return t;
     }
     if (data.kind === 'builtin') {
-      const t = makeBuiltinTab(data.builtin);
-      return t;
+      if (data.builtin === 'settings') return null;
+      return makeBuiltinTab(data.builtin);
     }
     return null;
   }
@@ -1631,7 +1164,7 @@
     state.lastCachedAt = 0;
     loadEditorConfig();
     loadProjectMetadata();
-    loadEnvironment();
+    getBuiltin('environment')?.load();
     state.fileManager.setFileSystem(fs);
     state.fileManager.setShowHiddenFolders?.(state.behavior.showHiddenFolders);
     state.fileManager.refresh();
@@ -1958,7 +1491,7 @@
       onBuiltin: (kind, g) => openBuiltin(kind, g),
       onLayoutChange: () => scheduleWorkspaceLayoutSave(),
       onClose: (t, g) => {
-        if (t?.builtin === 'peer') void stopPeerServer(t);
+        if (t?.builtin === 'peer') void getBuiltin('peer')?.stop(t);
         state.previews?.dispose(t);
         t.model?.dispose();
         t.editor?.dispose();
@@ -1985,22 +1518,63 @@
     });
     $('newZipBtn').onclick = () => newProject().catch(logError);
     $('saveProjectBtn').onclick = () => saveProjectNow();
-    $('saveZipBtn').onclick = async () => {
-      try {
-        const blob = await state.fs.exportZip();
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = (state.projectName || 'workspace') + '.zip';
-        a.click();
-        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-        noteSaved();
-      } catch (e) {
-        logError(e);
-      }
-    };
+    $('saveZipBtn').onclick = () => exportProject();
+    $('saveProjectBtn').title += ' (Ctrl+S)';
+    $('saveZipBtn').title = 'Export project as a ZIP (Ctrl+E)';
     $('runBtn').onclick = () => runConfigured().catch(logError);
+    $('runBtn').title = 'Run project (Ctrl+Enter or F5)';
     $('runConfigBtn').onclick = () => openBuiltin('run');
+    $('runConfigBtn').title = 'Open Run Configuration';
     bindActivitySettings();
+    if (!state._keybindingsBound) {
+      state._keybindingsBound = true;
+      document.addEventListener('keydown', e => {
+        const mod = e.ctrlKey || e.metaKey;
+        if (!mod && e.key !== 'F5') return;
+        if (e.key === 'F5') {
+          e.preventDefault();
+          runConfigured().catch(logError);
+          return;
+        }
+        if (e.key.toLowerCase() === 's' && !e.shiftKey && !e.altKey) {
+          e.preventDefault();
+          saveProjectNow();
+          return;
+        }
+        if (e.key.toLowerCase() === 'e' && !e.shiftKey && !e.altKey) {
+          e.preventDefault();
+          exportProject();
+          return;
+        }
+        if (e.key === 'Enter' && !e.shiftKey && !e.altKey) {
+          e.preventDefault();
+          runConfigured().catch(logError);
+          return;
+        }
+        if (e.shiftKey && !e.altKey) {
+          const key = e.key.toLowerCase();
+          if (key === 'e') {
+            e.preventDefault();
+            showSidebar('explorer');
+            return;
+          }
+          if (key === 'f') {
+            e.preventDefault();
+            showSidebar('Search');
+            return;
+          }
+          if (key === 'd') {
+            e.preventDefault();
+            showSidebar('Run and Debug');
+            return;
+          }
+        }
+        if (e.key === '`' && !e.shiftKey && !e.altKey) {
+          e.preventDefault();
+          openBuiltin('terminal');
+        }
+      });
+    }
   }
   async function start() {
     loadBehaviorSettings();
@@ -2035,6 +1609,8 @@
     openFile,
     openBuiltin,
     runConfigured,
+    saveProjectNow,
+    exportProject,
     logError
   };
 })();

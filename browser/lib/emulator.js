@@ -88,9 +88,9 @@
     }
   }
 
-  async function preprocessHtml(rawHtml, page) {
-    let pageUrl = getPageBaseUrl(page);
-    let dynamicBaseOrigin = page.location.origin;
+  async function preprocessHtml(rawHtml, page, baseUrlOverride = null) {
+    let pageUrl = baseUrlOverride || getPageBaseUrl(page);
+    let dynamicBaseOrigin = (() => { try { return new URL(pageUrl).origin; } catch (_) { return page.location.origin; } })();
 
     const parser = new DOMParser();
     const doc = parser.parseFromString(rawHtml, 'text/html');
@@ -214,6 +214,16 @@
       processElements('audio[src]', 'src'),
       processElements('source[src]', 'src'),
 
+      Promise.all(Array.from(doc.querySelectorAll('embed[src]')).map(async function(el) {
+        var src = el.getAttribute('src');
+        if (!src) return;
+        // The parsed document is detached from the live browser document here.
+        // Do not create/render the embed yet; the runtime setup below will do
+        // that after the document has actually been installed in its iframe.
+        el.setAttribute('data-raw-src',src);
+        el.removeAttribute('src');
+      })),
+
       Promise.all(Array.from(doc.querySelectorAll('iframe')).map(async function(el) {
         var src = el.getAttribute("src");
         var srcdoc = el.getAttribute("srcdoc");
@@ -292,14 +302,14 @@
     return doc.documentElement.outerHTML;
   }
 
-  async function sandboxSource(rawHtml,page,processHtml = true) {
+  async function sandboxSource(rawHtml,page,processHtml = true, baseUrlOverride = null) {
     let processedHtml;
 
-    if (processHtml) processedHtml = await preprocessHtml(rawHtml,page);
+    if (processHtml) processedHtml = await preprocessHtml(rawHtml,page,baseUrlOverride);
     else processedHtml = rawHtml;
 
-    const documentUrl = page.location.url;
-    const baseUrl = getPageBaseUrl(page);
+    const documentUrl = baseUrlOverride || page.location.url;
+    const baseUrl = baseUrlOverride || getPageBaseUrl(page);
     const runtimeInterceptor = createRuntimeInterceptor(documentUrl, page.location.origin, undefined, baseUrl);
 
     let finalHtml = processedHtml;
@@ -1387,6 +1397,27 @@
         }
 
         // --- Nested Frame / Embed Interception ---
+        async function setupEmbed(el) {
+          if (el.__sandboxed) return;
+          if (el.tagName.toLowerCase() !== 'embed') return;
+
+          el.__sandboxed = true;
+          el.__embedNavigationId = (el.__embedNavigationId || 0) + 1;
+          var navigationId = el.__embedNavigationId;
+          var src = el.getAttribute('data-raw-src') || el.getAttribute('src');
+          if (!src) return;
+
+          el.setAttribute('data-raw-src',src);
+          el.removeAttribute('src');
+
+          sendEvent('embed-create',{embed: el});
+          await sendAsyncEvent('embed-navigate',{
+            embed: el,
+            src: src,
+            navigationId: navigationId,
+          });
+        }
+
         async function setupNestedFrame(el) {
           if (el.__sandboxed) return;
           if (el.tagName.toLowerCase() !== 'iframe') return;
@@ -1471,7 +1502,6 @@
           { selector: 'video[poster]', attr: 'poster', rawAttr: 'data-raw-poster' },
           { selector: 'audio[src]', attr: 'src' },
           { selector: 'source[src]', attr: 'src' },
-          { selector: 'embed[src]', attr: 'src' },
           { selector: 'object[data]', attr: 'data' }
         ];
 
@@ -1509,7 +1539,8 @@
           if (node.matches('iframe, embed')) {
             setupNestedFrame(node);
           }
-          node.querySelectorAll('iframe, embed').forEach(setupNestedFrame);
+          node.querySelectorAll('iframe').forEach(setupNestedFrame);
+          node.querySelectorAll('embed').forEach(setupEmbed);
 
           // 4. Process srcset candidates
           if (node.matches('[srcset]')) interceptSrcSet(node);
@@ -1580,6 +1611,13 @@
 
               if (mutation.attributeName === 'style') {
                 processInlineStyleAttr(mutation.target);
+                el.__editingAttribute = false;
+                continue;
+              }
+
+              if (el.tagName && el.tagName.toLowerCase() === 'embed' && attrName === 'src') {
+                el.__editingAttribute = false;
+                setupEmbed(el);
                 continue;
               }
 
@@ -1603,9 +1641,11 @@
         if (document.readyState === 'loading') {
           document.addEventListener('DOMContentLoaded', () => {
             observer.observe(document.documentElement, observerOptions);
+            document.querySelectorAll('embed').forEach(setupEmbed);
           });
         } else {
           observer.observe(document.documentElement, observerOptions);
+          document.querySelectorAll('embed').forEach(setupEmbed);
         }
 
         // modifies everything returned from document, like document.getElementById()
@@ -3187,6 +3227,38 @@
             if (prop === 'length') return (pageEmulator?.children || []).length;
             if (prop === 'top') return getTopPage().__windowProxy || windowProxy;
             if (prop === 'parent') return pageEmulator?.parent && pageEmulator.parent !== false && pageEmulator.parent.__windowProxy ? pageEmulator.parent.__windowProxy : windowProxy;
+            if (prop === 'postMessage') {
+              return function(message, targetOrigin, transfer) {
+                // postMessage is a method of the Window being referenced.
+                // In particular, window.top.postMessage() must target top,
+                // not resolve the target from the child that created this proxy.
+                var receiverPage = pageEmulator;
+                if (this && this !== windowProxy) {
+                  var current = pageEmulator;
+                  var seen = new Set();
+                  while (current && !seen.has(current)) {
+                    seen.add(current);
+                    if (current.__windowProxy === this) {
+                      receiverPage = current;
+                      break;
+                    }
+                    current = current.parent && current.parent !== false ? current.parent : null;
+                    if (!current) break;
+                  }
+                  if (pageEmulator?.parent && pageEmulator.parent !== false && pageEmulator.parent.__windowProxy === this) {
+                    receiverPage = pageEmulator.parent;
+                  }
+                }
+                var targetWindow = receiverPage?.iframe?.contentWindow;
+                if (!targetWindow || typeof targetWindow.postMessage !== 'function') return;
+                try {
+                  var origin = targetOrigin || '*';
+                  targetWindow.postMessage(message, origin, transfer);
+                } catch(e) {
+                  try { targetWindow.postMessage(message, '*'); } catch(_) {}
+                }
+              };
+            }
             if (typeof prop === 'string' && /^\d+$/.test(prop)) {
               const child = getChildPage(prop);
               return child?.__windowProxy || undefined;
@@ -3361,7 +3433,54 @@
           }
           return __currentModuleExports;
         }, __thisArg, [__windowProxy, __windowProxy, __windowProxy, __windowProxy.parent, __windowProxy.top, __windowProxy.location, __windowProxy.document]);
+
+
       };
+      // Hide emulator-only DOM state when page code serializes HTML.
+      const nativeElementInnerHTML = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
+      const nativeElementOuterHTML = Object.getOwnPropertyDescriptor(Element.prototype, 'outerHTML');
+
+      function cleanSerializedElement(root) {
+        if (!root || root.nodeType !== Node.ELEMENT_NODE) return root;
+        const elements = [root, ...root.querySelectorAll('*')];
+        for (const el of elements) {
+          if (el.hasAttribute('data-embed-frame') || el.hasAttribute('data-embed-wrapper')) {
+            if (el.parentNode) el.parentNode.removeChild(el);
+            continue;
+          }
+          for (const attr of Array.from(el.attributes || [])) {
+            if (attr.name === 'data-page-id') {
+              el.removeAttribute(attr.name);
+              continue;
+            }
+            if (!attr.name.startsWith('data-raw-')) continue;
+            const publicName = attr.name.slice('data-raw-'.length);
+            if (publicName) el.setAttribute(publicName, attr.value);
+            el.removeAttribute(attr.name);
+          }
+        }
+        return root;
+      }
+
+      function serializePageElement(elem, outer) {
+        const clone = elem.cloneNode(true);
+        cleanSerializedElement(clone);
+        return outer ? nativeElementOuterHTML.get.call(clone) : nativeElementInnerHTML.get.call(clone);
+      }
+
+      Object.defineProperty(Element.prototype, 'innerHTML', {
+        configurable: nativeElementInnerHTML.configurable,
+        enumerable: nativeElementInnerHTML.enumerable,
+        get() { return serializePageElement(this, false); },
+        set(value) { return nativeElementInnerHTML.set.call(this, value); }
+      });
+
+      Object.defineProperty(Element.prototype, 'outerHTML', {
+        configurable: nativeElementOuterHTML.configurable,
+        enumerable: nativeElementOuterHTML.enumerable,
+        get() { return serializePageElement(this, true); },
+        set(value) { return nativeElementOuterHTML.set.call(this, value); }
+      });
     }
     return `(${interceptorFunction.toString()})("${source_origin}","${base_url || source_url}","${source_url}");//# sourceURL=${name}`;
   }
@@ -3424,12 +3543,12 @@
       return page;
     }
 
-    async setDocument(rawHtml, processHtml = true) {
+    async setDocument(rawHtml, processHtml = true, baseUrlOverride = null) {
       // Keep the exact source supplied to the emulator. DevTools Sources uses
       // this as the iframe's Original document, including dynamically-created
       // frames whose source was fetched after the parent document loaded.
       this.rawDocument = String(rawHtml ?? '');
-      const finalHtml = await sandboxSource(rawHtml,this,processHtml);
+      const finalHtml = await sandboxSource(rawHtml,this,processHtml,baseUrlOverride);
 
       // idk why i need to double it but it breaks if you remove one
 

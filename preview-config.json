@@ -1,4 +1,7 @@
 {
+  "runPath": "index.html",
+  "autoClear": false,
+  "autoSave": false,
   "main": "editor.html",
   "editor": true,
   "name": "Proxy Browser IDE"

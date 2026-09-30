@@ -69,6 +69,7 @@
       childQuery.set('start', target);
       childQuery.set('default', target);
     }
+    childQuery.set('hideBrowserBar', '1');
     const frame = document.getElementById('browser');
     if (frame) {
       frame.src = 'browser/browser.html' +
