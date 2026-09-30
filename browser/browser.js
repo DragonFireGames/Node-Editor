@@ -8,7 +8,7 @@ const DEFAULT_FAVICON = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2
 const browserQuery = new URLSearchParams(window.location.search);
 
 let appSettings = {
-  primaryProxy: "https://proxy.dragonfire7z.workers.dev/",
+  primaryProxy: (window.WorkerConfig && window.WorkerConfig.proxy) || "",
   fallbackProxy: "",
   searchEngine: "https://mojeek.com/search?q=",
   useFallback: false,
@@ -183,6 +183,7 @@ try {
 } catch(e) {}
 loadEditorBrowserState();
 subscribeEditorBrowserState();
+appSettings.primaryProxy = String(window.WorkerConfig?.proxy || '');
 
 function saveBrowserState() {
   const normalizedBookmarks = bookmarks.map(bookmark => ({
@@ -2313,6 +2314,7 @@ function clearHistoryLog() {
 }
 
 function updateSettings() {
+  appSettings.primaryProxy = String(window.WorkerConfig?.proxy || '');
   document.getElementById('setting-default-tab').value = appSettings.defaultTab;
   document.getElementById('setting-proxy-url').value = appSettings.primaryProxy;
   document.getElementById('setting-fallback-proxy-url').value = appSettings.fallbackProxy;
@@ -2326,7 +2328,7 @@ function updateSettings() {
 
 function saveSettings() {
   appSettings.defaultTab = document.getElementById('setting-default-tab').value;
-  appSettings.primaryProxy = document.getElementById('setting-proxy-url').value;
+  appSettings.primaryProxy = String(window.WorkerConfig?.proxy || '');
   appSettings.fallbackProxy = document.getElementById('setting-fallback-proxy-url').value;
   appSettings.searchEngine = document.getElementById('setting-search-engine').value;
   appSettings.useFallback = document.getElementById('setting-fallback-enable').checked;

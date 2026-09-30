@@ -9,13 +9,15 @@
   <script src="browser/external/peer.js"></script>
   <script src="browser/lib/endpoints/peer.js" data-layer="new URLSearchParams(window.location.search).get('peerLayer')"></script>
   <script>
-    (async function() {
+    window.__previewNetworkReady = (async function() {
+      const workers = await fetch('workers.json',{cache:'no-store'}).then(async r=>{if(!r.ok)throw new Error('Failed to load workers.json ('+r.status+')');const c=await r.json();if(!c||typeof c!=='object')throw new Error('Invalid workers.json');return c;}).catch(e=>{console.error(e);return {proxy:'',github:''};});
+      window.WorkerConfig = workers;
       const query = new URLSearchParams(location.search);
       const peerLayer = query.get('peerLayer') || 'peer';
       const target = query.get('u') || '';
 
       const primaryProxy = new ProxyNetworkEndpoint(
-        'https://proxy.dragonfire7z.workers.dev/',
+        String(workers.proxy || ''),
         true
       );
 
@@ -57,7 +59,8 @@
 </head>
 <body><iframe id="browser"></iframe></body>
 <script>
-  (function(){
+  (async function(){
+    await window.__previewNetworkReady;
     const query = new URLSearchParams(location.search);
     const peerLayer = query.get('peerLayer') || 'peer';
     const target = query.get('u') || '';

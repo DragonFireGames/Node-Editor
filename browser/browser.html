@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Proxy Site Browser & DevTools Sandbox</title>
     <script src="style/tailwind.js"></script>
+    <script>window.__workersConfigReady=fetch('../workers.json',{cache:'no-store'}).then(async r=>{if(!r.ok)throw new Error('Failed to load ../workers.json ('+r.status+')');const c=await r.json();if(!c||typeof c!=='object')throw new Error('Invalid workers.json');window.WorkerConfig=c;return c;}).catch(e=>{console.error(e);window.WorkerConfig={proxy:'',github:''};return window.WorkerConfig;});</script>
     <link rel="stylesheet" href="style/fontawesome.css">
     <link rel="stylesheet" href="style/browser.css">
     <script src="external/acorn.js"></script>
@@ -119,8 +120,8 @@
           </div>
           <div>
             <label class="block font-semibold mb-1 text-gray-300">CORS Worker Proxy Gateway URL</label>
-            <input type="text" id="setting-proxy-url" class="w-full bg-gray-900 border border-gray-700 rounded p-2 text-white outline-none" value="https://proxy.dragonfire7z.workers.dev/">
-            <p class="text-gray-500 mt-1">Requests to non-local origins are dynamically routed through this proxy gateway.</p>
+            <input type="text" id="setting-proxy-url" class="w-full bg-gray-900 border border-gray-700 rounded p-2 text-white outline-none" value="" readonly>
+            <p class="text-gray-500 mt-1">Loaded from workers.json. Requests to non-local origins are dynamically routed through this proxy gateway.</p>
           </div>
           <div class="flex items-center gap-2 pt-2 border-t border-gray-800">
             <input type="checkbox" id="setting-obscure-url" class="rounded bg-gray-800 border-gray-700" checked>
@@ -159,6 +160,6 @@
 
     <script src="console.js"></script>
     <script src="devtools.js"></script>
-    <script src="browser.js"></script>
+    <script>window.__workersConfigReady.then(function(workers){window.WorkerConfig=workers;var script=document.createElement('script');script.src='browser.js';document.body.appendChild(script);}).catch(console.error);</script>
   </body>
 </html>

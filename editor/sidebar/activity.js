@@ -7,13 +7,16 @@
     const settings = root.Settings(options);
     const placeholders = root.Placeholders(options);
     const search = root.Search(options);
+    const sourceControl = root.SourceControl(options);
+    const profile = root.Profile(options);
     const activities = {
       activitySearch: {kind: 'Search', show: () => search.show()},
-      activitySource: {kind: 'Source Control', show: () => placeholders.show('Source Control')},
+      activitySource: {kind: 'Source Control', show: () => sourceControl.show()},
       activityRun: {kind: 'Run and Debug', show: () => runDebug.show()},
       activityExtensions: {kind: 'Extensions', show: () => placeholders.show('Extensions')},
       activitySettings: {kind: 'settings', show: () => settings.show()},
       activityExplorer: {kind: 'explorer', show: () => explorer.show()},
+      activityProfile: {kind: 'Profile', show: () => profile.show()},
     };
     const MIN_WIDTH = 180;
     const MAX_WIDTH = 420;
@@ -97,7 +100,7 @@
     setWidth(MIN_WIDTH);
     state.sidebar = 'explorer';
     return {
-      explorer, runDebug, settings, search, show,
+      explorer, runDebug, settings, search, sourceControl, profile, show,
       setActiveActivity(id) { document.querySelectorAll('.activity-button').forEach(x => x.classList.toggle('active', x.id === id)); },
       restoreCollapsed: paths => explorer.restoreCollapsed(paths),
       setWidth, collapse, expand, getWidth: () => width

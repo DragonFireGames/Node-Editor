@@ -1,4 +1,5 @@
-(function () {
+window.__editorInitPromise = (async function () {
+  const workers = await (window.__workersConfigReady || Promise.resolve(window.WorkerConfig || {}));
   // One Network owned by the editor/workbench and shared by every Browser iframe.
   // Keeping ownership here prevents a Browser iframe from taking the network down
   // when its workbench tab is replaced or destroyed.
@@ -6,7 +7,7 @@
     try {
       const sharedNetwork = new Network();
       if (typeof ProxyNetworkEndpoint === 'function' && typeof NetworkEndpoint === 'function') {
-        const primaryProxy = new ProxyNetworkEndpoint('https://proxy.dragonfire7z.workers.dev/', true);
+        const primaryProxy = new ProxyNetworkEndpoint(String(workers.proxy || ''), true);
         const fallbackProxy = new ProxyNetworkEndpoint('', true, false);
         const defaultFallback = new NetworkEndpoint();
         defaultFallback.__browserDefaultFallback = true;
@@ -1046,7 +1047,7 @@
     const restored = state.workbench.restore(layout.workbench, data => makeLayoutTab(data, state.runConfig?.config?.serverType));
     if (!restored) return false;
     state.sidebarController.restoreCollapsed(layout.collapsedPaths || []);
-    if (layout.sidebar === 'explorer' || layout.sidebar === 'settings' || layout.sidebar === 'Search' || layout.sidebar === 'Source Control' || layout.sidebar === 'Run and Debug' || layout.sidebar === 'Extensions') {
+    if (layout.sidebar === 'explorer' || layout.sidebar === 'settings' || layout.sidebar === 'Search' || layout.sidebar === 'Source Control' || layout.sidebar === 'Run and Debug' || layout.sidebar === 'Extensions' || layout.sidebar === 'Profile') {
       state.sidebarController.show(layout.sidebar);
     } else {
       state.sidebarController.show('explorer');
@@ -1784,6 +1785,7 @@
   }
   async function start() {
     loadBehaviorSettings();
+    await window.GitHubService?.init?.();
     bindUI();
     if (!state._lifecycleBound) {
       state._lifecycleBound = true;
