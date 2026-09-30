@@ -1,6 +1,6 @@
 (function() {
   const factories = window.EditorBuiltinFactories = window.EditorBuiltinFactories || {};
-  factories['run-config'] = function(ctx) {
+  factories['run'] = function(ctx) {
     const state = ctx.state;
     function renderRunConfig(g) {
     const div = document.createElement('div');

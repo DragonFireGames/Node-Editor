@@ -50,6 +50,7 @@
     loading: false,
     runConfig: null,
     workbench: null,
+    sidebarController: null,
     dirty: false,
     monacoPromise: null,
     builtins: {},
@@ -392,6 +393,7 @@
         workbench: state.workbench.serialize(),
         sidebar: state.sidebar || 'explorer',
         explorerCollapsed: !!$('tree')?.classList.contains('activity-collapsed'),
+        sidebarWidth: parseInt($('tree')?.style.flexBasis || $('tree')?.getBoundingClientRect().width || 180, 10),
         collapsedPaths: [...(state.fileManager?.collapsedPaths || [])],
         activeActivity: document.querySelector('.activity-button.active')?.id || 'activityExplorer'
       }));
@@ -714,7 +716,7 @@
   }
   function openBuiltin(kind, g = state.workbench.getFirstLeaf(), options = {}) {
     if (kind === 'settings') {
-      showSidebar('settings');
+      state.sidebarController.show('settings');
       return null;
     }
     if (options.replace) {
@@ -918,127 +920,6 @@
     for (const g of [...state.workbench.groups.values()]) for (const t of [...g.tabs]) if (t.kind === 'file' && (t.path === path || isDir && t.path.startsWith(path + '/'))) state.workbench.removeTab(g, t.id);
     updateStatus();
   }
-  function setActiveActivity(id) {
-    document.querySelectorAll('.activity-button').forEach(x => x.classList.toggle('active', x.id === id));
-  }
-  function renderSidebarPlaceholder(title) {
-    const tree = $('tree');
-    tree.classList.remove('activity-collapsed');
-    if (title === 'Run and Debug') {
-      renderRunDebugSidebar();
-      return;
-    }
-    tree.innerHTML = `<div class="activity-sidebar-placeholder"><div class="activity-sidebar-title">${title}</div><div class="activity-sidebar-empty">No ${title.toLowerCase()} content yet.</div></div>`;
-  }
-  function renderRunDebugSidebar() {
-    const tree = $('tree');
-    tree.innerHTML = `<div class="run-debug-sidebar"><div class="activity-sidebar-title">Run and Debug</div><div class="run-debug-actions"><button id="sidebar-run" class="primary">Run</button><button id="sidebar-refresh-endpoints">Refresh</button></div><div class="run-debug-section"><div class="run-debug-section-title">Browser Network Endpoints</div><div id="endpoint-list"></div></div></div>`;
-    const list = tree.querySelector('#endpoint-list');
-    const render = () => {
-      const net = state.browserNetwork;
-      const info = net?.getEndpointInfo ? net.getEndpointInfo() : (net?.endpoints || []).map((ep, index) => ({
-        index,
-        name: ep?.constructor?.name || 'Endpoint',
-        enabled: ep?.enabled !== false,
-        runtime: !!ep?.__editorRuntimeEndpoint,
-        proxy: ep?.proxy || null,
-        domain: ep?.domain || null,
-        path: ep?.path || null,
-        rootfolder: ep?.rootfolder || null
-      }));
-      if (!info.length) {
-        list.innerHTML = '<div class="endpoint-empty">Browser network is not ready.</div>';
-        return;
-      }
-      list.innerHTML = info.map(ep => {
-        const detail = ep.runtime ? ep.domain || 'Runtime' : ep.proxy || ep.domain || '';
-        return `<div class="endpoint-row"><div class="endpoint-name"><span>${ep.index + 1}. ${ep.name}</span><span class="endpoint-status ${ep.enabled ? 'enabled' : 'disabled'}">${ep.enabled ? 'ON' : 'OFF'}</span></div><div class="endpoint-detail">${ep.runtime ? 'Runtime endpoint • ' : ''}${detail || 'Default browser endpoint'}</div></div>`;
-      }).join('');
-    };
-    render();
-    const net = state.browserNetwork;
-    if (net?.addEventListener && !tree._endpointListener) {
-      const listener = () => render();
-      net.addEventListener('endpointschange', listener);
-      tree._endpointListener = listener;
-    }
-    tree.querySelector('#sidebar-refresh-endpoints').onclick = render;
-    tree.querySelector('#sidebar-run').onclick = () => runConfigured().catch(logError);
-    state.runDebugRefresh = render;
-  }
-  function renderSidebarSettings() {
-    const tree = $('tree');
-    tree.classList.remove('activity-collapsed');
-    tree.innerHTML = '<div class="editor-settings-page sidebar-settings"><div class="editor-settings-header"><h2>Settings</h2><p>Editor and workspace behavior.</p></div><div class="editor-settings-section"><h3>Saving</h3><label><input id="setting-auto-save" type="checkbox"> Save project before Run</label><label><input id="setting-auto-clear" type="checkbox"> Clear terminal before Run</label></div><div class="editor-settings-section"><h3>Workspace</h3><label><input id="setting-confirm-replace" type="checkbox"> Confirm before replacing the workspace</label><label><input id="setting-confirm-delete" type="checkbox"> Confirm before deleting files and folders</label><label><input id="setting-show-hidden" type="checkbox"> Show hidden folders</label></div><div class="editor-settings-section"><h3>Browser</h3><label><input id="setting-hide-browser-bar" type="checkbox"> Hide browser bar</label></div></div>';
-    const a = $('setting-auto-save'), c = $('setting-auto-clear'), r = $('setting-confirm-replace'), d = $('setting-confirm-delete'), h = $('setting-show-hidden'), b = $('setting-hide-browser-bar');
-    a.checked = state.behavior.autoSaveOnRun;
-    c.checked = state.behavior.autoClearTerminal;
-    r.checked = state.behavior.confirmBeforeReplace;
-    d.checked = state.behavior.confirmBeforeDelete;
-    h.checked = state.behavior.showHiddenFolders;
-    b.checked = state.behavior.hideBrowserBar;
-    a.onchange = () => {
-      state.behavior.autoSaveOnRun = a.checked;
-      saveBehaviorSettings();
-    };
-    c.onchange = () => {
-      state.behavior.autoClearTerminal = c.checked;
-      saveBehaviorSettings();
-    };
-    r.onchange = () => {
-      state.behavior.confirmBeforeReplace = r.checked;
-      saveBehaviorSettings();
-    };
-    d.onchange = () => {
-      state.behavior.confirmBeforeDelete = d.checked;
-      saveBehaviorSettings();
-    };
-    h.onchange = () => {
-      state.behavior.showHiddenFolders = h.checked;
-      state.fileManager?.setShowHiddenFolders(h.checked);
-      saveBehaviorSettings();
-    };
-    b.onchange = () => {
-      state.behavior.hideBrowserBar = b.checked;
-      for (const info of state.browserTabs.values()) {
-        try { info.frame?.contentWindow?.setBrowserChromeHidden?.(b.checked); } catch (_) {}
-      }
-      saveBehaviorSettings();
-    };
-  }
-  function showSidebar(kind) {
-    state.sidebar = kind;
-    const explorer = $('tree');
-    explorer.classList.remove('activity-collapsed');
-    if (kind === 'explorer') {
-      setActiveActivity('activityExplorer');
-      state.fileManager?.render();
-      scheduleWorkspaceLayoutSave();
-      return;
-    }
-    if (kind === 'settings') {
-      setActiveActivity('activitySettings');
-      renderSidebarSettings();
-      scheduleWorkspaceLayoutSave();
-      return;
-    }
-    const map = {
-      Search: 'activitySearch',
-      'Source Control': 'activitySource',
-      'Run and Debug': 'activityRun',
-      'Extensions': 'activityExtensions'
-    };
-    setActiveActivity(map[kind] || null);
-    renderSidebarPlaceholder(kind || 'Activity');
-    scheduleWorkspaceLayoutSave();
-  }
-  function bindActivitySettings() {
-    const button = $('activitySettings');
-    button?.addEventListener('click', e => {
-      e.stopPropagation();
-      showSidebar('settings');
-    });
-  }
   async function openZipFile(f) {
     await replaceFileSystem(await FileSystem.create(f, {
       sync: false
@@ -1088,17 +969,15 @@
     if (!layout?.workbench || !state.workbench.restore) return false;
     const restored = state.workbench.restore(layout.workbench, data => makeLayoutTab(data, state.runConfig?.config?.serverType));
     if (!restored) return false;
-    if (state.fileManager) {
-      state.fileManager.collapsedPaths = new Set(layout.collapsedPaths || []);
-      state.fileManager.render();
-    }
+    state.sidebarController.restoreCollapsed(layout.collapsedPaths || []);
     if (layout.sidebar === 'explorer' || layout.sidebar === 'settings' || layout.sidebar === 'Search' || layout.sidebar === 'Source Control' || layout.sidebar === 'Run and Debug' || layout.sidebar === 'Extensions') {
-      showSidebar(layout.sidebar);
+      state.sidebarController.show(layout.sidebar);
     } else {
-      showSidebar('explorer');
+      state.sidebarController.show('explorer');
     }
-    if (layout.activeActivity && $(layout.activeActivity)) setActiveActivity(layout.activeActivity);
+    if (layout.activeActivity && $(layout.activeActivity)) state.sidebarController.setActiveActivity(layout.activeActivity);
     const tree = $('tree');
+    if (tree && layout.sidebarWidth) state.sidebarController.setWidth(layout.sidebarWidth);
     if (tree) tree.classList.toggle('activity-collapsed', !!layout.explorerCollapsed);
     if (layout.explorerCollapsed) document.querySelector('#activityExplorer')?.classList.remove('active');
     return true;
@@ -1470,33 +1349,47 @@
     requestAnimationFrame(() => modal.classList.add('show'));
   }
 
-  function bindUI() {
-    const explorerButton = $('activityExplorer');
-    const explorer = $('tree');
-    state.sidebar = 'explorer';
-    explorerButton?.addEventListener('click', e => {
-      e.stopPropagation();
-      if (state.sidebar === 'explorer' && !explorer.classList.contains('activity-collapsed')) {
-        explorer.classList.add('activity-collapsed');
-        explorerButton.classList.remove('active');
-        return;
+  function openSearchResult(path, line, column) {
+    openFile(path);
+    let attempts = 0;
+    const reveal = () => {
+      attempts++;
+      for (const g of state.workbench.groups.values()) {
+        const tab = g.tabs.find(t => t.kind === 'file' && t.path === normalize(path));
+        if (!tab) continue;
+        if (tab.editor) {
+          tab.editor.setPosition({lineNumber: line, column: column});
+          tab.editor.revealPositionInCenter({lineNumber: line, column: column});
+          tab.editor.focus();
+          return;
+        }
       }
-      showSidebar('explorer');
-    });
-    const sidebarKinds = {
-      activitySearch: 'Search',
-      activitySource: 'Source Control',
-      activityRun: 'Run and Debug',
-      activityExtensions: 'Extensions'
+      if (attempts < 40) setTimeout(reveal, 50);
     };
-    for (const [id, title] of Object.entries(sidebarKinds)) {
-      const button = $(id);
-      button?.addEventListener('click', e => {
-        e.stopPropagation();
-        showSidebar(title);
-      });
-    }
-    explorer?.addEventListener('contextmenu', e => e.stopPropagation());
+    reveal();
+  }
+
+  function bindUI() {
+    state.sidebarController = EditorSidebar.create({
+      state,
+      $,
+      tree: $('tree'),
+      resizer: $('resizer'),
+      contextMenu: $('contextMenu'),
+      fileInput: $('fileUploader'),
+      FileManager,
+      runConfigured,
+      logError,
+      saveBehaviorSettings,
+      scheduleWorkspaceLayoutSave,
+      updateStatus,
+      onOpen: openFile,
+      onMove,
+      onDelete,
+      markDirty,
+      onOpenResult: openSearchResult
+    });
+    state.sidebar = 'explorer';
     state.previews = new EditorPreviewManager(state);
     for (const provider of window.EditorPreviewProviders || []) state.previews.register(provider);
     state.workbench = new Workbench($('editorWorkbench'), {
@@ -1510,17 +1403,6 @@
         t.editor?.dispose();
         state.workbench.removeTab(g, t.id);
       }
-    });
-    state.fileManager = new FileManager({
-      tree: $('tree'),
-      contextMenu: $('contextMenu'),
-      fileInput: $('fileUploader'),
-      onOpen: openFile,
-      onMove,
-      onDelete,
-      onChange: () => { state.markDirty?.(); updateStatus(); },
-      projectName: () => state.projectName,
-      showHiddenFolders: state.behavior.showHiddenFolders
     });
     state.runConfig = new EditorRunConfig(state);
     $('uploadZipBtn').onclick = () => openImportModal();
@@ -1538,7 +1420,6 @@
     $('runBtn').title = 'Run project (Ctrl+Enter or F5)';
     $('runConfigBtn').onclick = () => openBuiltin('run');
     $('runConfigBtn').title = 'Open Run Configuration';
-    bindActivitySettings();
     if (!state._keybindingsBound) {
       state._keybindingsBound = true;
       document.addEventListener('keydown', e => {
@@ -1568,17 +1449,17 @@
           const key = e.key.toLowerCase();
           if (key === 'e') {
             e.preventDefault();
-            showSidebar('explorer');
+            state.sidebarController.show('explorer');
             return;
           }
           if (key === 'f') {
             e.preventDefault();
-            showSidebar('Search');
+            state.sidebarController.show('Search');
             return;
           }
           if (key === 'd') {
             e.preventDefault();
-            showSidebar('Run and Debug');
+            state.sidebarController.show('Run and Debug');
             return;
           }
         }

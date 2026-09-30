@@ -40,6 +40,8 @@ body { margin:0; font-family:sans-serif; background:#111; color:#eee; }
     #sendBtn { background:#222; color:#0f0; border:none; padding:6px 12px; cursor:pointer; }
     #tree ul { list-style:none; padding-left:16px; margin:0; }
     #tree li { cursor:pointer; margin:2px 0; padding: 2px 4px; }
+    #tree li.selected-file { background:#094771; color:#fff; }
+    #tree li.selected-file:hover:not(:has(li:hover)) { background:#0e639c; }
     #tree li:hover:not(:has(li:hover)), li.draghover { background:#333; }
     #tree svg { display: inline-block; height: 1em; padding-right: 2px; }
     #treebuttons { padding-left: 10px; }
@@ -132,7 +134,7 @@ body.resizing,body.resizing *{user-select:none!important}
 .activity-button.active{color:#eee;border-left-color:#fff;background:#202020}
 .activity-button svg{width:23px;height:23px;display:block}
 .activity-spacer{flex:1}
-.activity-settings{margin-top:4px}
+.activity-profile{margin-bottom:0}.activity-settings{margin-top:4px}
 .activity-button[data-placeholder]::after{content:attr(data-placeholder);position:absolute;left:52px;top:50%;transform:translateY(-50%);background:#222;color:#eee;border:1px solid #444;padding:3px 6px;font:11px sans-serif;white-space:nowrap;opacity:0;pointer-events:none;z-index:1000}
 .activity-button[data-placeholder]:hover::after{opacity:1}
 #tree{flex:0 0 250px}
@@ -161,3 +163,11 @@ body.resizing,body.resizing *{user-select:none!important}
 
 
 .builtin-peer-server{height:100%;overflow:auto;box-sizing:border-box;padding:28px;color:#ddd;background:#1e1e1e}.builtin-peer-server h2{margin:0 0 6px;font-size:21px;font-weight:500;color:#eee}.builtin-peer-server p{margin:0 0 22px;color:#888;font-size:12px;max-width:700px}.peer-server-form{max-width:720px;display:grid;grid-template-columns:130px minmax(0,1fr);gap:10px 12px;align-items:center}.peer-server-form label{color:#aaa;font-size:12px}.peer-server-form input{box-sizing:border-box;width:100%;background:#111;color:#ddd;border:1px solid #3b3b3b;padding:8px;font:12px monospace;outline:none}.peer-server-form input:focus{border-color:#5a89b5}.peer-server-form input:read-only{color:#999}.peer-server-actions{grid-column:1/-1;display:flex;gap:8px;margin-top:8px}.peer-server-actions button{background:#2a2a2a;color:#ddd;border:1px solid #444;padding:8px 12px;cursor:pointer}.peer-server-actions button:hover:not(:disabled){background:#353535}.peer-server-actions button.primary{background:#2563a6;border-color:#4a86bd}.peer-server-actions button:disabled{opacity:.45;cursor:default}.peer-server-status{grid-column:1/-1;padding-top:4px;color:#69d66b;font:12px monospace}.peer-server-status.error{color:#e06b75}.peer-server-result{grid-column:1/-1}.peer-host-frame{display:none}
+.sidebar-search{height:100%;box-sizing:border-box;padding:10px;overflow:auto;color:#ccc;font-family:sans-serif}.sidebar-search-input{width:100%;box-sizing:border-box;background:#252525;color:#eee;border:1px solid #555;border-radius:2px;padding:7px 8px;outline:none}.sidebar-search-input:focus{border-color:#888}.sidebar-search-results{margin-top:10px}.sidebar-search-message{color:#777;font-size:12px;padding:14px 4px}.sidebar-search-file{margin-bottom:10px}.sidebar-search-file-name{display:flex;justify-content:space-between;gap:8px;color:#ccc;font-size:11px;padding:5px 3px;white-space:nowrap;overflow:hidden}.sidebar-search-file-name span{color:#777;flex:none}.sidebar-search-result{display:flex;width:100%;box-sizing:border-box;text-align:left;background:none;border:0;color:#aaa;padding:3px 4px;gap:7px;cursor:pointer;font:11px monospace;overflow:hidden}.sidebar-search-result:hover{background:#2a2d2e;color:#eee}.sidebar-search-location{color:#777;flex:none;min-width:28px}.sidebar-search-line{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#resizer{flex:0 0 3px;width:3px;min-width:3px;box-sizing:border-box;cursor:col-resize;background:#444;z-index:20}
+#resizer:hover{background:#666}
+#tree.activity-collapsed{display:none}#tree.activity-collapsed + #resizer{flex-basis:0;width:0;min-width:0;border:0;overflow:hidden}
+
+.sidebar-drag-overlay{position:fixed;inset:0;z-index:2147483647;cursor:col-resize;background:transparent}body.resizing iframe{pointer-events:none}
+
+body.workbench-dragging iframe{pointer-events:none}

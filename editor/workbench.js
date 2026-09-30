@@ -255,11 +255,13 @@
             groupId: g.id
           };
           el.classList.add('dragging');
+          document.body.classList.add('workbench-dragging');
           e.dataTransfer.effectAllowed = 'move';
           e.dataTransfer.setData('text/plain', 'workbench-tab:' + t.id);
         });
         el.addEventListener('dragend', () => {
           el.classList.remove('dragging');
+          document.body.classList.remove('workbench-dragging');
           this.dragInfo = null;
           this.hideDropPreview();
         });
