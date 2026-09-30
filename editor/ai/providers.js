@@ -1,22 +1,28 @@
 (function() {
   const root = window.EditorAI = window.EditorAI || {};
-  const DEFAULT_PUBLIC_ENDPOINT = 'https://api.llmfaucet.dev/v1';
-  const DEFAULT_PUBLIC_MODEL = 'auto:coding';
+  const DEFAULT_PUBLIC_ENDPOINT = 'https://aihorde.net/api/v2';
+  const DEFAULT_PUBLIC_MODEL = 'aphrodite/TheDrummer/Cydonia-24B-v4.3';
+  const DEFAULT_PUBLIC_NAME = 'AI Horde • Cydonia 24B';
+  const HF_KEY_STORAGE = 'editor.aiHuggingFaceKey';
   const STORAGE_KEY = 'editor.aiModels.v2';
   const PROTOCOLS = {
     'openai-chat': {label:'OpenAI Chat Completions', tools:true},
+    'ai-horde': {label:'AI Horde Native', tools:false},
     'openai-responses': {label:'OpenAI Responses', tools:true},
     'anthropic-messages': {label:'Anthropic Messages', tools:true},
     'google-gemini': {label:'Google Gemini', tools:true},
     'cohere-v2': {label:'Cohere Chat v2', tools:true},
     'gradio-space': {label:'Gradio Space', tools:false}
   };
+  function isHuggingFaceEndpoint(endpoint){return /(?:^|\.)huggingface\.co(?:\/|$)/i.test(String(endpoint||''));}
+  function getStoredHuggingFaceKey(){try{return String(localStorage.getItem(HF_KEY_STORAGE)||'').trim();}catch(_){return '';}}
+  function setStoredHuggingFaceKey(key){try{if(key)localStorage.setItem(HF_KEY_STORAGE,key);else localStorage.removeItem(HF_KEY_STORAGE);}catch(_){}}
   const DEFAULT_MODEL = {
-    id:'public-llmfaucet-auto-coding', name:'LLM Faucet • Auto Coding', kind:'openai-chat', protocol:'openai-chat',
+    id:'public-aihorde-cydonia', name:DEFAULT_PUBLIC_NAME, kind:'ai-horde', protocol:'ai-horde',
     endpoint:DEFAULT_PUBLIC_ENDPOINT, remoteModel:DEFAULT_PUBLIC_MODEL, model:DEFAULT_PUBLIC_MODEL,
-    apiKey:'', anonymousAuth:'free', rememberKey:false, requiresKey:false, supportsTools:true, supportsReasoning:true, public:true
+    apiKey:'', anonymousAuth:'0000000000', rememberKey:false, requiresKey:false, supportsTools:false, supportsReasoning:false, supportsStreaming:false, public:true, useSharedKeys:false
   };
-  const LEGACY_PUBLIC_IDS = new Set(['public-qwen35','public-blockrun-gpt-oss']);
+  const LEGACY_PUBLIC_IDS = new Set(['public-qwen35','public-blockrun-gpt-oss','public-llmfaucet-auto-coding','public-hf-gpt-oss-120b']);
   function cleanModel(model) {
     model = model && typeof model === 'object' ? model : {};
     let protocol = String(model.protocol || '').trim();
@@ -29,7 +35,7 @@
       remoteModel:String(model.remoteModel || model.model || '').trim(), model:String(model.model || model.remoteModel || '').trim(),
       apiKey:String(model.apiKey || ''), anonymousAuth:String(model.anonymousAuth || ''), rememberKey:!!model.rememberKey,
       requiresKey:model.requiresKey !== false, supportsTools:model.supportsTools !== false,
-      supportsReasoning:model.supportsReasoning !== false, public:!!model.public
+      supportsReasoning:model.supportsReasoning !== false, supportsStreaming:model.supportsStreaming !== false, public:!!model.public, useSharedKeys:model.useSharedKeys !== false
     };
   }
   function inferProtocol(endpoint) {
@@ -38,6 +44,7 @@
     if (url.includes('api.anthropic.com')) return 'anthropic-messages';
     if (url.includes('generativelanguage.googleapis.com') || url.includes('generativelanguage.googleapis.com')) return 'google-gemini';
     if (url.includes('api.cohere.com')) return 'cohere-v2';
+    if (url.includes('aihorde.net') || url.includes('oai.aihorde.net')) return 'ai-horde';
     if (url.includes('/responses') || url.includes('api.openai.com')) return 'openai-responses';
     if (url.includes('hf.space')) return 'gradio-space';
     if (/chat\/completions|\/v1(?:\/)?$/i.test(url) || /openrouter|groq|together|fireworks|deepseek|mistral|x\.ai|xai|blockrun|huggingface|ollama/i.test(url)) return 'openai-chat';
@@ -53,24 +60,33 @@
       } catch (_) {}
     }
     const models=Array.isArray(parsed?.models) ? parsed.models.map(cleanModel).filter(x=>x.id && x.endpoint && x.protocol) : [];
-    for (let i=models.length-1;i>=0;i--) if (LEGACY_PUBLIC_IDS.has(models[i].id)) models.splice(i,1);
-    if (!models.some(x=>x.id===DEFAULT_MODEL.id)) models.unshift({...DEFAULT_MODEL});
+    const huggingFaceApiKey=String(parsed?.huggingFaceApiKey || getStoredHuggingFaceKey() || '').trim();
+    for (let i=models.length-1;i>=0;i--) {
+      if (LEGACY_PUBLIC_IDS.has(models[i].id) || models[i].id===DEFAULT_MODEL.id) models.splice(i,1);
+    }
+    models.unshift({...DEFAULT_MODEL});
     let active=parsed?.activeModelId;
     if (!models.some(x=>x.id===active) || LEGACY_PUBLIC_IDS.has(active)) active=DEFAULT_MODEL.id;
-    return {activeModelId:active,models};
+    return {activeModelId:active,models,huggingFaceApiKey,huggingFaceRememberKey:!!parsed?.huggingFaceApiKey};
   }
   function saveModels(settings) {
     const models=(settings?.models || []).map(cleanModel).filter(x=>x.id && x.endpoint && x.protocol);
-    if (!models.some(x=>x.id===DEFAULT_MODEL.id)) models.unshift({...DEFAULT_MODEL});
+    for (let i=models.length-1;i>=0;i--) { if (models[i].id===DEFAULT_MODEL.id) models.splice(i,1); }
+    models.unshift({...DEFAULT_MODEL});
     const active=models.some(x=>x.id===settings?.activeModelId) ? settings.activeModelId : models[0].id;
-    const stored={version:2,activeModelId:active,models:models.map(x=>x.rememberKey ? x : {...x,apiKey:''})};
+    const rememberHF=!!settings?.huggingFaceRememberKey;const stored={version:2,activeModelId:active,huggingFaceApiKey:rememberHF?String(settings?.huggingFaceApiKey||'').trim():'',models:models.map(x=>x.rememberKey ? x : {...x,apiKey:''})};
     try { localStorage.setItem(STORAGE_KEY,JSON.stringify(stored)); } catch (_) {}
-    return {activeModelId:active,models};
+    return {activeModelId:active,models,huggingFaceApiKey:String(settings?.huggingFaceApiKey||getStoredHuggingFaceKey()||'').trim(),huggingFaceRememberKey:!!settings?.huggingFaceRememberKey};
   }
   function get(settings) { return (settings?.models || []).find(x=>x.id===settings.activeModelId) || settings?.models?.[0] || {...DEFAULT_MODEL}; }
   function protocolLabel(id) { return PROTOCOLS[id]?.label || 'Unsupported API format'; }
   class ProviderRegistry {
-    constructor(){ this.settings=loadModels(); this.settings=saveModels(this.settings); }
+    constructor(){ this.settings=loadModels(); this.sharedKeyCursor=0; this.settings=saveModels(this.settings); }
+    getHuggingFaceApiKey(){return String(this.settings.huggingFaceApiKey||'').trim();}
+    setHuggingFaceApiKey(key,remember){const value=String(key||'').trim();this.settings.huggingFaceApiKey=value;this.settings.huggingFaceRememberKey=!!remember;if(remember)setStoredHuggingFaceKey(value);else setStoredHuggingFaceKey('');}
+    clearHuggingFaceApiKey(){this.settings.huggingFaceApiKey='';setStoredHuggingFaceKey('');}
+    getHuggingFaceKeySource(model){if(model?.apiKey)return 'model';if(this.getHuggingFaceApiKey())return 'user';return 'none';}
+    getHuggingFaceRequestKey(custom=''){return String(custom||'').trim() || this.getHuggingFaceApiKey();}
     active(){ return get(this.settings); }
     setActive(id){ if(this.settings.models.some(x=>x.id===id)){this.settings.activeModelId=id;this.settings=saveModels(this.settings);} }
     add(model){
@@ -89,11 +105,14 @@
       this.settings=saveModels(this.settings); return true;
     }
     save(){this.settings=saveModels(this.settings);return this.settings;}
+    isHuggingFace(model){return isHuggingFaceEndpoint(model?.endpoint);}
     protocolLabel(id){return protocolLabel(id);}
     inferProtocol(endpoint){return inferProtocol(endpoint);}
     protocols(){return {...PROTOCOLS};}
   }
   root.DEFAULT_PUBLIC_AI_MODEL=DEFAULT_MODEL;
+  root.isHuggingFaceEndpoint=isHuggingFaceEndpoint;
+  root.getStoredHuggingFaceKey=getStoredHuggingFaceKey;
   root.AI_PROTOCOLS=PROTOCOLS;
   root.ProviderRegistry=ProviderRegistry;
   root.loadModels=loadModels;

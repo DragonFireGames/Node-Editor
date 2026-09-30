@@ -169,7 +169,13 @@
     }
     return {ensureLoaded,list,get,create,rename,touch,remove};
   }
-  function makeModelLabel(model) { return model.public ? `${model.name} · no key` : `${model.name}${model.apiKey ? ' · key set' : ''}`; }
+  function makeModelLabel(model, registry) {
+    if (aiRoot.isHuggingFaceEndpoint?.(model?.endpoint)) {
+      const source=registry?.getHuggingFaceKeySource?.(model)||'none';
+      return `${model.name} · ${source==='model'?'model key':source==='user'?'your key':source==='shared'?'shared fallback':'no key'}`;
+    }
+    return model.public ? `${model.name} · no key` : `${model.name}${model.apiKey ? ' · key set' : ''}`;
+  }
 
   function permissionPrompt(request) {
     return new Promise(resolve => {
@@ -183,23 +189,68 @@
       modal.querySelector('.editor-modal-close').onclick=()=>done('deny'); modal.onclick=e=>{if(e.target===modal)done('deny');};
     });
   }
-  function settingsModal(registry, permissions, onChange) {
+  function settingsModal(registry, permissions, onChange, network) {
     const modal=document.createElement('div'); modal.className='editor-modal ai-settings-modal';
     let editingId='';
     const render=()=>{
       const models=registry.settings.models, protocols=registry.protocols();
-      modal.innerHTML=`<div class="editor-modal-content ai-settings-content"><button class="editor-modal-close" aria-label="Close">×</button><h2>AI Settings</h2><p>Choose a model, select its API format, add your own endpoint, and control what the coding agent may do.</p><div class="ai-settings-columns"><section><div class="ai-section-title">Models</div><div class="ai-model-list">${models.map(m=>`<div class="ai-model-row ${m.id===registry.settings.activeModelId?'active':''}"><div class="ai-model-main"><strong>${escapeHtml(m.name)}</strong><span>${escapeHtml(registry.protocolLabel(m.protocol))} · ${m.supportsTools?'tool calling':'prompt tools'} · ${m.supportsReasoning?'reasoning':'no reasoning'}</span></div><button data-use="${escapeHtml(m.id)}">${m.id===registry.settings.activeModelId?'Active':'Use'}</button>${m.id===aiRoot.DEFAULT_PUBLIC_AI_MODEL.id?'':`<button data-edit="${escapeHtml(m.id)}">Edit</button><button data-remove="${escapeHtml(m.id)}">×</button>`}</div>`).join('')}</div><button class="ai-settings-add" data-add>+ Add model</button><div class="ai-add-model" hidden><label>Provider / API format<select data-protocol><option value="">Auto-detect</option>${Object.entries(protocols).map(([id,p])=>`<option value="${id}">${escapeHtml(p.label)}</option>`).join('')}</select></label><label>Name<input data-name placeholder="My model"></label><label>Endpoint<input data-endpoint placeholder="https://api.example.com/v1"></label><label>Model ID<input data-model placeholder="model-name"></label><label>API key <input data-key type="password" placeholder="Optional"></label><label class="ai-check"><input data-remember type="checkbox"> Remember API key on this device</label><label class="ai-check"><input data-tools type="checkbox" checked> Supports native tool calling</label><label class="ai-check"><input data-thinking type="checkbox" checked> Supports reasoning</label><div class="ai-add-hint" data-protocol-hint>Select an API format or enter a known provider endpoint and use Auto-detect.</div><div class="ai-add-actions"><button data-cancel-model>Cancel</button><button data-save-model>Save model</button></div></div></section><section><div class="ai-section-title">Permissions</div><div class="ai-permission-list">${Object.entries(permissions.all()).map(([k,v])=>`<label><span>${escapeHtml(TOOL_PERMISSION_LABELS[k]||k)}</span><select data-permission="${k}"><option value="always" ${v==='always'?'selected':''}>Always allow</option><option value="ask" ${v==='ask'?'selected':''}>Ask each time</option><option value="never" ${v==='never'?'selected':''}>Never allow</option></select></label>`).join('')}</div><button data-reset-permissions class="ai-settings-reset">Reset permissions</button></section></div><div class="ai-settings-note">Built-in and auto-detected support includes OpenAI Chat/Responses, Anthropic Messages, Google Gemini, Cohere Chat v2, and OpenAI-compatible endpoints such as OpenRouter, Groq, Together, Fireworks, DeepSeek, Mistral, xAI, Hugging Face Router, Ollama, and other OpenAI-compatible endpoints. Other proprietary request formats are reported as unsupported instead of being sent with the wrong schema.</div></div>`;
+      modal.innerHTML=`<div class="editor-modal-content ai-settings-content"><button class="editor-modal-close" aria-label="Close">×</button><h2>AI Settings</h2><p>Choose a model, select its API format, add your own endpoint, and control what the coding agent may do.</p><div class="ai-settings-columns"><section><div class="ai-section-title">Models</div><div class="ai-model-list">${models.map(m=>`<div class="ai-model-row ${m.id===registry.settings.activeModelId?'active':''}"><div class="ai-model-main"><strong>${escapeHtml(m.name)}</strong><span>${escapeHtml(registry.protocolLabel(m.protocol))} · ${m.supportsTools?'tool calling':'prompt tools'} · ${m.supportsReasoning?'reasoning':'no reasoning'}</span></div><button data-use="${escapeHtml(m.id)}">${m.id===registry.settings.activeModelId?'Active':'Use'}</button>${m.id===aiRoot.DEFAULT_PUBLIC_AI_MODEL.id?'':`<button data-edit="${escapeHtml(m.id)}">Edit</button><button data-remove="${escapeHtml(m.id)}">×</button>`}</div>`).join('')}</div><button class="ai-settings-add" data-add>+ Add model</button><div class="ai-add-model" hidden><label>Provider / API format<select data-protocol><option value="">Auto-detect</option>${Object.entries(protocols).map(([id,p])=>`<option value="${id}">${escapeHtml(p.label)}</option>`).join('')}</select></label><label>Name<input data-name placeholder="My model"></label><label>Endpoint<input data-endpoint placeholder="https://api.example.com/v1"></label><label>Model ID <div class="ai-model-input-row"><input data-model placeholder="model-name"><button type="button" data-browse-hf>Browse Hugging Face</button></div></label><label>API key <input data-key type="password" placeholder="Optional"></label><label class="ai-check"><input data-remember type="checkbox"> Remember API key on this device</label><label class="ai-check"><input data-tools type="checkbox" checked> Supports native tool calling</label><label class="ai-check"><input data-thinking type="checkbox" checked> Supports reasoning</label><div class="ai-add-hint" data-protocol-hint>Select an API format or enter a known provider endpoint and use Auto-detect.</div><div class="ai-add-actions"><button data-cancel-model>Cancel</button><button data-save-model>Save model</button></div></div><div class="ai-hf-account"><div class="ai-section-title">Hugging Face</div><label>Your API key<input data-hf-global-key type="password" placeholder="hf_..."></label><label class="ai-check"><input data-hf-global-remember type="checkbox"> Remember your key on this device</label><div class="ai-add-hint">Used for Hugging Face models that do not have their own key. Add a key here or on an individual model.</div></div></section><section><div class="ai-section-title">Permissions</div><div class="ai-permission-list">${Object.entries(permissions.all()).map(([k,v])=>`<label><span>${escapeHtml(TOOL_PERMISSION_LABELS[k]||k)}</span><select data-permission="${k}"><option value="always" ${v==='always'?'selected':''}>Always allow</option><option value="ask" ${v==='ask'?'selected':''}>Ask each time</option><option value="never" ${v==='never'?'selected':''}>Never allow</option></select></label>`).join('')}</div><button data-reset-permissions class="ai-settings-reset">Reset permissions</button></section></div><div class="ai-settings-note">Hugging Face Router uses the OpenAI Chat Completions API. Browse Hugging Face queries its live <code>/v1/models</code> list, including provider availability, pricing, context length, and tool support.</div></div>`;
       modal.querySelector('.editor-modal-close').onclick=()=>modal.remove(); modal.onclick=e=>{if(e.target===modal)modal.remove();};
       modal.querySelectorAll('[data-use]').forEach(x=>x.onclick=()=>{registry.setActive(x.dataset.use);editingId='';render();onChange?.();});
       modal.querySelectorAll('[data-remove]').forEach(x=>x.onclick=()=>{registry.remove(x.dataset.remove);editingId='';render();onChange?.();});
       const form=modal.querySelector('.ai-add-model'),add=modal.querySelector('[data-add]'),protocolInput=form.querySelector('[data-protocol]'),endpointInput=form.querySelector('[data-endpoint]'),hint=form.querySelector('[data-protocol-hint]');
+      const browseHF=modal.querySelector('[data-browse-hf]');
+      const hfGlobalKey=modal.querySelector('[data-hf-global-key]'),hfGlobalRemember=modal.querySelector('[data-hf-global-remember]');
+      hfGlobalKey.value=registry.getHuggingFaceApiKey?.()||''; hfGlobalRemember.checked=!!registry.settings.huggingFaceRememberKey;
+      function openHFModels(){
+        const browser=document.createElement('div'); browser.className='editor-modal ai-hf-browser-modal';
+        browser.innerHTML='<div class="editor-modal-content ai-hf-browser-content"><button class="editor-modal-close" aria-label="Close">×</button><h2>Hugging Face Models</h2><p>Models currently served through Hugging Face Inference Providers.</p><div class="ai-hf-browser-toolbar"><input data-hf-search placeholder="Search model IDs…"><select data-hf-provider><option value="">All providers</option></select><label class="ai-check"><input data-hf-free type="checkbox"> Free only</label><button data-hf-refresh>Refresh</button></div><div class="ai-hf-browser-status" data-hf-status>Loading models…</div><div class="ai-hf-browser-list" data-hf-list></div></div>';
+        document.body.appendChild(browser); requestAnimationFrame(()=>browser.classList.add('show'));
+        const keyInput=form.querySelector('[data-key]'), search=browser.querySelector('[data-hf-search]'),provider=browser.querySelector('[data-hf-provider]'),free=browser.querySelector('[data-hf-free]'),status=browser.querySelector('[data-hf-status]'),list=browser.querySelector('[data-hf-list]');
+        let all=[];
+        browser.querySelector('.editor-modal-close').onclick=()=>browser.remove(); browser.onclick=e=>{if(e.target===browser)browser.remove();};
+        async function load(){
+          status.textContent='Loading models…'; list.innerHTML='';
+          try {
+            if(!network?.request) throw new Error('Network API is unavailable.');
+            const key=String(keyInput?.value||'').trim()||registry.getHuggingFaceRequestKey?.()||'';
+            if(!key) throw new Error('Enter a Hugging Face API key first.');
+            const response=await network.request(new Request('https://router.huggingface.co/v1/models',{headers:{Authorization:'Bearer '+key}}),'ai');
+            if(!response) throw new Error('No response from Hugging Face.');
+            if(!response.ok) throw new Error(`Hugging Face returned ${response.status}: ${await response.text()}`);
+            const data=await response.json(); all=Array.isArray(data?.data)?data.data:[];
+            const names=new Set(); for(const model of all) for(const p of model.providers||[]) if(p.provider)names.add(p.provider);
+            provider.innerHTML='<option value="">All providers</option>'+[...names].sort().map(x=>`<option value="${escapeHtml(x)}">${escapeHtml(x)}</option>`).join('');
+            renderList();
+          } catch(e){status.textContent=e?.message||String(e);}
+        }
+        function renderList(){
+          const q=search.value.trim().toLowerCase(), pv=provider.value;
+          const rows=all.filter(m=>{
+            if(q&&!String(m.id||'').toLowerCase().includes(q))return false;
+            const providers=Array.isArray(m.providers)?m.providers:[];
+            if(pv&&!providers.some(p=>p.provider===pv))return false;
+            if(free.checked&&!providers.some(p=>p.is_free===true || (p.pricing && Number(p.pricing.input)===0 && Number(p.pricing.output)===0)))return false;
+            return true;
+          }).slice(0,150);
+          status.textContent=`${rows.length}${rows.length===150?'+':''} model${rows.length===1?'':'s'} shown`;
+          list.innerHTML=rows.map(m=>{
+            const providers=Array.isArray(m.providers)?m.providers:[],live=providers.filter(p=>p.status==='live'),freeNow=providers.some(p=>p.is_free===true || (p.pricing && Number(p.pricing.input)===0 && Number(p.pricing.output)===0)),tools=providers.some(p=>p.supports_tools===true),ctx=Math.max(0,...providers.map(p=>Number(p.context_length)||0));
+            return `<div class="ai-hf-model-row"><div class="ai-model-main"><strong>${escapeHtml(m.id||'')}</strong><span>${live.length} provider${live.length===1?'':'s'}${freeNow?' · free':''}${tools?' · tools':''}${ctx?' · '+ctx.toLocaleString()+' ctx':''}</span></div><button data-pick="${escapeHtml(m.id||'')}">Use</button></div>`;
+          }).join('');
+          list.querySelectorAll('[data-pick]').forEach(b=>b.onclick=()=>{form.querySelector('[data-model]').value=b.dataset.pick; if(!endpointInput.value)endpointInput.value='https://router.huggingface.co/v1'; if(!protocolInput.value)protocolInput.value='openai-chat'; if(!form.querySelector('[data-name]').value)form.querySelector('[data-name]').value='Hugging Face • '+b.dataset.pick.split('/').pop(); updateHint(); browser.remove();});
+        }
+        search.oninput=renderList; provider.onchange=renderList; free.onchange=renderList; browser.querySelector('[data-hf-refresh]').onclick=load; load();
+      }
+      browseHF.onclick=openHFModels;
       function updateHint(){const selected=protocolInput.value, inferred=registry.inferProtocol(endpointInput.value);if(selected)hint.textContent=`Using ${registry.protocolLabel(selected)}.`;else if(inferred)hint.textContent=`Auto-detected: ${registry.protocolLabel(inferred)}.`;else hint.textContent='The endpoint format is not known yet. Choose a supported API format explicitly, or this provider will be reported as unsupported.';}
       protocolInput.onchange=updateHint;endpointInput.oninput=updateHint;
       function fill(model){editingId=model?.id||'';form.hidden=false;protocolInput.value=model?.protocol||'';form.querySelector('[data-name]').value=model?.name||'';endpointInput.value=model?.endpoint||'';form.querySelector('[data-model]').value=model?.model||'';form.querySelector('[data-key]').value=model?.apiKey||'';form.querySelector('[data-remember]').checked=!!model?.rememberKey;form.querySelector('[data-tools]').checked=model?.supportsTools!==false;form.querySelector('[data-thinking]').checked=model?.supportsReasoning!==false;form.querySelector('[data-save-model]').textContent=editingId?'Save changes':'Save model';updateHint();}
       add.onclick=()=>{form.hidden=!form.hidden;updateHint();};
       modal.querySelectorAll('[data-edit]').forEach(x=>x.onclick=()=>{const model=registry.settings.models.find(m=>m.id===x.dataset.edit);if(model)fill(model);});
       modal.querySelector('[data-cancel-model]').onclick=()=>{editingId='';form.hidden=true;};
-      modal.querySelector('[data-save-model]').onclick=()=>{const selectedProtocol=protocolInput.value.trim(),name=form.querySelector('[data-name]').value.trim(),endpoint=endpointInput.value.trim(),modelId=form.querySelector('[data-model]').value.trim(),apiKey=form.querySelector('[data-key]').value,remember=form.querySelector('[data-remember]').checked,tools=form.querySelector('[data-tools]').checked,thinking=form.querySelector('[data-thinking]').checked;const protocol=selectedProtocol||registry.inferProtocol(endpoint);if(!name||!endpoint||!modelId){alert('Name, endpoint, and model ID are required.');return;}if(!protocol){alert('This provider uses an unsupported API format. Choose a supported API format from the list or use an OpenAI-compatible endpoint.');return;}const id=editingId||'model-'+Math.random().toString(36).slice(2);try{const clean=registry.add({id,name,endpoint,model:modelId,apiKey,rememberKey:remember,supportsTools:tools,supportsReasoning:thinking,requiresKey:!!apiKey,protocol});registry.setActive(clean.id);editingId='';render();onChange?.();}catch(e){alert(e?.message||String(e));}};
+      modal.querySelector('[data-save-model]').onclick=()=>{const selectedProtocol=protocolInput.value.trim(),name=form.querySelector('[data-name]').value.trim(),endpoint=endpointInput.value.trim(),modelId=form.querySelector('[data-model]').value.trim(),apiKey=form.querySelector('[data-key]').value,remember=form.querySelector('[data-remember]').checked,tools=form.querySelector('[data-tools]').checked,thinking=form.querySelector('[data-thinking]').checked;const protocol=selectedProtocol||registry.inferProtocol(endpoint);if(!name||!endpoint||!modelId){alert('Name, endpoint, and model ID are required.');return;}if(!protocol){alert('This provider uses an unsupported API format. Choose a supported API format explicitly, or this provider will be reported as unsupported.');return;}registry.setHuggingFaceApiKey(hfGlobalKey.value,hfGlobalRemember.checked);registry.save();const id=editingId||'model-'+Math.random().toString(36).slice(2);try{const clean=registry.add({id,name,endpoint,model:modelId,apiKey,rememberKey:remember,supportsTools:tools,supportsReasoning:thinking,requiresKey:!!apiKey,protocol});registry.setActive(clean.id);editingId='';render();onChange?.();}catch(e){alert(e?.message||String(e));}};
+      hfGlobalKey.onchange=()=>{registry.setHuggingFaceApiKey(hfGlobalKey.value,hfGlobalRemember.checked);registry.save();onChange?.();}; hfGlobalRemember.onchange=()=>{registry.setHuggingFaceApiKey(hfGlobalKey.value,hfGlobalRemember.checked);registry.save();onChange?.();};
       modal.querySelectorAll('[data-permission]').forEach(x=>x.onchange=()=>{permissions.set(x.dataset.permission,x.value);onChange?.();});
       modal.querySelector('[data-reset-permissions]').onclick=()=>{permissions.reset();render();onChange?.();};
       if(editingId){const model=registry.settings.models.find(m=>m.id===editingId);if(model)fill(model);}
@@ -294,6 +345,7 @@
       const title=prompt('Chat name:',chat.title);
       if(title!=null){chatStore.rename(chat.id,title);render(view.g,view.t);}
     }
+    function formatWait(seconds){const n=Math.max(0,Math.ceil(Number(seconds)||0));if(n<60)return `${n}s`;const m=Math.floor(n/60),s=n%60;return s?`${m}m ${s}s`:`${m}m`;}
     function render(g, t) {
       currentGroup = g || currentGroup || state.workbench?.getFirstLeaf?.();
       currentTab = t || currentTab || currentGroup?.tabs?.find(x => x.builtin === 'ai');
@@ -308,11 +360,12 @@
       }
       tree.style.display = '';
       const model=registry.active(); const chats=chatStore.list(true); const current=currentChat();
-      tree.innerHTML=`<div class="ai-panel-inner"><div class="ai-header"><div class="ai-header-left"><strong>AI Chat</strong><span class="ai-model-label">${escapeHtml(makeModelLabel(model))}</span></div><div class="ai-header-right"><select class="ai-chat-select" data-chat-select ${busy?'disabled':''} title="Recent chats">${chats.map(c=>`<option value="${escapeHtml(c.id)}" ${c.id===currentChatId?'selected':''}>${escapeHtml(c.title)}</option>`).join('')}${!chats.length?'<option>No chats</option>':''}</select><div class="ai-head-actions"><button data-chat-manage ${busy?'disabled':''} title="Manage chats" aria-label="Manage chats">☰</button><button data-new ${busy?'disabled':''} title="New chat" aria-label="New chat">＋</button><button data-settings title="AI Settings" aria-label="AI Settings">⚙</button></div></div></div><div class="ai-chat" data-chat></div><div class="ai-compose"><textarea data-input placeholder="Ask anything about your project…" rows="3"></textarea><div class="ai-compose-bar"><label class="ai-agent-toggle"><input data-agent type="checkbox" ${agentMode?'checked':''}> Agent mode</label><span data-status>${busy?'Working…':''}</span><button data-stop ${busy?'':'disabled'}>Stop</button><button class="primary" data-send ${busy?'disabled':''}>Send</button></div></div></div>`;
+      if(!model.supportsTools) agentMode=false;
+      tree.innerHTML=`<div class="ai-panel-inner"><div class="ai-header"><div class="ai-header-left"><strong>AI Chat</strong><span class="ai-model-label">${escapeHtml(makeModelLabel(model,registry))}</span></div><div class="ai-header-right"><select class="ai-chat-select" data-chat-select ${busy?'disabled':''} title="Recent chats">${chats.map(c=>`<option value="${escapeHtml(c.id)}" ${c.id===currentChatId?'selected':''}>${escapeHtml(c.title)}</option>`).join('')}${!chats.length?'<option>No chats</option>':''}</select><div class="ai-head-actions"><button data-chat-manage ${busy?'disabled':''} title="Manage chats" aria-label="Manage chats">☰</button><button data-new ${busy?'disabled':''} title="New chat" aria-label="New chat">＋</button><button data-settings title="AI Settings" aria-label="AI Settings">⚙</button></div></div></div><div class="ai-chat" data-chat></div><div class="ai-horde-status" data-status ${busy?'':'hidden'}>${busy?'Working…':''}</div><div class="ai-compose"><textarea data-input placeholder="Ask anything about your project…" rows="3"></textarea><div class="ai-compose-bar"><label class="ai-agent-toggle"><input data-agent type="checkbox" ${agentMode?'checked':''} ${model.supportsTools?'':'disabled'}> Agent mode${model.supportsTools?'':' (not supported by this model)'}</label><button data-stop ${busy?'':'disabled'}>Stop</button><button class="primary" data-send ${busy?'disabled':''}>Send</button></div></div></div>`;
       const chat=tree.querySelector('[data-chat]');
       for(const m of chatMessages) addMessage(chat,m.role,m.content);
       tree.querySelector('[data-agent]').onchange=e=>{agentMode=e.target.checked;};
-      tree.querySelector('[data-settings]').onclick=()=>settingsModal(registry,permissions,()=>{persist();render(g,t);});
+      tree.querySelector('[data-settings]').onclick=()=>settingsModal(registry,permissions,()=>{persist();render(g,t);},state.browserNetwork||window.__sharedBrowserNetwork);
       tree.querySelector('[data-chat-select]').onchange=e=>switchChat(e.target.value);
       tree.querySelector('[data-chat-manage]').onclick=()=>chatManageModal();
       tree.querySelector('[data-new]').onclick=()=>newChat();
@@ -334,6 +387,7 @@
       tree=t._viewElement || tree;
       const chat=tree.querySelector('[data-chat]');
       if(!chat) { busy=false; controller=null; return; }
+      const setStatus=text=>{const el=tree.querySelector('[data-status]');if(!el)return;el.replaceChildren(document.createTextNode(text||''));el.hidden=!text;};
       const bubble=addMessage(chat,'assistant',''); let partial='';
       try {
         if(agentMode){
@@ -346,7 +400,23 @@
           const messages=activeMessages(); const result=await agent.run([{role:'system',content:systemPrompt()},...messages],{systemPrompt:systemPrompt(),maxTokens:2048}); partial=result.text||partial; renderMessage(bubble,partial,code=>insertCode(code)); chatMessages.push({role:'assistant',content:partial});
         } else {
           const messages=[{role:'system',content:systemPrompt()},...activeMessages()];
-          for await(const chunk of agent.client.stream(messages,{thinking:true,maxTokens:2048,temperature:.7,topP:.9,signal:controller.signal,systemPrompt:systemPrompt()})){partial=chunk.text||partial;renderMessage(bubble,partial,code=>insertCode(code));chat.scrollTop=chat.scrollHeight;}
+          const model=agent.client.model();
+          const queueStatus=info=>{
+            if(model.protocol!=='ai-horde') return;
+            const wait=Number(info?.waitTime);
+            const position=Number(info?.queuePosition);
+            if(info?.done){setStatus('');return;}
+            if(info?.waiting){
+              const pos=Number.isFinite(position)?Math.max(1,Math.floor(position)+1):null;
+              const waitText=Number.isFinite(wait)&&wait>0?` • ~${formatWait(wait)}`:'';
+              setStatus(pos?`Queue: #${pos}${waitText}`:`Queued${waitText}`);
+            } else if(info?.processing){
+              setStatus(Number.isFinite(wait)&&wait>0?`Processing • ~${formatWait(wait)}`:'Processing…');
+            } else {
+              setStatus('Waiting for Horde…');
+            }
+          };
+          for await(const chunk of agent.client.stream(messages,{thinking:true,maxTokens:2048,temperature:.7,topP:.9,signal:controller.signal,systemPrompt:systemPrompt(),onQueueStatus:queueStatus})){partial=chunk.text||partial;renderMessage(bubble,partial,code=>insertCode(code));chat.scrollTop=chat.scrollHeight;}
           chatMessages.push({role:'assistant',content:partial});
         }
         persist();
@@ -359,7 +429,7 @@
       title:'AI',
       icon:'<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 3.8c-4.1 0-7.4 2.3-7.4 6.8 0 2.1 1 3.5 2.5 4.6-.2 1.9-1 3.2-2 4.7 2.1-.2 4.1-1 5.7-2.3.4.1.8.1 1.2.1 4.7 0 7.4-2.8 7.4-7.1 0-4.5-3.3-6.8-7.4-6.8Z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8.8 10.5h6.4M12 7.3v6.4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
       render(g,t){ render(g,t); },
-      openSettings:()=>settingsModal(registry,permissions,()=>{persist();render(currentGroup);}),
+      openSettings:()=>settingsModal(registry,permissions,()=>{persist();render(currentGroup);},state.browserNetwork||window.__sharedBrowserNetwork),
       registry,
       permissions,
       getHistory:()=>chatMessages,

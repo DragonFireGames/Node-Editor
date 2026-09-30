@@ -511,16 +511,25 @@
       else host.appendChild(row);
       const finish = async (commit) => {
         if (row.dataset.done) return;
-        row.dataset.done = '1';
         const value = input.value.trim();
-        row.remove();
-        if (!commit || !value) return;
-        try {
-          if (kind === 'file') await this.createFile(target, value);
-          else await this.createFolder(target, value);
-        } catch (err) {
-          this.report(err);
+        if (!commit || !value) {
+          row.dataset.done = '1';
+          row.remove();
+          return;
         }
+        const base = this.targetBase(target);
+        const path = base ? base + '/' + value : value;
+        if (this.fs.existsSync(path)) {
+          input.classList.add('tree-inline-input-error');
+          input.setAttribute('aria-invalid', 'true');
+          input.focus();
+          input.select();
+          return;
+        }
+        row.dataset.done = '1';
+        row.remove();
+        if (kind === 'file') await this.createFile(target, value);
+        else await this.createFolder(target, value);
       };
       input.addEventListener('keydown', e => {
         if (e.key === 'Enter') { e.preventDefault(); finish(true); }
@@ -568,7 +577,7 @@
       const given = String(name).trim();
       if (!given) return;
       const base = this.targetBase(parentNode), path = base ? base + '/' + given : given;
-      if (this.fs.existsSync(path)) throw new Error('File already exists: ' + path);
+      if (this.fs.existsSync(path)) return;
       this.fs.writeFileSync(path, '');
       this.refresh();
       const node = this.nodeByPath.get(path);
@@ -583,7 +592,7 @@
       const given = String(name).trim();
       if (!given) return;
       const base = this.targetBase(parentNode), path = base ? base + '/' + given : given;
-      if (this.fs.isDirectorySync?.(path)) throw new Error('Folder already exists: ' + path);
+      if (this.fs.existsSync?.(path)) return;
       this.fs.mkdirSync(path);
       this.refresh();
       this.reveal(path);

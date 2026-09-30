@@ -144,8 +144,22 @@ class Network extends EventHandler {
   }
   async searchEndpoints(callback, type) {
     await wait(1);
-    for (var i = 0; i < this.endpoints.length; i++) {
-      var endp = this.endpoints[i];
+    let endpoints = this.endpoints.slice();
+    if (type === 'ai') {
+      // AI should prefer a direct request so public providers do not needlessly
+      // consume the editor's CORS proxy. If direct access fails, fall back to
+      // the existing proxy endpoints in their normal order.
+      endpoints.sort((a, b) => {
+        const priority = endpoint => {
+          if (endpoint?.proxy) return 2;
+          if (endpoint?.__browserDefaultFallback) return 0;
+          return 1;
+        };
+        return priority(a) - priority(b);
+      });
+    }
+    for (var i = 0; i < endpoints.length; i++) {
+      var endp = endpoints[i];
       if (endp?.enabled === false) continue;
       try {
         var response = await callback.call(this, endp);

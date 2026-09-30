@@ -999,7 +999,7 @@
   async function openZipFile(f) {
     await replaceFileSystem(await FileSystem.create(f, {
       sync: false
-    }), f.name.replace(/\.zip$/i, ''), true);
+    }), stripZipProjectName(f.name), true);
   }
   function setupDefaultNodeLayout() {
     const wb = state.workbench;
@@ -1184,12 +1184,21 @@
   function closeImportModal() {
     document.getElementById('importModal')?.remove();
   }
+  function stripZipProjectName(name) {
+    return String(name || '').replace(/\.zip$/i, '');
+  }
+  function isZipSource(source) {
+    if (!source) return false;
+    if (Array.isArray(source)) return source.length === 1 && /\.zip$/i.test(source[0]?.name || '');
+    return source.kind === 'file' && /\.zip$/i.test(source.name || '');
+  }
   async function importFileSystemSource(source, name) {
     try {
       const fs = await FileSystem.create(source, {
         sync: false
       });
-      await replaceFileSystem(fs, name || 'Workspace', true);
+      const projectName = isZipSource(source) ? stripZipProjectName(name) : (name || 'Workspace');
+      await replaceFileSystem(fs, projectName || 'Workspace', true);
       closeImportModal();
     } catch (e) {
       logError(e);
@@ -1199,8 +1208,10 @@
     try {
       const u = new URL(url);
       const parts = u.pathname.split('/').filter(Boolean);
-      let name = parts[parts.length - 1] || fallback;
-      name = name.replace(/\.git$/i, '').replace(/\.zip$/i, '');
+      let name;
+      if (/^(www\.)?github\.com$/i.test(u.hostname) && parts.length >= 2) name = parts[1];
+      else name = parts[parts.length - 1];
+      name = String(name || fallback).replace(/\.git$/i, '').replace(/\.zip$/i, '');
       return decodeURIComponent(name) || fallback;
     } catch (_) {
       return fallback;
@@ -1239,6 +1250,43 @@
     if (github.length) return github;
     return [url.href];
   }
+  async function flattenRemoteProjectZip(file, projectName) {
+    if (typeof JSZip === 'undefined') return file;
+    const zip = await JSZip.loadAsync(file);
+    const entries = [];
+    const topLevels = new Set();
+    let hasRootFile = false;
+    zip.forEach((relativePath, entry) => {
+      const path = relativePath.replace(/^\/+|\/+$/g, '');
+      if (!path) return;
+      const parts = path.split('/');
+      if (parts.length === 1) {
+        if (!entry.dir) hasRootFile = true;
+        return;
+      }
+      topLevels.add(parts[0]);
+      entries.push({path, entry, relativePath});
+    });
+    if (hasRootFile || topLevels.size !== 1 || !entries.length) return file;
+    const root = [...topLevels][0];
+    const expected = String(projectName || '').trim().replace(/\/$/, '');
+    if (!expected) return file;
+    const rootLower = root.toLowerCase();
+    const expectedLower = expected.toLowerCase();
+    const rootMatchesProject = rootLower === expectedLower || rootLower === expectedLower + '-main' || rootLower === expectedLower + '-master';
+    if (!rootMatchesProject) return file;
+    if (!entries.some(item => item.path.startsWith(root + '/'))) return file;
+    const out = new JSZip();
+    for (const item of entries) {
+      if (!item.path.startsWith(root + '/')) continue;
+      const target = item.path.slice(root.length + 1);
+      if (!target) continue;
+      if (item.entry.dir) out.folder(target);
+      else out.file(target, await item.entry.async('uint8array'));
+    }
+    const blob = await out.generateAsync({type:'blob'});
+    return new File([blob], file.name, {type:'application/zip'});
+  }
   async function fetchRemoteProject(url) {
     if (!state.browserNetwork?.request) throw new Error('Network is not initialized.');
     const candidates = remoteProjectCandidates(url);
@@ -1258,7 +1306,8 @@
           continue;
         }
         const name = remoteProjectName(url);
-        const file = new File([blob], name + '.zip', {type: 'application/zip'});
+        let file = new File([blob], name + '.zip', {type: 'application/zip'});
+        file = await flattenRemoteProjectZip(file, name);
         return {file, name, source: candidate};
       } catch (e) {
         lastStatus = e?.message || String(e);
@@ -1378,7 +1427,7 @@
             multiple: false,
             types: [{ description: 'ZIP project', accept: { 'application/zip': ['.zip'] } }]
           });
-          if (handle) await importFileSystemSource(handle, handle.name.replace(/\.zip$/i, ''));
+          if (handle) await importFileSystemSource(handle, stripZipProjectName(handle.name));
           return;
         } catch (e) {
           if (e?.name === 'AbortError') return;
@@ -1411,7 +1460,7 @@
     };
     zipInput.onchange = () => {
       const f = zipInput.files?.[0];
-      if (f) importFileSystemSource(f, f.name.replace(/\\.zip$/i, ''));
+      if (f) importFileSystemSource(f, stripZipProjectName(f.name));
     };
     filesInput.onchange = () => {
       const files = filesInput.files;
@@ -1442,7 +1491,7 @@
       const files = e.dataTransfer?.files;
       if (files?.length) {
         const onlyZip = files.length === 1 && (/\.zip$/i).test(files[0].name);
-        await importFileSystemSource(onlyZip ? files[0] : files, onlyZip ? files[0].name.replace(/\.zip$/i, '') : 'Workspace');
+        await importFileSystemSource(onlyZip ? files[0] : files, onlyZip ? stripZipProjectName(files[0].name) : 'Workspace');
       }
     });
     modal.addEventListener('click', e => {
