@@ -9,6 +9,25 @@
     const search = root.Search(options);
     const sourceControl = root.SourceControl(options);
     const profile = root.Profile(options);
+    const github = window.GitHubService;
+    function syncProfileButton() {
+      const button = document.getElementById('activityProfile');
+      if (!button) return;
+      const user = github?.getUser?.();
+      if (user?.avatar_url) {
+        button.innerHTML = '';
+        const img = document.createElement('img');
+        img.src = user.avatar_url;
+        img.alt = user.login ? `@${user.login}` : 'GitHub profile';
+        button.appendChild(img);
+        button.title = user.login ? `Profile — @${user.login}` : 'Profile';
+        button.setAttribute('aria-label', user.login ? `Profile — @${user.login}` : 'Profile');
+      } else {
+        button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M5.5 20c.8-3.3 3.1-5 6.5-5s5.7 1.7 6.5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+        button.title = 'Profile';
+        button.setAttribute('aria-label', 'Profile');
+      }
+    }
     const activities = {
       activitySearch: {kind: 'Search', show: () => search.show()},
       activitySource: {kind: 'Source Control', show: () => sourceControl.show()},
@@ -58,6 +77,8 @@
         show(entry.kind);
       });
     }
+    const githubUnsubscribe = github?.onChange?.(() => syncProfileButton()) || null;
+    syncProfileButton();
     resizer?.addEventListener('mousedown', e => {
       if (e.button !== 0) return;
       if (tree.classList.contains('activity-collapsed')) {
@@ -103,7 +124,7 @@
       explorer, runDebug, settings, search, sourceControl, profile, show,
       setActiveActivity(id) { document.querySelectorAll('.activity-button').forEach(x => x.classList.toggle('active', x.id === id)); },
       restoreCollapsed: paths => explorer.restoreCollapsed(paths),
-      setWidth, collapse, expand, getWidth: () => width
+      setWidth, collapse, expand, getWidth: () => width, dispose: () => githubUnsubscribe?.()
     };
   };
 })();

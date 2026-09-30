@@ -11,9 +11,10 @@ window.__editorInitPromise = (async function () {
         const fallbackProxy = new ProxyNetworkEndpoint('', true, false);
         const defaultFallback = new NetworkEndpoint();
         defaultFallback.__browserDefaultFallback = true;
+        defaultFallback.__networkRole = 'native';
+        sharedNetwork.appendEndpoint(defaultFallback);
         sharedNetwork.appendEndpoint(primaryProxy);
         sharedNetwork.appendEndpoint(fallbackProxy);
-        sharedNetwork.appendEndpoint(defaultFallback);
         sharedNetwork.__browserBaseEndpoints = {
           primary: primaryProxy,
           fallback: fallbackProxy,
@@ -34,6 +35,7 @@ window.__editorInitPromise = (async function () {
     projectName: 'Workspace',
     projectKey: 'workspace',
     projectId: null,
+    gitRemote: null,
     projectTemplate: false,
     lastSavedAt: 0,
     lastCachedAt: 0,
@@ -157,6 +159,9 @@ window.__editorInitPromise = (async function () {
   function loadProjectMetadata() {
     const meta = readEditorJson(EDITOR_PROJECT_PATH);
     if (meta?.id && String(meta.id).trim()) state.projectId = String(meta.id).trim();
+    if (meta?.gitRemote?.provider === 'github' && meta.gitRemote.owner && meta.gitRemote.repo) {
+      state.gitRemote = {provider:'github', owner:String(meta.gitRemote.owner), repo:String(meta.gitRemote.repo), branch:String(meta.gitRemote.branch || 'main')};
+    }
     if (meta?.name && String(meta.name).trim()) {
       state.projectName = String(meta.name).trim();
       state.projectKey = state.projectName;
@@ -179,7 +184,8 @@ window.__editorInitPromise = (async function () {
       id: state.projectId,
       name: state.projectName,
       peerLayer: state.peerSettings.layer,
-      pagePath: state.peerSettings.pagePath
+      pagePath: state.peerSettings.pagePath,
+      ...(state.gitRemote?.provider === 'github' && state.gitRemote.owner && state.gitRemote.repo ? {gitRemote: state.gitRemote} : {})
     }, null, 2));
   }
   function loadEditorConfig() {
@@ -1135,6 +1141,7 @@ window.__editorInitPromise = (async function () {
     state.fs = fs;
     state.saveProjectPermission = 'denied';
     state.projectId = options.projectId || null;
+    state.gitRemote = options.gitRemote || null;
     state.projectTemplate = !!options.isTemplate;
     state.projectName = name || 'Workspace';
     state.projectKey = state.projectName;
@@ -1237,6 +1244,19 @@ window.__editorInitPromise = (async function () {
     out.push(`https://codeload.github.com/${encodedOwner}/${encodedRepo}/zip/refs/heads/master`);
     return [...new Set(out)];
   }
+  function githubRepositoryFromUrl(input) {
+    let u;
+    try { u = new URL(input); } catch (_) { return null; }
+    if (!/^https?:$/i.test(u.protocol) || !/^(www\.)?github\.com$/i.test(u.hostname)) return null;
+    const parts = u.pathname.split('/').filter(Boolean);
+    if (parts.length < 2) return null;
+    const owner = parts[0];
+    const repo = parts[1].replace(/\.git$/i, '');
+    let branch = '';
+    if (parts[2] === 'tree' && parts[3]) branch = parts.slice(3).join('/');
+    if (!owner || !repo) return null;
+    return {owner, repo, branch};
+  }
   function remoteProjectCandidates(input) {
     const raw = String(input || '').trim();
     if (!raw) return [];
@@ -1290,6 +1310,21 @@ window.__editorInitPromise = (async function () {
   }
   async function fetchRemoteProject(url) {
     if (!state.browserNetwork?.request) throw new Error('Network is not initialized.');
+    const github = githubRepositoryFromUrl(url);
+    if (github && window.GitHubService?.isSignedIn?.()) {
+      try {
+        const info = await window.GitHubService.getRepository(github.owner, github.repo);
+        const branch = github.branch || info.default_branch || 'main';
+        const blob = await window.GitHubService.downloadArchive(github.owner, github.repo, branch);
+        if (!blob?.size) throw new Error('GitHub returned an empty project archive.');
+        const name = info.name || github.repo;
+        let file = new File([blob], name + '.zip', {type:'application/zip'});
+        file = await flattenRemoteProjectZip(file, name);
+        return {file, name, source:`github:${github.owner}/${github.repo}@${branch}`, gitRemote:{provider:'github',owner:github.owner,repo:github.repo,branch}, projectId:`github:${github.owner}/${github.repo}@${branch}`};
+      } catch (e) {
+        if (e?.status !== 404 && e?.status !== 401) throw e;
+      }
+    }
     const candidates = remoteProjectCandidates(url);
     if (!candidates.length) throw new Error('Enter a GitHub repository URL or an HTTP(S) URL to a ZIP file.');
     let lastStatus = '';
@@ -1307,15 +1342,16 @@ window.__editorInitPromise = (async function () {
           continue;
         }
         const name = remoteProjectName(url);
-        let file = new File([blob], name + '.zip', {type: 'application/zip'});
+        let file = new File([blob], name + '.zip', {type:'application/zip'});
         file = await flattenRemoteProjectZip(file, name);
-        return {file, name, source: candidate};
+        return {file, name, source: candidate, gitRemote:null, projectId:null};
       } catch (e) {
         lastStatus = e?.message || String(e);
       }
     }
     throw new Error(`Failed to load remote project${lastStatus ? ` (${lastStatus})` : ''}.`);
   }
+
   function closeRemoteImportModal(options = {}) {
     document.getElementById('remoteImportModal')?.remove();
     if (options.returnToChooser) showProjectChooser(options.chooserOptions || {}).catch(logError);
@@ -1327,13 +1363,29 @@ window.__editorInitPromise = (async function () {
     try {
       const remote = await fetchRemoteProject(input);
       const fs = await FileSystem.create(remote.file, {sync:false});
-      await replaceFileSystem(fs, remote.name || 'Remote Project', true);
+      await replaceFileSystem(fs, remote.name || 'Remote Project', true, {projectId:remote.projectId || undefined, gitRemote:remote.gitRemote || null});
       finishRemoteImport();
       return true;
     } catch (e) {
       options.onError?.(e);
       return false;
     }
+  }
+  async function openGithubRepository(repo, options = {}) {
+    const github = window.GitHubService;
+    if (!github?.isSignedIn?.()) throw new Error('Sign in to GitHub to open a repository.');
+    if (!repo?.owner || !repo?.repo) throw new Error('Invalid GitHub repository.');
+    const branch = repo.branch || repo.defaultBranch || 'main';
+    const info = repo.defaultBranch ? repo : await github.getRepository(repo.owner, repo.repo);
+    const blob = await github.downloadArchive(repo.owner, repo.repo, branch);
+    if (!blob?.size) throw new Error('GitHub returned an empty project archive.');
+    let file = new File([blob], (info.name || repo.repo) + '.zip', {type:'application/zip'});
+    file = await flattenRemoteProjectZip(file, info.name || repo.repo);
+    const fs = await FileSystem.create(file, {sync:false});
+    const projectId = `github:${repo.owner}/${repo.repo}@${branch}`;
+    await replaceFileSystem(fs, info.name || repo.repo || 'Remote Project', true, {projectId, gitRemote:{provider:'github',owner:repo.owner,repo:repo.repo,branch}});
+    finishRemoteImport();
+    return true;
   }
   async function openRemoteImportModal(options = {}) {
     if (!options.skipGuard && !(await confirmWorkspaceSwitch('opening another workspace'))) return;
@@ -1343,9 +1395,10 @@ window.__editorInitPromise = (async function () {
     modal.className = 'editor-modal';
     modal.innerHTML = `<div class="editor-modal-content remote-import-modal">
     <button class="editor-modal-close" aria-label="Close">×</button>
-    <h2>Open Remote Project</h2><p>Paste a GitHub repository URL or a direct HTTP(S) ZIP URL.</p>
-    <label class="remote-import-label">Project URL<input class="remote-import-input" type="text" placeholder="https://github.com/user/repository or https://example.com/project.zip" spellcheck="false" autocomplete="off"></label>
-    <div class="remote-import-hint">GitHub repositories are downloaded from their default branch. A URL ending in <code>.zip</code> is loaded directly.</div>
+    <h2>Open Remote Project</h2><p>Open a GitHub repository or enter any HTTP(S) project URL.</p>
+    <section class="remote-github-section"><div class="remote-section-heading"><strong>GitHub</strong><span data-github-account></span></div><div data-github-content></div></section>
+    <div class="remote-import-divider"><span>or use a remote URL</span></div>
+    <section class="remote-url-section"><label class="remote-import-label">Project URL<input class="remote-import-input" type="text" placeholder="https://github.com/user/repository or https://example.com/project.zip" spellcheck="false" autocomplete="off"></label><div class="remote-import-hint">You can use this without signing in. Public GitHub repositories work anonymously; signed-in GitHub users can also open private repositories.</div></section>
     <div class="editor-modal-actions">
       <button class="remote-import-cancel">Cancel</button>
       <button class="remote-import-open primary">Open Remote Project</button>
@@ -1355,46 +1408,99 @@ window.__editorInitPromise = (async function () {
     const input = modal.querySelector('.remote-import-input');
     const open = modal.querySelector('.remote-import-open');
     const cancel = modal.querySelector('.remote-import-cancel');
+    const githubContent = modal.querySelector('[data-github-content]');
+    const githubAccount = modal.querySelector('[data-github-account]');
     let busy = false;
+    let repos = [];
+    let repoLoading = false;
+    let repoFilter = '';
     const close = () => closeRemoteImportModal({returnToChooser: options.returnToChooser, chooserOptions: options.chooserOptions});
     const showError = e => {
       modal.querySelector('.remote-import-error')?.remove();
       const error = document.createElement('div');
       error.className = 'remote-import-error';
       error.textContent = e?.message || String(e);
-      modal.querySelector('.remote-import-hint')?.after(error);
+      modal.querySelector('.remote-url-section')?.after(error);
     };
+    const setBusy = (value, label = 'Open Remote Project') => {
+      busy = !!value;
+      open.disabled = busy; cancel.disabled = busy;
+      open.textContent = busy ? label : 'Open Remote Project';
+    };
+    const loadRepoList = async () => {
+      const github = window.GitHubService;
+      if (!github?.isSignedIn?.()) return;
+      if (repoLoading) return;
+      repoLoading = true;
+      githubContent.innerHTML = '<div class="remote-github-loading">Loading repositories…</div>';
+      try { repos = await github.listRepositories(); renderGithub(); }
+      catch (e) { githubContent.innerHTML = `<div class="remote-github-error">${escapeHTML(e?.message || String(e))}</div><button data-github-retry>Retry</button>`; githubContent.querySelector('[data-github-retry]').onclick = loadRepoList; }
+      finally { repoLoading = false; }
+    };
+    const renderGithub = () => {
+      const github = window.GitHubService;
+      const user = github?.getUser?.();
+      githubAccount.textContent = user ? `@${user.login}` : '';
+      if (!github?.isSignedIn?.()) {
+        githubContent.innerHTML = '<div class="remote-github-empty">Sign in to browse your GitHub repositories, or use the URL field below without signing in.</div><button class="github-primary-button" data-github-signin>Sign in with GitHub</button>';
+        githubContent.querySelector('[data-github-signin]').onclick = async () => {
+          const button = githubContent.querySelector('[data-github-signin]'); button.disabled = true; button.textContent = 'Opening GitHub…';
+          try { await github.startLogin(); } catch (e) { button.disabled = false; button.textContent = 'Sign in with GitHub'; showError(e); }
+        };
+        return;
+      }
+      const filtered = repos.filter(repo => !repoFilter || repo.fullName.toLowerCase().includes(repoFilter.toLowerCase()));
+      githubContent.innerHTML = `<div class="remote-github-toolbar"><input data-github-filter type="text" placeholder="Search repositories…" value="${escapeHTML(repoFilter)}"><button data-github-refresh title="Refresh repositories">↻</button></div><div class="remote-github-repos" data-github-repos>${repoLoading ? '<div class="remote-github-loading">Loading repositories…</div>' : filtered.length ? filtered.map(repo => `<button class="remote-github-repo" data-repo="${encodeURIComponent(repo.fullName)}"><strong>${escapeHTML(repo.name)}</strong><span>${escapeHTML(repo.owner)} · ${repo.private ? 'private' : 'public'} · ${escapeHTML(repo.defaultBranch)}</span></button>`).join('') : '<div class="remote-github-empty">No matching repositories.</div>'}</div><div class="remote-github-actions"><button data-github-new>New repository</button></div><div class="remote-github-create" data-github-create hidden><label>Name<input data-new-name type="text" placeholder="my-game" spellcheck="false"></label><label>Description<input data-new-description type="text" placeholder="Optional"></label><label class="remote-github-private"><input data-new-private type="checkbox"> Private repository</label><div class="remote-github-create-actions"><button data-new-cancel>Cancel</button><button data-new-create class="primary">Create repository</button></div></div>`;
+      githubContent.querySelector('[data-github-filter]').oninput = e => { repoFilter = e.target.value; renderGithub(); };
+      githubContent.querySelector('[data-github-refresh]').onclick = () => loadRepoList();
+      githubContent.querySelectorAll('[data-repo]').forEach(button => button.onclick = async () => {
+        if (busy) return;
+        const fullName = decodeURIComponent(button.dataset.repo);
+        const repo = repos.find(x => x.fullName === fullName);
+        if (!repo) return;
+        setBusy(true, 'Loading repository…');
+        modal.querySelectorAll('button,input').forEach(el => { if (el !== open && el !== cancel) el.disabled = true; });
+        modal.querySelector('.remote-import-error')?.remove();
+        try { await openGithubRepository(repo, options); }
+        catch (e) { setBusy(false); modal.querySelectorAll('button,input').forEach(el => { el.disabled = false; }); showError(e); }
+      });
+      const newButton = githubContent.querySelector('[data-github-new]');
+      const createPanel = githubContent.querySelector('[data-github-create]');
+      newButton.onclick = () => { createPanel.hidden = !createPanel.hidden; if (!createPanel.hidden) createPanel.querySelector('[data-new-name]').focus(); };
+      githubContent.querySelector('[data-new-cancel]').onclick = () => { createPanel.hidden = true; };
+      githubContent.querySelector('[data-new-create]').onclick = async () => {
+        const name = createPanel.querySelector('[data-new-name]').value.trim();
+        const description = createPanel.querySelector('[data-new-description]').value.trim();
+        const privateRepo = createPanel.querySelector('[data-new-private]').checked;
+        if (!name) { createPanel.querySelector('[data-new-name]').focus(); return; }
+        const button = createPanel.querySelector('[data-new-create]'); button.disabled = true; button.textContent = 'Creating…';
+        try { const created = await github.createRepository({name, description, privateRepo}); await openGithubRepository({owner:created.owner?.login || github.getUser()?.login, repo:created.name, defaultBranch:created.default_branch || 'main', name:created.name}); }
+        catch (e) { button.disabled = false; button.textContent = 'Create repository'; showError(e); }
+      };
+    };
+    const unsubscribe = window.GitHubService?.onChange?.(() => { repos = []; repoFilter = ''; renderGithub(); if (window.GitHubService.isSignedIn()) void loadRepoList(); });
     const submit = async () => {
       if (busy) return;
       const value = input.value.trim();
       if (!value) { input.focus(); return; }
-      busy = true;
+      setBusy(true, 'Loading…');
       input.disabled = true;
-      open.disabled = true;
-      cancel.disabled = true;
-      open.textContent = 'Loading…';
       modal.querySelector('.remote-import-error')?.remove();
-      const ok = await importRemoteProject(value, {
-        onError: showError,
-        returnToChooser: options.returnToChooser,
-        chooserOptions: options.chooserOptions
-      });
-      if (!ok) {
-        busy = false;
-        input.disabled = false;
-        open.disabled = false;
-        cancel.disabled = false;
-        open.textContent = 'Open Remote Project';
-        input.focus();
-      }
+      const ok = await importRemoteProject(value, {onError:showError, returnToChooser:options.returnToChooser, chooserOptions:options.chooserOptions});
+      if (!ok) { setBusy(false); input.disabled = false; input.focus(); }
     };
-    modal.querySelector('.editor-modal-close').onclick = close;
-    cancel.onclick = close;
+    const cleanup = () => { unsubscribe?.(); };
+    const closeModal = close;
+    modal.querySelector('.editor-modal-close').onclick = () => { cleanup(); closeModal(); };
+    cancel.onclick = () => { cleanup(); closeModal(); };
     open.onclick = submit;
-    input.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } else if (e.key === 'Escape') { e.preventDefault(); close(); } };
-    modal.addEventListener('click', e => { if (e.target === modal) close(); });
+    input.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } else if (e.key === 'Escape') { e.preventDefault(); cleanup(); closeModal(); } };
+    modal.addEventListener('click', e => { if (e.target === modal) { cleanup(); closeModal(); } });
+    renderGithub();
+    if (window.GitHubService?.isSignedIn?.()) void loadRepoList();
     requestAnimationFrame(() => { modal.classList.add('show'); input.focus(); });
   }
+
   async function openImportModal(options = {}) {
     if (!options.skipGuard && !(await confirmWorkspaceSwitch('opening another workspace'))) return;
     if (document.getElementById('importModal')) return;
@@ -1714,6 +1820,7 @@ window.__editorInitPromise = (async function () {
     });
     state.runConfig = new EditorRunConfig(state);
     $('uploadZipBtn').onclick = () => openImportModal();
+    $('loadRemoteBtn').onclick = () => openRemoteImportModal();
     $('projectName').onclick = () => renameProject();
     $('zipInput')?.addEventListener('change', e => {
       const f = e.target.files?.[0];

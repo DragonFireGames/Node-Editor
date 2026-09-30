@@ -130,12 +130,21 @@ class Network extends EventHandler {
     this.dispatchEvent('endpointschange', this.endpoints);
     return endpoint || null;
   }
+  _getOrderedEndpoints() {
+    const roleOrder = {custom:0, native:1, proxy:2};
+    return this.endpoints.slice().sort((a,b) => {
+      const ar = roleOrder[a?.__networkRole || 'custom'] ?? 0;
+      const br = roleOrder[b?.__networkRole || 'custom'] ?? 0;
+      return ar - br;
+    });
+  }
   getEndpointInfo() {
-    return this.endpoints.map((endpoint, index) => ({
+    return this._getOrderedEndpoints().map((endpoint, index) => ({
       index,
       name: endpoint?.constructor?.name || 'Endpoint',
       enabled: endpoint?.enabled !== false,
       runtime: !!endpoint?.__editorRuntimeEndpoint,
+      role: endpoint?.__networkRole || 'custom',
       proxy: endpoint?.proxy || null,
       domain: endpoint?.domain || null,
       path: endpoint?.path || null,
@@ -144,15 +153,14 @@ class Network extends EventHandler {
   }
   async searchEndpoints(callback, type) {
     await wait(1);
-    let endpoints = this.endpoints.slice();
-    if (type === 'ai') {
-      // AI requests always try the browser's default/direct endpoint first.
-      // If it fails, preserve the configured proxy endpoint order for fallback.
-      const defaultEndpoint = endpoints.find(endpoint => endpoint?.__browserDefaultFallback);
-      if (defaultEndpoint) {
-        endpoints = [defaultEndpoint, ...endpoints.filter(endpoint => endpoint !== defaultEndpoint)];
-      }
-    }
+    // Every request uses the same fallback order:
+    //   1. custom/runtime endpoints
+    //   2. native browser fetch
+    //   3. primary proxy
+    //   4. fallback proxy
+    // This is intentionally independent of request type so npm, AI, browser,
+    // emulator, downloads, and other callers all get identical network behavior.
+    const endpoints = this._getOrderedEndpoints();
     for (var i = 0; i < endpoints.length; i++) {
       var endp = endpoints[i];
       if (endp?.enabled === false) continue;
@@ -172,6 +180,7 @@ class NetworkEndpoint extends EventHandler {
   constructor(enabled = true) {
     super();
     this.enabled = enabled;
+    this.__networkRole = 'custom';
   }
   async handleRequest(request,type) {
     return await originalFetch(request);
@@ -186,6 +195,7 @@ class ProxyNetworkEndpoint extends NetworkEndpoint {
     super(enabled);
     this.proxy = proxy;
     this.obscureURL = obscureURL;
+    this.__networkRole = 'proxy';
   }
   async handleRequest(request,type) {
     let targetProxyUrl = request.url;

@@ -8,13 +8,43 @@
     let branches = [];
     let selected = loadConfig();
     let refreshToken = 0;
+    let selectionProjectId = null;
     function esc(value) { return String(value ?? '').replace(/[&<>\"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\\':'&#39;'}[ch])); }
     function loadConfig() {
       try { const value = JSON.parse(localStorage.getItem(configKey()) || 'null'); if (value?.owner && value?.repo) return {...value}; } catch (_) {}
       return {owner:'', repo:'', branch:'main'};
     }
     function saveConfig() { try { localStorage.setItem(configKey(), JSON.stringify(selected)); } catch (_) {} }
-    function show() { renderShell(); void refresh(); }
+    function syncSelection() {
+      const currentProjectId = String(state.projectId || 'workspace');
+      if (selectionProjectId === currentProjectId) return;
+      selectionProjectId = currentProjectId;
+      const remote = state.gitRemote?.provider === 'github' ? state.gitRemote : null;
+      if (remote?.owner && remote?.repo) {
+        selected = {owner:String(remote.owner), repo:String(remote.repo), branch:String(remote.branch || 'main')};
+        saveConfig();
+        branches = [];
+        return;
+      }
+      const id = String(state.projectId || '');
+      const match = id.match(/^github:([^/]+)\/([^@]+)@(.+)$/);
+      if (match) {
+        selected = {owner:match[1], repo:match[2], branch:match[3] || 'main'};
+        saveConfig();
+        branches = [];
+        return;
+      }
+      selected = loadConfig();
+    }
+    function show() { syncSelection(); renderShell(); void refresh(); }
+    function isLocalProject() { return !state.gitRemote?.provider; }
+    function setLocalGitRemote(owner, repo, branch = 'main') {
+      state.gitRemote = {provider:'github', owner:String(owner), repo:String(repo), branch:String(branch || 'main')};
+      try { state.saveProjectMetadata?.(); } catch (_) {}
+      selected = {owner:String(owner), repo:String(repo), branch:String(branch || 'main')};
+      selectionProjectId = String(state.projectId || 'workspace');
+      saveConfig();
+    }
     function renderShell() {
       tree.classList.remove('activity-collapsed');
       if (!github?.isSignedIn?.()) {
@@ -22,8 +52,10 @@
         tree.querySelector('[data-open-profile]')?.addEventListener('click', () => state.sidebarController?.show('Profile'));
         return;
       }
+      const localProject = isLocalProject();
       tree.innerHTML = `<div class="source-control-sidebar">
         <div class="source-control-head"><div class="activity-sidebar-title">Source Control</div><button data-refresh title="Refresh">↻</button></div>
+        ${localProject ? `<section class="source-control-section"><div class="source-control-section-title">GitHub repository</div><div class="source-control-local-hint">This project is local. Connect it to a new GitHub repository to start tracking and pushing changes.</div><button data-create-local-repo class="source-control-create-repo">Create GitHub Repository</button><div class="source-control-create-panel" data-create-panel hidden><label>Repository name<input data-create-name type="text" placeholder="my-game" spellcheck="false"></label><label>Description<input data-create-description type="text" placeholder="Optional"></label><label class="source-control-private"><input data-create-private type="checkbox"> Private repository</label><div class="source-control-create-actions"><button data-create-cancel>Cancel</button><button data-create-confirm class="primary">Create Repository</button></div></div></section>` : ''}
         <section class="source-control-section">
           <div class="source-control-label">Repository</div>
           <div class="source-control-select-row"><select data-repo ${repos.length ? '' : 'disabled'}><option value="">${repos.length ? 'Select repository…' : 'Loading repositories…'}</option>${repos.map(r => `<option value="${esc(r.fullName)}" ${r.fullName === `${selected.owner}/${selected.repo}` ? 'selected' : ''}>${esc(r.fullName)}${r.private ? ' · private' : ''}</option>`).join('')}</select><button data-repo-refresh title="Refresh repositories">↻</button></div>
@@ -32,6 +64,38 @@
         ${selected.repo ? `<section class="source-control-section"><div class="source-control-section-title">Changes</div><div data-changes class="source-control-changes"><div class="source-control-loading">Checking working tree…</div></div><textarea data-commit-message placeholder="Commit message" rows="3"></textarea><button class="source-control-commit" data-commit disabled>Commit & Push</button><div data-status class="source-control-status"></div></section><section class="source-control-section"><div class="source-control-section-title">History</div><div data-history class="source-control-history"><div class="source-control-loading">Loading commits…</div></div></section>` : `<div class="source-control-empty"><strong>Select a repository</strong><span>Once a repository is selected, the editor compares this workspace against the selected branch.</span></div>`}
       </div>`;
       tree.querySelector('[data-refresh]')?.addEventListener('click', () => refresh());
+      const createLocalButton = tree.querySelector('[data-create-local-repo]');
+      const createPanel = tree.querySelector('[data-create-panel]');
+      createLocalButton?.addEventListener('click', () => { createPanel.hidden = !createPanel.hidden; if (!createPanel.hidden) createPanel.querySelector('[data-create-name]')?.focus(); });
+      createPanel?.querySelector('[data-create-cancel]')?.addEventListener('click', () => { createPanel.hidden = true; });
+      createPanel?.querySelector('[data-create-confirm]')?.addEventListener('click', async () => {
+        const name = createPanel.querySelector('[data-create-name]')?.value.trim();
+        const description = createPanel.querySelector('[data-create-description]')?.value.trim();
+        const privateRepo = !!createPanel.querySelector('[data-create-private]')?.checked;
+        const button = createPanel.querySelector('[data-create-confirm]');
+        if (!name) { createPanel.querySelector('[data-create-name]')?.focus(); return; }
+        button.disabled = true; button.textContent = 'Creating…';
+        try {
+          const created = await github.createRepository({name, description, privateRepo, autoInit:false});
+          const owner = created?.owner?.login || github.getUser()?.login;
+          const repo = created?.name || name;
+          const branch = created?.default_branch || 'main';
+          if (!owner || !repo) throw new Error('GitHub did not return the new repository details.');
+          setLocalGitRemote(owner, repo, branch);
+          repos = []; branches = [];
+          await loadRepositories(true);
+          selected = {owner:String(owner), repo:String(repo), branch:String(branch)};
+          saveConfig();
+          renderShell();
+          branches = [String(branch)];
+          renderShell();
+          await refreshStatus();
+          await loadHistory();
+        } catch (e) {
+          button.disabled = false; button.textContent = 'Create Repository';
+          showStatus(e.message || String(e), true);
+        }
+      });
       tree.querySelector('[data-repo-refresh]')?.addEventListener('click', () => loadRepositories(true));
       tree.querySelector('[data-branch-refresh]')?.addEventListener('click', () => selected.repo && loadBranches(true));
       tree.querySelector('[data-repo]')?.addEventListener('change', async e => {
@@ -53,6 +117,7 @@
     async function loadRepositories(force = false) {
       if (!github.isSignedIn()) return;
       try {
+        syncSelection();
         if (!force && repos.length) return;
         repos = await github.listRepositories();
         if (selected.repo && !repos.some(r => r.fullName === `${selected.owner}/${selected.repo}`)) selected = {owner:'', repo:'', branch:'main'};
@@ -72,7 +137,16 @@
         renderShell();
         await refreshStatus();
         await loadHistory();
-      } catch (e) { showStatus(e.message || String(e), true); }
+      } catch (e) {
+        if (e?.status === 409 || e?.status === 404) {
+          branches = [selected.branch || 'main'];
+          renderShell();
+          await refreshStatus();
+          await loadHistory();
+          return;
+        }
+        showStatus(e.message || String(e), true);
+      }
     }
     async function refresh() {
       const token = ++refreshToken;
