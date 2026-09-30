@@ -1,8 +1,8 @@
 <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Web Editor</title><link rel="stylesheet" href="editor/editor.css">
-<script src="browser/lib/network.js"></script>
-<script>window.__workersConfigReady=loadJSONThroughNetwork('workers.json',{cache:'no-store'},'config').then(c=>{if(!c||typeof c!=='object')throw new Error('Invalid workers.json');window.WorkerConfig=c;return c;}).catch(e=>{console.error(e);window.WorkerConfig={proxy:'',github:''};return window.WorkerConfig;});</script>
 <script src="browser/external/jszip.js"></script>
 <script src="browser/lib/filesystem.js"></script>
+<script src="browser/lib/network.js"></script>
+<script>window.__workersConfigReady=(async()=>{try{const n=new Network();const native=new NetworkEndpoint();native.__networkRole='native';n.appendEndpoint(native);window.__bootstrapNetwork=n;window.setActiveNetwork?.(n);const r=await n.request('workers.json',location.origin,{cache:'no-store'},'config');if(!r?.ok)throw new Error('Failed to load workers.json ('+(r?.status||'no response')+')');const c=await r.json();if(!c||typeof c!=='object')throw new Error('Invalid workers.json');window.WorkerConfig=c;return c}catch(e){console.error(e);window.WorkerConfig={proxy:'',github:''};return window.WorkerConfig;}})();</script>
 <script src="browser/lib/emulator.js"></script>
 <script src="browser/lib/npm.js"></script>
 <script src="browser/lib/endpoints/app.js"></script>

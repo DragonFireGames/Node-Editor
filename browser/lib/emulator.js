@@ -2126,10 +2126,7 @@
             blankWindowRef = window.open('about:blank', '_blank');
           }
 
-          fetch(targetUrlObj.href, {
-            method: method,
-            body: bodyPayload
-          }).then(async response => {
+          pageEmulator.network.request(targetUrlObj.href, BASE_ORIGIN, {method:method, body:bodyPayload}, 'form').then(async response => {
             
             // Read the body content regardless of navigation state
             const contentType = response.headers.get('content-type') || '';
@@ -2187,6 +2184,7 @@
 
         if (pageEmulator.runtimeInterceptor) eval(pageEmulator.runtimeInterceptor);
 
+        const originalFetch = window.fetch;
         window.fetch = async function(input, data = {}, type = 'fetch') {
           let fetchUrl = input;
           let requestOptions = { ...data };
@@ -2216,8 +2214,8 @@
           
           // Pass the enriched requestOptions into your network handler
           const response = await pageEmulator.network.request(resolvedUrl, BASE_ORIGIN, requestOptions, type);
-          if (!response) throw new TypeError(`Network request failed: ${resolvedUrl}`);
-          return response;
+          if (response) return response;
+          throw new TypeError(`Network request failed for ${resolvedUrl}`);
         };
 
         (function() {
@@ -2255,7 +2253,13 @@
               } else if (response && typeof response.onClientMessage === 'function') {
                 this._setupMock(response);
               } else {
-                this._setupReal(new OriginalWebSocket(url, protocols));
+                const error = new Event('error');
+                this.readyState = OriginalWebSocket.CLOSED;
+                this.dispatchEvent(error);
+                if (this.onerror) this.onerror(error);
+                const close = new CloseEvent('close', {code:1006, reason:'Network did not provide a WebSocket endpoint.', wasClean:false});
+                this.dispatchEvent(close);
+                if (this.onclose) this.onclose(close);
               }
             }
 
@@ -2750,7 +2754,7 @@
               // Execution Pipeline
               this._dispatchEvent('loadstart');
 
-              fetch(this._url, fetchOptions, 'xhr')
+              pageEmulator.network.request(this._url, BASE_ORIGIN, fetchOptions, 'xhr')
                 .then(async (res) => {
                   try { console.warn("[XHR v20] FETCH RESPONSE", { method: this._method, url: this._url, status: res.status, ok: res.ok }); } catch (_) {}
                   if (this._timeoutTimer) clearTimeout(this._timeoutTimer);

@@ -90,6 +90,16 @@
   function isSignedIn() { return !!getToken(); }
   function getUser() { return user; }
   function workerUrl() { return getConfig().workerUrl; }
+  function getNetwork() {
+    return window.__sharedBrowserNetwork || window.editorNetwork || null;
+  }
+  async function networkRequest(url, options = {}, type = 'github') {
+    const net = getNetwork();
+    if (!net?.request) throw new Error('Network is not initialized.');
+    const response = await net.request(url, location.href, options, type);
+    if (!response) throw new Error(`Network request failed for ${url}`);
+    return response;
+  }
   async function startLogin() {
     const worker = workerUrl();
     if (!worker) throw new Error('Set the GitHub authentication Worker URL in Profile first.');
@@ -125,13 +135,11 @@
     try { pending = JSON.parse(pendingRaw || 'null'); } catch (_) {}
     if (!pending || pending.state !== state) throw new Error('GitHub sign-in state did not match. Please try again.');
     if (Date.now() - Number(pending.createdAt || 0) > 10 * 60 * 1000) throw new Error('GitHub sign-in expired. Please try again.');
-    const network = window.__sharedBrowserNetwork;
-    if (!network?.request) throw new Error('Network API is not ready.');
-    const response = await network.request(new Request(workerUrl() + '/exchange', {
+    const response = await networkRequest(workerUrl() + '/exchange', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({code, code_verifier: pending.verifier})
-    }), 'github-auth');
+    }, 'github-auth');
     const data = await response.json().catch(() => ({}));
     if (!response.ok || !data.access_token) throw new Error(data.error || data.message || `GitHub token exchange failed (${response.status}).`);
     const profile = await request('/user', {token: data.access_token});
@@ -185,9 +193,7 @@
     headers.set('X-GitHub-Api-Version', API_VERSION);
     headers.set('Authorization', `Bearer ${token}`);
     if (options.body !== undefined && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
-    const network = window.__sharedBrowserNetwork;
-    if (!network?.request) throw new Error('Network API is not ready.');
-    const response = await network.request(new Request(API + path, {...options, headers}), 'github-api');
+    const response = await networkRequest(API + path, {...options, headers}, 'github-api');
     if (response.status === 401) {
       clearStoredAuth();
       notify();
@@ -222,6 +228,20 @@
       updatedAt: repo.updated_at || ''
     }));
   }
+  async function createRepository({name, description = '', privateRepo = false, autoInit = false}) {
+    return request('/user/repos', {method:'POST', body:JSON.stringify({name:String(name || '').trim(), description:String(description || ''), private:!!privateRepo, auto_init:!!autoInit})});
+  }
+  async function createBranch(owner, repo, baseBranch, newBranch) {
+    const base = String(baseBranch || 'main').trim();
+    const name = String(newBranch || '').trim();
+    if (!name) throw new Error('Enter a branch name.');
+    if (/^[./]|\.{2}|[ ~^:?*\[\\]|(?:\.lock(?:$|\/))/.test(name) || /(?:\.| )$/.test(name)) throw new Error('Invalid Git branch name.');
+    const repoPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+    const ref = await request(`${repoPath}/git/ref/heads/${branchPath(base)}`);
+    const sha = ref?.object?.sha;
+    if (!sha) throw new Error(`Could not resolve ${base}.`);
+    return request(`${repoPath}/git/refs`, {method:'POST', body:JSON.stringify({ref:`refs/heads/${name}`, sha})});
+  }
   async function getRepository(owner, repo) { return request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`); }
   async function downloadRepositoryArchive(owner, repo, branch = '') {
     const token = getToken();
@@ -230,9 +250,7 @@
     if (!branchName) throw new Error('Select a branch.');
     const path = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/zipball/${branchName.split('/').map(encodeURIComponent).join('/')}`;
     const headers = new Headers({Accept:'application/vnd.github+json','X-GitHub-Api-Version':API_VERSION,Authorization:`Bearer ${token}`});
-    const network = window.__sharedBrowserNetwork;
-    if (!network?.request) throw new Error('Network API is not ready.');
-    const response = await network.request(new Request(API + path, {headers}), 'github-api');
+    const response = await networkRequest(API + path, {headers}, 'github-api');
     if (response.status === 401) { clearStoredAuth(); notify(); throw new Error('GitHub authentication expired. Sign in again from Profile.'); }
     if (!response.ok) {
       const data = await response.json().catch(() => null);
@@ -245,19 +263,6 @@
   async function listBranches(owner, repo) {
     const branches = await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches?per_page=100`);
     return Array.isArray(branches) ? branches.map(x => x.name).filter(Boolean) : [];
-  }
-  async function createBranch(owner, repo, branch, fromBranch = 'main') {
-    const name = String(branch || '').trim();
-    if (!name) throw new Error('Enter a branch name.');
-    if (!/^[^\x00-\x20\x7f]+$/.test(name) || /[~^:?*\[\\]/.test(name) || name.includes('..') || name.includes('@{') || name.startsWith('/') || name.endsWith('/') || name.endsWith('.') || name.endsWith('.lock')) throw new Error('Invalid Git branch name.');
-    const base = await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/ref/heads/${branchPath(fromBranch)}`);
-    const sha = base?.object?.sha;
-    if (!sha) throw new Error(`Could not find branch "${fromBranch}".`);
-    return request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/refs`, {method:'POST', body:JSON.stringify({ref:`refs/heads/${name}`, sha})});
-  }
-  async function getBranchCommit(owner, repo, branch) {
-    const ref = await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/ref/heads/${branchPath(branch)}`);
-    return ref?.object?.sha || null;
   }
   async function getRemoteState(owner, repo, branch) {
     const repoPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
@@ -295,7 +300,9 @@
   }
   function ignoredPath(path) {
     const p = String(path || '').replace(/^\/+/, '');
-    return p === '.editor' || p.startsWith('.editor/') || p === '.git' || p.startsWith('.git/') || p === 'node_modules' || p.startsWith('node_modules/');
+    if (p === '.editor') return true;
+    if (p.startsWith('.editor/')) return p !== '.editor/config.json' && p !== '.editor/project.json';
+    return p === '.git' || p.startsWith('.git/') || p === 'node_modules' || p.startsWith('node_modules/');
   }
   async function compareWorkingTree(fs, remoteTree) {
     if (!fs) throw new Error('No workspace filesystem is open.');
@@ -373,11 +380,11 @@
   root.request = request;
   root.listRepositories = listRepositories;
   root.getRepository = getRepository;
+  root.createRepository = createRepository;
+  root.createBranch = createBranch;
   root.downloadRepositoryArchive = downloadRepositoryArchive;
   root.listBranches = listBranches;
-  root.createBranch = createBranch;
   root.getRemoteState = getRemoteState;
-  root.getBranchCommit = getBranchCommit;
   root.listCommits = listCommits;
   root.compareWorkingTree = compareWorkingTree;
   root.commitAndPush = commitAndPush;

@@ -10,7 +10,12 @@
   <script src="browser/lib/endpoints/peer.js" data-layer="new URLSearchParams(window.location.search).get('peerLayer')"></script>
   <script>
     window.__previewNetworkReady = (async function() {
-      const workers = await loadJSONThroughNetwork('workers.json',{cache:'no-store'},'config').then(c=>{if(!c||typeof c!=='object')throw new Error('Invalid workers.json');return c;}).catch(e=>{console.error(e);return {proxy:'',github:''};});
+      const bootstrap = new Network();
+      const bootstrapNative = new NetworkEndpoint();
+      bootstrapNative.__networkRole = 'native';
+      bootstrap.appendEndpoint(bootstrapNative);
+      window.setActiveNetwork?.(bootstrap);
+      const workers = await bootstrap.request('workers.json', location.href, {cache:'no-store'}, 'config').then(async r=>{if(!r?.ok)throw new Error('Failed to load workers.json ('+(r?.status||'no response')+')');const c=await r.json();if(!c||typeof c!=='object')throw new Error('Invalid workers.json');return c;}).catch(e=>{console.error(e);return {proxy:'',github:''};});
       window.WorkerConfig = workers;
       const query = new URLSearchParams(location.search);
       const peerLayer = query.get('peerLayer') || 'peer';
@@ -22,8 +27,6 @@
       );
 
       const fallbackProxy = new ProxyNetworkEndpoint('', true, false);
-      primaryProxy.__networkBaseRole = 'proxy';
-      fallbackProxy.__networkBaseRole = 'fallback';
 
       const defaultFallback = new NetworkEndpoint();
       const directFallbackRequest = defaultFallback.handleRequest.bind(defaultFallback);
@@ -37,12 +40,12 @@
       };
 
       defaultFallback.__browserDefaultFallback = true;
-      defaultFallback.__networkBaseRole = 'native';
 
       const network = new Network();
 
       network.appendEndpoint(primaryProxy);
       network.appendEndpoint(fallbackProxy);
+      defaultFallback.__networkRole = 'native';
       network.appendEndpoint(defaultFallback);
 
       network.__browserBaseEndpoints = {
@@ -57,7 +60,7 @@
 
       window.__sharedBrowserNetwork = network;
       window.browserNetwork = network;
-      if (window.installNetworkFetch) window.__removeNetworkFetch = window.installNetworkFetch(network, 'preview-ui');
+      window.setActiveNetwork?.(network);
     })();
   </script>
 </head>

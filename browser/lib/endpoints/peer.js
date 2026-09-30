@@ -7,7 +7,7 @@
     throw new Error("PeerJS is required before peer.js.");
   }
 
-  const layer = window.__peerLayer || (v=>{try{return eval(v)}catch(e){return v}})(document.currentScript.getAttribute('data-layer')) || "peer";
+  let layer = window.__peerLayer || (v=>{try{return eval(v)}catch(e){return v}})(document.currentScript?.getAttribute('data-layer')) || "peer";
   console.log(`Peer layer '${layer}'`);
 
   const clientPeerId = layer + "-client-" + randomId();
@@ -27,6 +27,11 @@
     } catch (e) {
       throw new TypeError(`Invalid peer domain: ${domain}`);
     }
+  }
+
+  function setPeerLayer(value) {
+    layer = String(value || 'peer').trim() || 'peer';
+    return layer;
   }
 
   function getPeerServerId(domain) {
@@ -430,6 +435,8 @@
   class PeerServer extends (typeof EventHandler !== 'undefined' ? EventHandler : class {}) {
     constructor(endpoint,domain,options = {}) {
       super();
+      const serverLayer = String(options.peerLayer || layer || 'peer').trim() || 'peer';
+      layer = serverLayer;
       if (!endpoint || typeof endpoint.handleRequest !== 'function') {
         throw new TypeError("PeerServer requires a NetworkEndpoint.");
       }
@@ -803,6 +810,7 @@
   window.peer = peer;
   window.PeerServer = PeerServer;
   window.PeerEndpoint = PeerEndpoint;
+  window.setPeerLayer = setPeerLayer;
   window.getPeerServerId = getPeerServerId;
   window.getPeerSocketDomain = getPeerSocketDomain;
   window.peerServerExists = peerServerExists;
