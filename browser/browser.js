@@ -1030,9 +1030,26 @@ function showContextMenu(clientX, clientY, targetInfo) {
 window.addEventListener('click', hideContextMenu);
 window.addEventListener('resize', hideContextMenu);
 
+window.__aiBrowserOutput = window.__aiBrowserOutput || [];
+function recordAIBrowserOutput(type, args) {
+  var safe = [];
+  for (var value of (Array.isArray(args) ? args : [args])) {
+    try {
+      if (value === null || typeof value !== "object") safe.push(value);
+      else if (value instanceof Error) safe.push(value.message || String(value));
+      else safe.push(JSON.parse(JSON.stringify(value)));
+    } catch (_) {
+      try { safe.push(String(value)); } catch (_) { safe.push("[unserializable]"); }
+    }
+  }
+  window.__aiBrowserOutput.push({type:type, args:safe, tabId:arguments[2] || null, time:Date.now()});
+  if (window.__aiBrowserOutput.length > 300) window.__aiBrowserOutput.splice(0,window.__aiBrowserOutput.length - 300);
+}
 function createNewPage(iframe,parentPage=null) {
   var page = new PageEmulator(iframe,{network:browserNetwork});
   browserDevTools?.runOnPage(page,parentPage);
+  page.addEventListener?.('console',function(method,args){ recordAIBrowserOutput(method,args,page.tab?.id || null); });
+  page.addEventListener?.('error',function(error,source){ recordAIBrowserOutput('error',[error?.message || String(error || 'Unknown error'),source || ''],page.tab?.id || null); });
   page.rawDocument = '';
   page.processedDocument = '';
   if (page.network?.addEventListener) {
@@ -2366,6 +2383,13 @@ window.getStartupUrl = getStartupUrl;
 window.setBrowserDefaultTab = setBrowserDefaultTab;
 window.setBrowserChromeHidden = setBrowserChromeHidden;
 window.loadBrowserURL = loadBrowserURL;
+window.getAIBrowserOutput = function(options={}) {
+  var records = window.__aiBrowserOutput || [];
+  var tabId = options.tabId || null;
+  var out = tabId ? records.filter(function(x){ return x.tabId === tabId; }) : records;
+  return out.slice(-(Number(options.limit) || 100));
+};
+window.clearAIBrowserOutput = function(){ window.__aiBrowserOutput = []; };
 
 setBrowserChromeHidden(browserChromeFullscreen);
 

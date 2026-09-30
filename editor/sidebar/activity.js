@@ -13,7 +13,7 @@
       activityRun: {kind: 'Run and Debug', show: () => runDebug.show()},
       activityExtensions: {kind: 'Extensions', show: () => placeholders.show('Extensions')},
       activitySettings: {kind: 'settings', show: () => settings.show()},
-      activityExplorer: {kind: 'explorer', show: () => explorer.show()}
+      activityExplorer: {kind: 'explorer', show: () => explorer.show()},
     };
     const MIN_WIDTH = 180;
     const MAX_WIDTH = 420;
@@ -43,6 +43,7 @@
       const same = state.sidebar === kind && !tree.classList.contains('activity-collapsed');
       if (same) { collapse(); return; }
       expand();
+      explorer.hideContextMenu?.();
       state.sidebar = kind;
       document.querySelectorAll('.activity-button').forEach(x => x.classList.toggle('active', x.id === button));
       entry.show();
@@ -96,7 +97,7 @@
     setWidth(MIN_WIDTH);
     state.sidebar = 'explorer';
     return {
-      explorer, runDebug, settings, show,
+      explorer, runDebug, settings, search, show,
       setActiveActivity(id) { document.querySelectorAll('.activity-button').forEach(x => x.classList.toggle('active', x.id === id)); },
       restoreCollapsed: paths => explorer.restoreCollapsed(paths),
       setWidth, collapse, expand, getWidth: () => width

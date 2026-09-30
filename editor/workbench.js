@@ -1,4 +1,8 @@
 (function () {
+  const instances = new Set();
+  let activeDrag = null;
+  let activeWorkbench = null;
+  let activeGroup = null;
   class Workbench {
     constructor(root, options = {}) {
       this.root = root;
@@ -10,13 +14,22 @@
       this.groups = new Map();
       this.nextId = 1;
       this.dragInfo = null;
+      this.hostTab = options.hostTab || null;
+      this.keepEmpty = !!options.keepEmpty;
+      instances.add(this);
+      if (!activeWorkbench) activeWorkbench = this;
+      this._onDragEnd = () => {
+        if (activeDrag?.workbench === this) activeDrag = null;
+        this.dragInfo = null;
+        this.hideDropPreview();
+      };
       this.dropPreview = document.createElement('div');
       this.dropPreview.className = 'workbench-drop-preview';
       this.dropPreview.innerHTML = '<div data-zone="header"></div><div data-zone="top"></div><div data-zone="right"></div><div data-zone="bottom"></div><div data-zone="left"></div>';
       document.body.appendChild(this.dropPreview);
       this.root.addEventListener('dragover', e => this.handleDragOver(e));
       this.root.addEventListener('drop', e => this.handleDrop(e));
-      document.addEventListener('dragend', () => this.hideDropPreview());
+      document.addEventListener('dragend', this._onDragEnd);
       this.createGroup();
     }
     notifyLayoutChange() {
@@ -27,7 +40,15 @@
       if (node.type === 'group') {
         return {
           type: 'group',
-          tabs: node.group.tabs.map(t => t.kind === 'file' ? {kind:'file', path:t.path, view:t.view} : {kind:'builtin', builtin:t.builtin}),
+          tabs: node.group.tabs.map(t => {
+            if (t.kind === 'file') return {kind:'file', path:t.path, view:t.view};
+            const out = {kind:'builtin', builtin:t.builtin};
+            if (t.builtin === 'group') {
+              out.groupName = t.groupName || 'Group';
+              out.groupLayout = t._groupWorkbench?.serialize?.() || t.groupLayout || null;
+            }
+            return out;
+          }),
           active: node.group.tabs.findIndex(t => t.id === node.group.active)
         };
       }
@@ -88,7 +109,9 @@
         viewBar: null,
         viewBody: null
       };
+      g.ownerWorkbench = this;
       this.groups.set(g.id, g);
+      if (!this.activeGroup) this.activeGroup = g;
       return g;
     }
     reset() {
@@ -98,6 +121,7 @@
         type: 'group',
         group: this.createGroup()
       };
+      this.setActiveGroup(this.rootNode.group);
       this.rebuild();
       this.notifyLayoutChange();
     }
@@ -107,11 +131,24 @@
         group: [...this.groups.values()][0] || this.createGroup()
       };
     }
+    setActiveGroup(g) {
+      if (!g || g.ownerWorkbench !== this) return;
+      activeWorkbench = this;
+      activeGroup = g;
+      this.activeGroup = g;
+    }
+    getActiveGroup() {
+      if (this.activeGroup && this.groups.has(this.activeGroup.id)) return this.activeGroup;
+      return this.getFirstLeaf();
+    }
     makeGroupElement(g) {
       const el = document.createElement('div');
       el.className = 'workbench-group';
+      el.__workbench = this;
       el.dataset.group = g.id;
       el.tabIndex = 0;
+      el.addEventListener('mousedown', () => this.setActiveGroup(g));
+      el.addEventListener('focusin', () => this.setActiveGroup(g));
       const bar = document.createElement('div');
       bar.className = 'workbench-tabs';
       const content = document.createElement('div');
@@ -128,7 +165,7 @@
       g.viewBar = viewBar;
       g.viewBody = body;
       bar.addEventListener('dragover', e => {
-        if (!this.dragInfo) return;
+        if (!(activeDrag || this.dragInfo)) return;
         e.preventDefault();
         e.stopPropagation();
         e.dataTransfer.dropEffect = 'move';
@@ -138,7 +175,7 @@
         if (!bar.contains(e.relatedTarget)) bar.classList.remove('dragover');
       });
       bar.addEventListener('drop', e => {
-        if (!this.dragInfo) return;
+        if (!(activeDrag || this.dragInfo)) return;
         e.preventDefault();
         e.stopPropagation();
         bar.classList.remove('dragover');
@@ -250,10 +287,13 @@
           this.onClose(t, g);
         };
         el.addEventListener('dragstart', e => {
-          this.dragInfo = {
+          const info = {
+            workbench: this,
             tabId: t.id,
             groupId: g.id
           };
+          this.dragInfo = info;
+          activeDrag = info;
           el.classList.add('dragging');
           document.body.classList.add('workbench-dragging');
           e.dataTransfer.effectAllowed = 'move';
@@ -262,6 +302,7 @@
         el.addEventListener('dragend', () => {
           el.classList.remove('dragging');
           document.body.classList.remove('workbench-dragging');
+          if (activeDrag?.workbench === this && activeDrag.tabId === t.id) activeDrag = null;
           this.dragInfo = null;
           this.hideDropPreview();
         });
@@ -281,7 +322,7 @@
       document.querySelectorAll('.workbench-builtin-menu').forEach(x => x.remove());
       const menu = document.createElement('div');
       menu.className = 'workbench-builtin-menu';
-      menu.innerHTML = '<button data-kind="browser">Browser</button><button data-kind="peer">Peer Server</button><button data-kind="terminal">Terminal</button><button data-kind="run">Run Configuration</button><button data-kind="environment">Environment Variables</button><button data-kind="welcome">Welcome</button>';
+      menu.innerHTML = '<button data-kind="browser">Browser</button><button data-kind="peer">Peer Server</button><button data-kind="terminal">Terminal</button><button data-kind="run">Run Configuration</button><button data-kind="environment">Environment Variables</button><button data-kind="ai">AI</button><button data-kind="welcome">Welcome</button>';
       const r = anchor.getBoundingClientRect();
       menu.style.left = Math.min(r.left, innerWidth - 210) + 'px';
       menu.style.top = r.bottom + 2 + 'px';
@@ -311,6 +352,7 @@
     activateTab(g, id) {
       const t = g.tabs.find(x => x.id === id);
       if (!t) return;
+      this.setActiveGroup(g);
       g.active = id;
       this.renderGroup(g);
       this.onActivate(t, g);
@@ -324,7 +366,7 @@
       const next = g.tabs[idx] || g.tabs[idx - 1];
       g.active = null;
       if (next) this.activateTab(g, next.id); else {
-        if (this.groups.size === 1) {
+        if (this.groups.size === 1 && !this.keepEmpty) {
           this.onBuiltin('welcome', g);
           return;
         }
@@ -402,13 +444,18 @@
       this.dropPreview.style.display = 'none';
     }
     dropTabIntoBar(target, clientX) {
-      const source = this.groups.get(this.dragInfo?.groupId);
-      const tab = source?.tabs.find(x => x.id === this.dragInfo?.tabId);
+      const info = activeDrag || this.dragInfo;
+      const sourceWorkbench = info?.workbench;
+      const source = sourceWorkbench?.groups.get(info?.groupId);
+      const tab = source?.tabs.find(x => x.id === info?.tabId);
+      activeDrag = null;
+      if (sourceWorkbench) sourceWorkbench.dragInfo = null;
       this.dragInfo = null;
       this.hideDropPreview();
-      if (!tab || !target) return;
+      document.body.classList.remove('workbench-dragging');
+      if (!tab || !target || !this.canDropTab(tab, target)) return;
       if (source !== target) {
-        this.moveTab(tab, source, target);
+        this.moveTab(tab, source, target, sourceWorkbench);
         return;
       }
       const tabEls = [...target.tabBar.querySelectorAll('.workbench-tab')];
@@ -430,30 +477,56 @@
       this.renderGroup(target);
       this.activateTab(target, tab.id);
     }
+    canDropTab(tab, target) {
+      if (!tab || !target) return false;
+      const sourceWorkbench = tab.group?.ownerWorkbench;
+      if (sourceWorkbench === this && tab.group === target) return true;
+      let owner = this;
+      while (owner?.hostTab) {
+        if (owner.hostTab === tab) return false;
+        owner = owner.hostTab.group?.ownerWorkbench || null;
+      }
+      return true;
+    }
     handleDragOver(e) {
-      if (!this.dragInfo) return;
+      const info = activeDrag || this.dragInfo;
+      if (!info) return;
       const el = e.target.closest('.workbench-group');
       if (!el || !this.root.contains(el)) return;
+      const target = this.groups.get(el.dataset.group);
+      const source = info.workbench?.groups.get(info.groupId);
+      const tab = source?.tabs.find(x => x.id === info.tabId);
+      if (!target || !tab || !this.canDropTab(tab, target)) return;
       const zone = this.getZone(el, e.clientX, e.clientY);
       this.showDropPreview(el, zone);
       e.preventDefault();
+      e.stopPropagation();
       e.dataTransfer.dropEffect = 'move';
     }
     handleDrop(e) {
-      if (!this.dragInfo) return;
+      const info = activeDrag || this.dragInfo;
+      if (!info) return;
       const el = e.target.closest('.workbench-group');
-      if (!el) {
+      if (!el || !this.root.contains(el)) {
+        this.hideDropPreview();
+        return;
+      }
+      const target = this.groups.get(el.dataset.group);
+      const sourceWorkbench = info.workbench;
+      const source = sourceWorkbench?.groups.get(info.groupId);
+      const tab = source?.tabs.find(x => x.id === info.tabId);
+      if (!target || !tab || !this.canDropTab(tab, target)) {
         this.hideDropPreview();
         return;
       }
       e.preventDefault();
-      const target = this.groups.get(el.dataset.group);
-      const source = this.groups.get(this.dragInfo.groupId);
-      const tab = source?.tabs.find(x => x.id === this.dragInfo.tabId);
+      e.stopPropagation();
       const zone = this.getZone(el, e.clientX, e.clientY);
+      activeDrag = null;
+      if (sourceWorkbench) sourceWorkbench.dragInfo = null;
       this.dragInfo = null;
       this.hideDropPreview();
-      if (!tab || !target) return;
+      document.body.classList.remove('workbench-dragging');
       if (zone === 'header') {
         if (source === target) {
           const tabEls = [...target.tabBar.querySelectorAll('.workbench-tab')];
@@ -472,15 +545,13 @@
           tab.group = target;
           this.renderGroup(target);
           this.activateTab(target, tab.id);
-        } else {
-          this.moveTab(tab, source, target);
-        }
+        } else this.moveTab(tab, source, target, sourceWorkbench);
         return;
       }
       const dir = zone === 'left' || zone === 'right' ? 'horizontal' : 'vertical';
       const before = zone === 'left' || zone === 'top';
       const newGroup = this.splitGroup(target, dir, before);
-      this.moveTab(tab, source, newGroup);
+      this.moveTab(tab, source, newGroup, sourceWorkbench);
     }
     splitGroup(target, dir, before) {
       const targetNode = this.findGroupNode(target.id);
@@ -512,7 +583,8 @@
       this.notifyLayoutChange();
       return newGroup;
     }
-    moveTab(tab, source, target) {
+    moveTab(tab, source, target, sourceWorkbench = source?.ownerWorkbench || this) {
+      if (!tab || !source || !target) return;
       if (source === target) {
         source.tabs = source.tabs.filter(x => x !== tab);
         source.tabs.push(tab);
@@ -522,12 +594,23 @@
         target.tabs.push(tab);
         tab.group = target;
       }
-      this.renderGroup(source);
+      sourceWorkbench?.renderGroup(source);
       this.renderGroup(target);
       this.activateTab(target, tab.id);
-      if (!source.tabs.length) this.collapseEmptyGroup(source);
-      else this.notifyLayoutChange();
+      if (!source.tabs.length) sourceWorkbench?.collapseEmptyGroup(source);
+      sourceWorkbench?.notifyLayoutChange();
+      if (sourceWorkbench !== this) this.notifyLayoutChange();
+    }
+    dispose() {
+      for (const g of this.groups.values()) for (const t of g.tabs) if (t.builtin === 'group') t._groupWorkbench?.dispose?.();
+      document.removeEventListener('dragend', this._onDragEnd);
+      this.dropPreview.remove();
+      instances.delete(this);
+      this.groups.clear();
+      this.rootNode = null;
     }
   }
+  Workbench.getInstances = () => [...instances];
+  Workbench.getActiveGroup = () => activeGroup && activeGroup.ownerWorkbench?.groups.has(activeGroup.id) ? activeGroup : activeWorkbench?.getActiveGroup?.() || null;
   window.Workbench = Workbench;
 })();

@@ -1,0 +1,12 @@
+[
+  {
+    "title": "Node.js",
+    "description": "node server + browser + terminal",
+    "file": "node.zip"
+  },
+  {
+    "title": "Static",
+    "description": "static site + browser",
+    "file": "static.zip"
+  }
+]

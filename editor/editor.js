@@ -61,6 +61,7 @@
     peerServers: new Map(),
     peerRuntimeEndpoint: null,
     peerSettings: {layer: '', pagePath: '/'},
+    ai: null,
     environment: {},
     behavior: {
       autoSaveOnRun: false,
@@ -577,21 +578,26 @@
       applyEditorEnvironment,
       markDirty,
       ensureBrowser: () => getBuiltin('browser')?.ensure(),
-      getOrOpenTerminal: () => getBuiltin('terminal')?.getOrOpenTerminal()
+      getOrOpenTerminal: () => getBuiltin('terminal')?.getOrOpenTerminal(),
+      openFile,
+      updateStatus
     };
     return state.builtins[kind] = factory(ctx);
   }
-  function makeBuiltinTab(kind) {
+  function makeBuiltinTab(kind, options = {}) {
     const builtin = getBuiltin(kind);
-    const titles = { welcome: 'Welcome', browser: 'Browser', peer: 'Peer Server', terminal: 'Terminal', run: 'Run Configuration', environment: 'Environment Variables' };
+    const titles = { welcome: 'Welcome', browser: 'Browser', peer: 'Peer Server', terminal: 'Terminal', run: 'Run Configuration', environment: 'Environment Variables', ai: 'AI', group: 'Group' };
     const welcomeIcon = '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M4 5h16v14H4z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M7 9h10M7 13h7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+    const groupIcon = '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="3.5" y="4" width="7" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="13.5" y="4" width="7" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="8.5" y="13" width="7" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>';
+    const groupName = kind === 'group' ? String(options.groupName ?? options.name ?? '').trim() || 'Group' : '';
     return {
       id: 'builtin:' + kind + ':' + Math.random().toString(36).slice(2),
       kind: 'builtin',
       builtin: kind,
-      title: builtin?.title || titles[kind] || kind,
-      icon: builtin?.icon || (kind === 'welcome' ? welcomeIcon : ''),
-      view: 'edit'
+      title: kind === 'group' ? groupName : (builtin?.title || titles[kind] || kind),
+      icon: builtin?.icon || (kind === 'welcome' ? welcomeIcon : kind === 'group' ? groupIcon : ''),
+      view: 'edit',
+      ...(kind === 'group' ? { groupName, groupLayout: options.groupLayout || null } : {})
     };
   }
   function clearView(g) {
@@ -632,7 +638,7 @@
     card.innerHTML = '<h2>Welcome</h2><p>Choose what you want to add to this pane.</p>';
     const actions = document.createElement('div');
     actions.className = 'workbench-empty-actions';
-    for (const [k, label] of [['browser', 'Browser'], ['peer', 'Peer Server'], ['terminal', 'Terminal'], ['run', 'Run Configuration'], ['environment', 'Environment Variables'], ['welcome', 'Welcome']]) {
+    for (const [k, label] of [['browser', 'Browser'], ['peer', 'Peer Server'], ['terminal', 'Terminal'], ['run', 'Run Configuration'], ['environment', 'Environment Variables'], ['ai', 'AI'], ['welcome', 'Welcome']]) {
       const b = document.createElement('button');
       b.textContent = label;
       b.onclick = () => openBuiltin(k, g);
@@ -652,23 +658,77 @@
     t.editor = null;
     state.previews?.dispose(t);
   }
+  function renderGroupEmpty(g) {
+    g.viewBody.innerHTML = '';
+    const empty = document.createElement('div');
+    empty.className = 'group-drag-empty';
+    empty.textContent = 'drag tab here';
+    g.viewBody.appendChild(empty);
+  }
+  function closeWorkbenchTab(t, g) {
+    if (!t || !g) return;
+    if (t?.builtin === 'peer') void getBuiltin('peer')?.stop(t);
+    if (t?.builtin === 'group') t._groupWorkbench?.dispose?.();
+    state.previews?.dispose(t);
+    t.model?.dispose?.();
+    t.editor?.dispose?.();
+    const wb = g.ownerWorkbench || state.workbench;
+    wb.removeTab(g, t.id);
+  }
+  function renderGroupBuiltin(g, t) {
+    const wrap = document.createElement('div');
+    wrap.className = 'builtin-group';
+    const surface = document.createElement('div');
+    surface.className = 'builtin-group-surface';
+    wrap.appendChild(surface);
+    g.viewBody.appendChild(wrap);
+    t._viewElement = wrap;
+    const nested = new Workbench(surface, {
+      hostTab: t,
+      keepEmpty: true,
+      onActivate: (innerT, innerG) => activate(innerT, innerG),
+      onBuiltin: (kind, innerG) => openBuiltin(kind, innerG),
+      onClose: (innerT, innerG) => closeWorkbenchTab(innerT, innerG),
+      onLayoutChange: () => scheduleWorkspaceLayoutSave()
+    });
+    t._groupWorkbench = nested;
+    if (t.groupLayout?.root) {
+      const restored = nested.restore(t.groupLayout, data => makeLayoutTab(data, state.runConfig?.config?.serverType));
+      if (!restored) nested.rebuild();
+    } else nested.rebuild();
+  }
   async function activate(t, g) {
     g.active = t?.id || null;
     if (t) t._viewActivation = (t._viewActivation || 0) + 1;
-    state.workbench.renderGroup(g);
+    const wb = g?.ownerWorkbench || state.workbench;
+    wb.renderGroup(g);
     if (!t) {
-      renderEmpty(g);
+      if (wb.hostTab) renderGroupEmpty(g);
+      else renderEmpty(g);
       return;
     }
     disposeTabView(t);
     clearView(g);
     if (t.kind === 'file') {
+      state.lastTextTab = t;
       const file = { path: t.path, name: basename(t.path), mime: mime(t.path), id: t.id };
       const views = state.previews?.getViews(file) || [];
       if (!t.view || !views.some(v => v.id === t.view)) t.view = state.previews?.getDefaultView(file)?.id || null;
     }
     renderViewBar(g, t);
     if (t.kind === 'builtin') {
+      if (t.builtin === 'group') {
+        if (t._viewElement) {
+          if (t._viewElement.parentNode !== g.viewBody) g.viewBody.appendChild(t._viewElement);
+          t._viewElement.style.display = '';
+          g.__renderedTab = t;
+          if (!t._groupWorkbench) renderGroupBuiltin(g, t);
+          return;
+        }
+        renderGroupBuiltin(g, t);
+        g.__renderedTab = t;
+        return;
+      }
       if (t._viewElement) {
         if (t._viewElement.parentNode !== g.viewBody) g.viewBody.appendChild(t._viewElement);
         t._viewElement.style.display = '';
@@ -700,39 +760,43 @@
   function openFile(path, target) {
     path = normalize(path);
     if (!state.fs?.existsSync(path)) return;
-    let g = target || state.workbench.getFirstLeaf(), t = null;
-    for (const gg of state.workbench.groups.values()) {
-      const found = gg.tabs.find(x => x.kind === 'file' && x.path === path);
-      if (found) {
-        g = gg;
-        t = found;
-        break;
-      }
-    }
+    const requestedGroup = target?.ownerWorkbench ? target : null;
+    const wb = requestedGroup?.ownerWorkbench || state.workbench;
+    let g = requestedGroup || Workbench.getActiveGroup?.();
+    if (!g || g.ownerWorkbench !== wb || !wb.groups.has(g.id)) g = wb.getActiveGroup?.() || wb.getFirstLeaf();
+    if (!g) return;
+    let t = g.tabs.find(x => x.kind === 'file' && x.path === path);
     if (!t) {
       t = makeFileTab(path);
-      state.workbench.addTab(t, g);
-    } else state.workbench.activateTab(g, t.id);
+      wb.addTab(t, g);
+    } else wb.activateTab(g, t.id);
   }
-  function openBuiltin(kind, g = state.workbench.getFirstLeaf(), options = {}) {
+  function openBuiltin(kind, g, options = {}) {
+    const wb = g?.ownerWorkbench || state.workbench;
+    g = g || wb.getFirstLeaf();
     if (kind === 'settings') {
       state.sidebarController.show('settings');
       return null;
     }
+    if (kind === 'group') {
+      const t = makeBuiltinTab('group', {groupName: options.groupName ?? options.name});
+      wb.addTab(t, g);
+      return t;
+    }
     if (options.replace) {
       const t = makeBuiltinTab(kind);
-      return state.workbench.replaceTab(g, t);
+      return wb.replaceTab(g, t);
     }
     if (kind === 'welcome') {
       const t = makeBuiltinTab(kind);
-      state.workbench.addTab(t, g);
+      wb.addTab(t, g);
       return t;
     }
-    let t = g.tabs.find(x => x.kind === 'builtin' && x.builtin === kind);
+    let t = g?.tabs.find(x => x.kind === 'builtin' && x.builtin === kind);
     if (!t) {
       t = makeBuiltinTab(kind);
-      state.workbench.addTab(t, g);
-    } else state.workbench.activateTab(g, t.id);
+      wb.addTab(t, g);
+    } else wb.activateTab(g, t.id);
     return t;
   }
   
@@ -762,9 +826,29 @@
     const card = document.createElement('div');
     card.className = 'workbench-empty-card';
     card.innerHTML = '<h2>Welcome</h2><p>Create a new project from the toolbar or open a built-in tool here.</p>';
+    const groupCreate = document.createElement('div');
+    groupCreate.className = 'welcome-group-create';
+    const groupInput = document.createElement('input');
+    groupInput.type = 'text';
+    groupInput.placeholder = 'Group name';
+    groupInput.setAttribute('aria-label', 'Group name');
+    const groupButton = document.createElement('button');
+    groupButton.textContent = 'Create Group';
+    groupButton.disabled = true;
+    const syncGroupButton = () => { groupButton.disabled = !groupInput.value.trim(); };
+    groupInput.addEventListener('input', syncGroupButton);
+    const createGroup = () => {
+      const name = groupInput.value.trim();
+      if (!name) return;
+      openBuiltin('group', g, {groupName:name});
+    };
+    groupButton.onclick = createGroup;
+    groupInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); createGroup(); } });
+    groupCreate.append(groupInput, groupButton);
+    card.appendChild(groupCreate);
     const actions = document.createElement('div');
     actions.className = 'workbench-empty-actions';
-    for (const [kind, label] of [['browser', 'Browser'], ['peer', 'Peer Server'], ['terminal', 'Terminal'], ['run', 'Run Configuration'], ['environment', 'Environment Variables']]) {
+    for (const [kind, label] of [['browser', 'Browser'], ['peer', 'Peer Server'], ['terminal', 'Terminal'], ['run', 'Run Configuration'], ['environment', 'Environment Variables'], ['ai', 'AI Chat']]) {
       const b = document.createElement('button');
       b.textContent = label;
       b.onclick = () => openBuiltin(kind, g);
@@ -961,7 +1045,7 @@
     }
     if (data.kind === 'builtin') {
       if (data.builtin === 'settings') return null;
-      return makeBuiltinTab(data.builtin);
+      return makeBuiltinTab(data.builtin, data);
     }
     return null;
   }
@@ -991,34 +1075,44 @@
     if (type === 'node') setupDefaultNodeLayout();
     else setupDefaultStaticLayout();
   }
-  async function createStarter(kind, options = {}) {
-    const fs = await FileSystem.empty({ sync: false });
-    const isNode = kind === 'node';
-    const projectName = isNode ? 'Node Server' : 'Static Website';
-    const projectId = makeProjectId();
-    const config = {
-      serverType: isNode ? 'node' : 'static',
-      domain: 'http://localhost:3000/',
-      path: '/',
-      rootfolder: '/',
-      runfile: isNode ? '/public/index.html' : '/index.html',
-      nodeCommand: isNode ? 'npm run start' : 'node server.js',
-      cwd: '/',
-      autoClear: true
-    };
-    if (kind === 'static') {
-      fs.writeFileSync('index.html', '<!doctype html>\n<html>\n<head><meta charset="utf-8"><title>Static Site</title><link rel="stylesheet" href="style.css"></head>\n<body><main><h1>Hello from Static Site</h1><p>Edit index.html, style.css, or script.js.</p><script src="script.js"></script></main></body></html>');
-      fs.writeFileSync('style.css', 'body{margin:0;font-family:sans-serif;background:#111;color:#eee}main{max-width:700px;margin:12vh auto;padding:2rem}');
-      fs.writeFileSync('script.js', 'console.log("Static site running");');
-    } else {
-      fs.writeFileSync('package.json', JSON.stringify({name:'node-starter',version:'1.0.0',scripts:{start:'node server.js'},main:'server.js'}, null, 2));
-      fs.writeFileSync('server.js', `const http=require('http');\nconst fs=require('fs');\nconst path=require('path');\nconst server=http.createServer((req,res)=>{\n  const file=req.url==='/'?'/index.html':req.url.split('?')[0];\n  const filename=path.join(process.cwd(),'public',file.replace(/^\\//,''));\n  try{res.end(fs.readFileSync(filename));}catch(e){res.statusCode=404;res.end('Not found');}\n});\nserver.listen(3000,'localhost',()=>console.log('Server listening on http://localhost:3000/'));\n`);
-      fs.writeFileSync('public/index.html', '<!doctype html>\n<html><body><h1>Hello from Node Server</h1><p>Edit public/index.html.</p></body></html>');
+  const TEMPLATE_MANIFEST_URL = 'templates/templates.json';
+  let templateCatalogPromise = null;
+  async function loadTemplateCatalog() {
+    if (!templateCatalogPromise) {
+      templateCatalogPromise = fetch(TEMPLATE_MANIFEST_URL, {cache:'no-store'}).then(async response => {
+        if (!response.ok) throw new Error(`Failed to load templates (${response.status}).`);
+        const data = await response.json();
+        if (!Array.isArray(data)) throw new Error('Template manifest must contain an array.');
+        return data.map(item => ({
+          title: String(item?.title || '').trim(),
+          description: String(item?.description || '').trim(),
+          file: String(item?.file || '').trim()
+        })).filter(item => item.title && item.file);
+      });
     }
+    return templateCatalogPromise;
+  }
+  async function createTemplateProject(template) {
+    const manifestURL = new URL(TEMPLATE_MANIFEST_URL, document.baseURI);
+    const fileURL = new URL(template.file, manifestURL).href;
+    const response = await fetch(fileURL, {cache:'no-store'});
+    if (!response.ok) throw new Error(`Failed to load template "${template.title}" (${response.status}).`);
+    const blob = await response.blob();
+    const file = new File([blob], basename(template.file) || 'template.zip', {type:'application/zip'});
+    const fs = await FileSystem.create(file, {sync:false});
+    const projectId = makeProjectId();
+    const projectName = template.title || 'Workspace';
     fs.mkdirSync(EDITOR_DIR);
-    fs.writeFileSync(EDITOR_PROJECT_PATH, JSON.stringify({id: projectId, name: projectName}, null, 2));
-    fs.writeFileSync(EDITOR_CONFIG_PATH, JSON.stringify(config, null, 2));
+    fs.writeFileSync(EDITOR_PROJECT_PATH, JSON.stringify({id:projectId, name:projectName}, null, 2));
     await replaceFileSystem(fs, projectName, false, {projectId, isTemplate:true, forceDefaultLayout:true});
+  }
+
+  async function createStarter(kind, options = {}) {
+    const templates = await loadTemplateCatalog();
+    const wanted = kind === 'node' ? /node/i : /static/i;
+    const template = templates.find(item => wanted.test(item.title)) || templates.find(item => item.title.toLowerCase() === kind);
+    if (!template) throw new Error(`No ${kind} template is defined in templates/templates.json.`);
+    return await createTemplateProject(template);
   }
   async function newProject() {
     if (!(await confirmWorkspaceSwitch('starting a new project'))) return;
@@ -1275,7 +1369,7 @@
     const canClose = !!options.canClose;
     const modal = document.createElement('div');
     modal.className = 'editor-modal startup-modal';
-    modal.innerHTML = `<div class="editor-modal-content startup-content">${canClose ? '<button class="editor-modal-close startup-close" aria-label="Close">×</button>' : ''}<h2>Projects</h2><p>Create a new project, continue working on a recent project, or open a project file.</p><div class="startup-templates"><button data-kind="node"><strong>Node.js</strong><span>Node server + browser + terminal</span></button><button data-kind="static"><strong>Static</strong><span>Static site + browser</span></button></div><div class="startup-section"><div class="startup-section-header"><h3>Recent Projects</h3><button class="startup-clear" data-clear>Clear Cache</button></div><div class="startup-list" data-recent-list></div></div><div class="editor-modal-actions"><button data-open>Open Project…</button></div></div>`;
+    modal.innerHTML = `<div class="editor-modal-content startup-content">${canClose ? '<button class="editor-modal-close startup-close" aria-label="Close">×</button>' : ''}<h2>Projects</h2><p>Create a new project, continue working on a recent project, or open a project file.</p><div class="startup-templates" data-templates></div><div class="startup-section"><div class="startup-section-header"><h3>Recent Projects</h3><button class="startup-clear" data-clear>Clear Cache</button></div><div class="startup-list" data-recent-list></div></div><div class="editor-modal-actions"><button data-open>Open Project…</button></div></div>`;
     document.body.appendChild(modal);
     const listEl = modal.querySelector('[data-recent-list]');
     const clearButton = modal.querySelector('[data-clear]');
@@ -1319,12 +1413,32 @@
         };
       });
     };
-    modal.querySelectorAll('[data-kind]').forEach(button => button.onclick = () => {
-      if (busy) return;
-      busy = true;
-      modal.remove();
-      createStarter(button.dataset.kind, {initial:true}).catch(logError);
-    });
+    const templatesEl = modal.querySelector('[data-templates]');
+    const renderTemplates = async () => {
+      try {
+        const templates = await loadTemplateCatalog();
+        if (!templates.length) throw new Error('No templates are defined in templates/templates.json.');
+        templatesEl.innerHTML = templates.map((item, index) => `<button data-template-index="${index}"><strong>${escapeHTML(item.title)}</strong><span>${escapeHTML(item.description)}</span></button>`).join('');
+        templatesEl.querySelectorAll('[data-template-index]').forEach(button => button.onclick = async () => {
+          if (busy) return;
+          const template = templates[Number(button.dataset.templateIndex)];
+          if (!template) return;
+          busy = true;
+          templatesEl.querySelectorAll('button').forEach(b => b.disabled = true);
+          try {
+            await createTemplateProject(template);
+            modal.remove();
+          } catch (e) {
+            busy = false;
+            templatesEl.querySelectorAll('button').forEach(b => b.disabled = false);
+            logError(e);
+          }
+        });
+      } catch (e) {
+        templatesEl.innerHTML = `<div class="startup-empty">${escapeHTML(e?.message || e)}</div>`;
+      }
+    };
+    void renderTemplates();
     modal.querySelector('[data-open]').onclick = () => {
       if (busy) return;
       busy = true;
@@ -1351,10 +1465,12 @@
 
   function openSearchResult(path, line, column) {
     openFile(path);
+    const active = Workbench.getActiveGroup?.();
+    const groups = active?.ownerWorkbench === state.workbench ? [active] : [...state.workbench.groups.values()];
     let attempts = 0;
     const reveal = () => {
       attempts++;
-      for (const g of state.workbench.groups.values()) {
+      for (const g of groups) {
         const tab = g.tabs.find(t => t.kind === 'file' && t.path === normalize(path));
         if (!tab) continue;
         if (tab.editor) {
@@ -1396,13 +1512,7 @@
       onActivate: activate,
       onBuiltin: (kind, g) => openBuiltin(kind, g),
       onLayoutChange: () => scheduleWorkspaceLayoutSave(),
-      onClose: (t, g) => {
-        if (t?.builtin === 'peer') void getBuiltin('peer')?.stop(t);
-        state.previews?.dispose(t);
-        t.model?.dispose();
-        t.editor?.dispose();
-        state.workbench.removeTab(g, t.id);
-      }
+      onClose: (t, g) => closeWorkbenchTab(t, g)
     });
     state.runConfig = new EditorRunConfig(state);
     $('uploadZipBtn').onclick = () => openImportModal();
@@ -1460,6 +1570,11 @@
           if (key === 'd') {
             e.preventDefault();
             state.sidebarController.show('Run and Debug');
+            return;
+          }
+          if (key === 'a') {
+            e.preventDefault();
+            openBuiltin('ai');
             return;
           }
         }

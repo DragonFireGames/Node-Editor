@@ -127,12 +127,12 @@
       // A workbench switch detaches the Browser view from the DOM without
       // destroying it. Reattach that existing tab instead of creating another
       // Browser and, importantly, keep its shared Network object.
-      for (const g of state.workbench.groups.values()) {
+      for (const instance of Workbench.getInstances?.() || [state.workbench]) for (const g of instance.groups.values()) {
         const t = g.tabs.find(x => x.id === tabId);
         if (!t) continue;
         if (t._viewElement && t._viewElement.parentNode !== g.viewBody) {
           try {
-            state.workbench.activateTab(g, t.id);
+            (g.ownerWorkbench || state.workbench).activateTab(g, t.id);
           } catch (_) {}
         }
         break;

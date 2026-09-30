@@ -11,7 +11,8 @@
       onDelete,
       onChange: () => { state.markDirty?.(); updateStatus(); },
       projectName: () => state.projectName,
-      showHiddenFolders: state.behavior.showHiddenFolders
+      showHiddenFolders: state.behavior.showHiddenFolders,
+      canContextMenu: () => state.sidebar === 'explorer'
     });
     state.fileManager = manager;
     tree.addEventListener('click', e => {
@@ -20,6 +21,7 @@
     return {
       fileManager: manager,
       show() {
+        manager.hideContextMenu();
         tree.classList.remove('activity-collapsed');
         manager.render();
       },
@@ -28,6 +30,7 @@
         manager.setShowHiddenFolders?.(state.behavior.showHiddenFolders);
         manager.refresh();
       },
+      hideContextMenu() { manager.hideContextMenu(); },
       restoreCollapsed(paths) {
         manager.collapsedPaths = new Set(paths || []);
         manager.render();

@@ -11,6 +11,7 @@
       this.onMove = options.onMove || (() => {});
       this.onDelete = options.onDelete || (() => {});
       this.showHiddenFolders = !!options.showHiddenFolders;
+      this.canContextMenu = options.canContextMenu || (() => true);
       this.selectedNode = null;
       this.selectedNodes = new Set();
       this.selectionAnchor = null;
@@ -26,6 +27,7 @@
       this.nodeByPath = new Map([['', this.root]]);
       this.nodeByID = new Map([['root', this.root]]);
       this.contextMenu?.addEventListener('click', e => {
+        if (!this.canContextMenu()) { this.hideContextMenu(); return; }
         const action = e.target.closest('[data-action]')?.dataset.action;
         if (!action) return;
         e.stopPropagation();
@@ -211,6 +213,7 @@
       buttons.querySelector('#newfile').onclick = () => this.createFile(this.selectedNode || this.root);
       buttons.querySelector('#newfolder').onclick = () => this.createFolder(this.selectedNode || this.root);
       container.oncontextmenu = e => {
+        if (!this.canContextMenu()) return;
         e.preventDefault();
         e.stopPropagation();
         const li = e.target.closest?.('li[data-path]');
@@ -306,7 +309,7 @@
           }
         };
         li.oncontextmenu = e => {
-          if (e.target !== li) return;
+          if (!this.canContextMenu() || e.target !== li) return;
           e.preventDefault();
           e.stopPropagation();
           if (!this.selectedNodes.has(child.path)) this.select(child, {preserve:true});
@@ -417,7 +420,7 @@
       });
     }
     showContextMenu(x, y) {
-      if (!this.contextMenu) return;
+      if (!this.contextMenu || !this.canContextMenu()) return;
       this.contextMenu.innerHTML = '<ul></ul>';
       const ul = this.contextMenu.firstChild, n = this.selectedNode, selected = [...this.selectedNodes].map(p => this.nodeByPath.get(p)).filter(Boolean), items = [];
       if (n) {

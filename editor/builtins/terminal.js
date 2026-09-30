@@ -29,10 +29,10 @@
     terminal.updatePrompt();
   }
     function getOrOpenTerminal() {
-    for (const g of state.workbench.groups.values()) {
+    for (const instance of Workbench.getInstances?.() || [state.workbench]) for (const g of instance.groups.values()) {
       const t = g.tabs.find(x => x.kind === 'builtin' && x.builtin === 'terminal');
       if (t) {
-        state.workbench.activateTab(g, t.id);
+        (g.ownerWorkbench || state.workbench).activateTab(g, t.id);
         return t;
       }
     }
