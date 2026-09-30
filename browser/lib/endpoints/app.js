@@ -3530,7 +3530,12 @@
           rootfolder: runtimeRoot,
           log: console,
           env: nodeEmulator.env,
-          commandRunner: async command => await window.terminalCommand(command)
+          commandRunner: async command => await window.terminalCommand(command),
+          onFileSystemChange: () => {
+            try {
+              window.nodeEmulator?.dispatchEvent?.('filesystemchange');
+            } catch (_) {}
+          }
         });
       } else {
         nodeEmulator.npm.rootfolder = runtimeRoot;

@@ -792,6 +792,14 @@
     }
     state.staticEndpoint = null;
   }
+  state.ensureNodeRuntime = async function() {
+    if (state.nodeEmulator) return state.nodeEmulator;
+    if (!state.fs || !state.browserNetwork) throw new Error('Node runtime is not ready.');
+    state.runConfig?.detect?.();
+    if (state.runConfig?.config?.serverType !== 'node') throw new Error('This project is not configured for Node.');
+    await setupRuntime(state.browserNetwork);
+    return state.nodeEmulator;
+  };
   async function setupRuntime(net) {
     if (!state.fs || !net) return;
     detachRuntime(net);
@@ -826,6 +834,11 @@
         }
       });
       state.nodeEmulator = emulator;
+      emulator.addEventListener?.('filesystemchange', () => {
+        state.fileManager?.refresh?.();
+        state.markDirty?.();
+        updateStatus();
+      });
       if (net.replaceRuntimeEndpoint) net.replaceRuntimeEndpoint(emulator.endpoint); else net.prependEndpoint(emulator.endpoint);
       try {
         await emulator.ready;

@@ -140,59 +140,72 @@
   function versionSatisfies(version, range) {
     const v = parseVersion(version);
     if (!v) return false;
-    range = String(range || '*').trim();
+    range = String(range == null ? '*' : range).trim();
     if (!range || range === '*' || range === 'latest') return !v.prerelease.length;
-    if (range === 'x' || range === 'X') return true;
-    if (range.includes('||')) return range.split('||').some(r => versionSatisfies(version, r));
+    if (range.includes('||')) return range.split('||').some(part => versionSatisfies(version, part));
 
-    const parts = range.replace(/^v/, '').trim().split(/\s+/).filter(Boolean);
-    if (parts.length > 1 && parts.every(p => /^(?:[<>]=?|=|~|\^)?v?\d/.test(p))) {
-      return parts.every(p => versionSatisfies(version, p));
+    // npm allows whitespace between a comparator and its version, e.g.
+    // ">= 2.1.2 < 3.0.0". Normalize that form before parsing comparator sets.
+    range = range.replace(/(>=|<=|>|<|=|\^|~)\s+/g, '$1');
+    const sets = range.split(/\s+/).filter(Boolean);
+    if (!sets.length) return !v.prerelease.length;
+
+    // Hyphen ranges: 1.2.3 - 2.3.4
+    const hyphen = range.match(/^\s*(v?\d+(?:\.\d+)?(?:\.\d+)?(?:-[0-9A-Za-z.-]+)?)\s+-\s+(v?\d+(?:\.\d+)?(?:\.\d+)?(?:-[0-9A-Za-z.-]+)?)\s*$/);
+    if (hyphen) {
+      return compareVersions(v, parseVersion(hyphen[1])) >= 0 && compareVersions(v, parseVersion(hyphen[2])) <= 0;
     }
 
-    const comparator = range.match(/^(>=|<=|>|<|=)?\s*(v?\d+(?:\.\d+)?(?:\.\d+)?(?:-[0-9A-Za-z.-]+)?)$/);
-    if (comparator) {
-      const op = comparator[1] || '=';
-      const target = comparator[2];
-      const targetVersion = parseVersion(target);
-      if (!targetVersion) return false;
-      const cmp = compareVersions(v, targetVersion);
-      if (op === '>') return cmp > 0;
-      if (op === '>=') return cmp >= 0;
-      if (op === '<') return cmp < 0;
-      if (op === '<=') return cmp <= 0;
-      return cmp === 0;
-    }
+    return sets.every(part => {
+      if (part === '*' || /^x$/i.test(part)) return true;
 
-    let m = range.match(/^\^\s*v?(\d+)(?:\.(\d+))?(?:\.(\d+))?/);
-    if (m) {
-      const major = Number(m[1]);
-      const minor = Number(m[2] || 0);
-      const patch = Number(m[3] || 0);
-      if (compareVersions(v, { major, minor, patch, prerelease: [] }) < 0) return false;
-      if (major > 0) return v.major === major;
-      if (minor > 0) return v.major === 0 && v.minor === minor;
-      return v.major === 0 && v.minor === 0 && v.patch === patch;
-    }
+      const comparator = part.match(/^(>=|<=|>|<|=)?\s*(v?\d+(?:\.\d+)?(?:\.\d+)?(?:-[0-9A-Za-z.-]+)?)$/);
+      if (comparator) {
+        const op = comparator[1] || '=';
+        const target = parseVersion(comparator[2]);
+        const cmp = compareVersions(v, target);
+        if (op === '>') return cmp > 0;
+        if (op === '>=') return cmp >= 0;
+        if (op === '<') return cmp < 0;
+        if (op === '<=') return cmp <= 0;
+        return cmp === 0;
+      }
 
-    m = range.match(/^~\s*v?(\d+)(?:\.(\d+))?(?:\.(\d+))?/);
-    if (m) {
-      const major = Number(m[1]);
-      const minor = Number(m[2] || 0);
-      const patch = Number(m[3] || 0);
-      if (compareVersions(v, { major, minor, patch, prerelease: [] }) < 0) return false;
-      return v.major === major && (m[2] == null || v.minor === minor);
-    }
+      let m = part.match(/^\^\s*v?(\d+)(?:\.(\d+|x|X))?(?:\.(\d+|x|X))?(?:-([0-9A-Za-z.-]+))?$/);
+      if (m) {
+        const major = Number(m[1]);
+        const minor = m[2] && !/x/i.test(m[2]) ? Number(m[2]) : 0;
+        const patch = m[3] && !/x/i.test(m[3]) ? Number(m[3]) : 0;
+        const lower = { major, minor, patch, prerelease: m[4] ? m[4].split('.') : [] };
+        let upper;
+        if (major > 0) upper = { major: major + 1, minor: 0, patch: 0, prerelease: [] };
+        else if (m[2] && !/x/i.test(m[2]) && minor > 0) upper = { major: 0, minor: minor + 1, patch: 0, prerelease: [] };
+        else upper = { major: 0, minor: 0, patch: patch + 1, prerelease: [] };
+        return compareVersions(v, lower) >= 0 && compareVersions(v, upper) < 0;
+      }
 
-    m = range.match(/^v?(\d+|x|X)(?:\.(\d+|x|X))?(?:\.(\d+|x|X))?$/);
-    if (m) {
-      if (m[1] !== 'x' && m[1] !== 'X' && v.major !== Number(m[1])) return false;
-      if (m[2] && m[2] !== 'x' && m[2] !== 'X' && v.minor !== Number(m[2])) return false;
-      if (m[3] && m[3] !== 'x' && m[3] !== 'X' && v.patch !== Number(m[3])) return false;
-      return true;
-    }
+      m = part.match(/^~\s*v?(\d+)(?:\.(\d+|x|X))?(?:\.(\d+|x|X))?(?:-([0-9A-Za-z.-]+))?$/);
+      if (m) {
+        const major = Number(m[1]);
+        const hasMinor = m[2] != null && !/x/i.test(m[2]);
+        const minor = hasMinor ? Number(m[2]) : 0;
+        const hasPatch = m[3] != null && !/x/i.test(m[3]);
+        const patch = hasPatch ? Number(m[3]) : 0;
+        const lower = { major, minor, patch, prerelease: m[4] ? m[4].split('.') : [] };
+        const upper = hasMinor ? { major, minor: minor + 1, patch: 0, prerelease: [] } : { major: major + 1, minor: 0, patch: 0, prerelease: [] };
+        return compareVersions(v, lower) >= 0 && compareVersions(v, upper) < 0;
+      }
 
-    return compareVersions(version, range) === 0;
+      m = part.match(/^v?(\d+|x|X)(?:\.(\d+|x|X))?(?:\.(\d+|x|X))?$/);
+      if (m) {
+        if (!/x/i.test(m[1]) && v.major !== Number(m[1])) return false;
+        if (m[2] && !/x/i.test(m[2]) && v.minor !== Number(m[2])) return false;
+        if (m[3] && !/x/i.test(m[3]) && v.patch !== Number(m[3])) return false;
+        return !v.prerelease.length;
+      }
+
+      return false;
+    });
   }
 
   function selectVersion(metadata, range) {
@@ -342,6 +355,7 @@
       this.installing = new Set();
       this.installRecords = new Map(); // relative package path -> {resolved, integrity}
       this.commandRunner = typeof options.commandRunner === 'function' ? options.commandRunner : null;
+      this.onFileSystemChange = typeof options.onFileSystemChange === 'function' ? options.onFileSystemChange : null;
     }
 
     output(message = '') {
@@ -470,6 +484,53 @@
       return this.projectPath(joinPath(targetDir, 'node_modules', packageNodePath(name)));
     }
 
+    ancestorTargetDirs(targetDir = '') {
+      const result = [];
+      let current = String(targetDir || '').replace(/^\/+|\/+$/g, '');
+      while (true) {
+        result.push(current);
+        if (!current) break;
+        const idx = current.lastIndexOf('/');
+        current = idx < 0 ? '' : current.slice(0, idx);
+      }
+      return result.reverse();
+    }
+
+    chooseInstallTarget(name, range, targetDir = '') {
+      // First honor normal Node resolution: the closest already-installed
+      // compatible package wins.
+      const existing = this.findInstalledPackage(name, targetDir);
+      if (existing && versionSatisfies(existing.manifest.version, range)) return { existing };
+
+      // Otherwise hoist as high as possible. An incompatible package blocks
+      // that exact node_modules location, but does not prevent a nested copy.
+      const targets = this.ancestorTargetDirs(targetDir);
+      for (const candidate of targets) {
+        const packagePath = this.installedPackagePath(candidate, name);
+        const packageJson = this.readText(`${packagePath}/package.json`);
+        if (packageJson) {
+          try {
+            const manifest = JSON.parse(packageJson);
+            if (manifest.version && versionSatisfies(manifest.version, range)) {
+              return { existing: {
+                name,
+                version: manifest.version,
+                manifest,
+                path: packagePath,
+                relativePath: packagePath.replace(/^\/+/, '').replace(this.rootfolder ? new RegExp(`^${this.escapeRegExp(this.rootfolder)}/?`) : /^/, '')
+              } };
+            }
+          } catch (_) {}
+          continue;
+        }
+        return { targetDir: candidate };
+      }
+
+      // The target itself may contain a package that was unreadable or had an
+      // invalid manifest. Let materialization replace that broken package.
+      return { targetDir: targetDir || '' };
+    }
+
     async materializePackage(targetDir, name, metadata, version, spec) {
       const manifest = metadata.versions?.[version];
       if (!manifest) throw new NpmError(`Registry metadata for '${name}@${version}' is missing the version record.`);
@@ -507,8 +568,11 @@
 
     async installResolved(name, range, targetDir, options = {}, stack = []) {
       const requestedRange = range || 'latest';
-      const existing = this.findInstalledPackage(name, targetDir);
-      if (existing && !options.force && versionSatisfies(existing.manifest.version, requestedRange)) {
+      const placement = options.force
+        ? { targetDir: targetDir || '' }
+        : this.chooseInstallTarget(name, requestedRange, targetDir);
+      const existing = placement.existing;
+      if (existing && !options.force) {
         return {
           name,
           version: existing.manifest.version,
@@ -521,14 +585,15 @@
         };
       }
 
-      const key = `${targetDir}:${name}@${requestedRange}`;
+      const installTarget = placement.targetDir ?? targetDir ?? '';
+      const key = `${installTarget}:${name}@${requestedRange}`;
       if (stack.includes(name) || this.installing.has(key)) return existing ? { name, version: existing.manifest.version, manifest: existing.manifest, path: existing.path, relativePath: existing.relativePath, reused: true } : null;
       this.installing.add(key);
 
       try {
         const metadata = await this.fetchMetadata(name);
         const version = selectVersion(metadata, requestedRange);
-        const installed = await this.materializePackage(targetDir, name, metadata, version, requestedRange);
+        const installed = await this.materializePackage(installTarget, name, metadata, version, requestedRange);
         const childTarget = installed.relativePath;
         const deps = {
           ...(installed.manifest.dependencies || {}),
@@ -615,6 +680,7 @@
 
       if (!options.noSave) this.saveRootManifest(manifest);
       await this.writeLockfile(manifest);
+      this.onFileSystemChange?.();
       this.output('npm install complete.');
     }
 
@@ -638,6 +704,7 @@
       this.saveRootManifest(manifest);
       await this.prune({ quiet: true });
       await this.writeLockfile(manifest);
+      this.onFileSystemChange?.();
       this.output('npm uninstall complete.');
     }
 
@@ -926,6 +993,7 @@ npm audit found ${blocking.length} package${blocking.length === 1 ? '' : 's'} wi
         license: 'ISC'
       };
       this.saveRootManifest(next);
+      this.onFileSystemChange?.();
       this.output('Created package.json');
     }
 
@@ -955,6 +1023,7 @@ npm audit found ${blocking.length} package${blocking.length === 1 ? '' : 's'} wi
         const range = entry.version || '*';
         await this.installResolved(name, `=${range}`, parent, { force: true });
       }
+      this.onFileSystemChange?.();
       this.output(`npm ci complete (${entries.length} packages).`);
     }
 

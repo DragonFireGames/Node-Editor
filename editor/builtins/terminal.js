@@ -20,7 +20,9 @@
     g.viewBody.appendChild(wrap);
     let terminal = state.terminalTabs.get(t.id);
     if (!terminal) {
-      terminal = new NodeConsoleTerminal(out, input, send, prompt);
+      terminal = new NodeConsoleTerminal(out, input, send, prompt, async () => {
+        await state.ensureNodeRuntime?.();
+      });
       state.terminalTabs.set(t.id, terminal);
     }
     terminal.attach(state.nodeEmulator);

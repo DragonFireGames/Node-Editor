@@ -1,10 +1,11 @@
 (function () {
   class NodeConsoleTerminal {
-    constructor(output, input, send, prompt) {
+    constructor(output, input, send, prompt, ensureRunner) {
       this.output = output;
       this.input = input;
       this.send = send;
       this.prompt = prompt;
+      this.ensureRunner = typeof ensureRunner === 'function' ? ensureRunner : null;
       this.runner = null;
       this.boundConsole = null;
       this.console = new BrowserConsole(output, {
@@ -35,7 +36,9 @@
     }
     async runCommand(cmd) {
       cmd = String(cmd || '').trim();
-      if (!cmd || !this.runner) return;
+      if (!cmd) return;
+      if (!this.runner && this.ensureRunner) await this.ensureRunner();
+      if (!this.runner) throw new Error('Node runtime is not ready.');
       this.console.add(this.console.styledSpan('$ ' + cmd, 'log-command'));
       try {
         return await this.runner.terminalCommand(cmd);
@@ -45,7 +48,12 @@
     }
     async run() {
       const cmd = this.input?.value.trim();
-      if (!cmd || !this.runner) return;
+      if (!cmd) return;
+      if (!this.runner && this.ensureRunner) await this.ensureRunner();
+      if (!this.runner) {
+        this.console.error('Node runtime is not ready.');
+        return;
+      }
       this.input.value = '';
       try {
         await this.runCommand(cmd);
