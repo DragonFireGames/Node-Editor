@@ -219,33 +219,14 @@
     }));
   }
   async function getRepository(owner, repo) { return request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`); }
-  async function createRepository({name, description = '', privateRepo = false, autoInit = true}) {
-    name = String(name || '').trim();
-    if (!name) throw new Error('Enter a repository name.');
-    return request('/user/repos', {
-      method:'POST',
-      body:JSON.stringify({name, description:String(description || '').trim(), private:!!privateRepo, auto_init:!!autoInit, has_issues:true, has_projects:false, has_wiki:false})
-    });
-  }
-  async function downloadArchive(owner, repo, ref = '') {
-    const token = getToken();
-    if (!token) throw new Error('Not signed in to GitHub.');
-    const path = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/zipball/${branchPath(ref || 'main')}`;
-    const headers = new Headers({Accept:'application/vnd.github+json','X-GitHub-Api-Version':API_VERSION,Authorization:`Bearer ${token}`});
-    const response = await fetch(API + path, {headers});
-    if (response.status === 401) { clearStoredAuth(); notify(); throw new Error('GitHub authentication expired. Sign in again from Profile.'); }
-    if (!response.ok) {
-      const data = await response.json().catch(() => null);
-      const error = new Error(data?.message || `GitHub archive download failed (${response.status}).`);
-      error.status = response.status; error.data = data;
-      throw error;
-    }
-    return response.blob();
-  }
   function branchPath(branch) { return String(branch || 'main').split('/').filter(Boolean).map(encodeURIComponent).join('/'); }
   async function listBranches(owner, repo) {
     const branches = await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches?per_page=100`);
     return Array.isArray(branches) ? branches.map(x => x.name).filter(Boolean) : [];
+  }
+  async function getBranchCommit(owner, repo, branch) {
+    const ref = await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/ref/heads/${branchPath(branch)}`);
+    return ref?.object?.sha || null;
   }
   async function getRemoteState(owner, repo, branch) {
     const repoPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
@@ -361,10 +342,9 @@
   root.request = request;
   root.listRepositories = listRepositories;
   root.getRepository = getRepository;
-  root.createRepository = createRepository;
-  root.downloadArchive = downloadArchive;
   root.listBranches = listBranches;
   root.getRemoteState = getRemoteState;
+  root.getBranchCommit = getBranchCommit;
   root.listCommits = listCommits;
   root.compareWorkingTree = compareWorkingTree;
   root.commitAndPush = commitAndPush;

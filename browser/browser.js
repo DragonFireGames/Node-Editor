@@ -59,10 +59,9 @@ if (browserNetwork.__browserBaseEndpoints) {
   fallbackProxyEndpoint = new ProxyNetworkEndpoint(appSettings.fallbackProxy, appSettings.obscureURL, appSettings.useFallback);
   browserDefaultFallbackEndpoint = new NetworkEndpoint();
   browserDefaultFallbackEndpoint.__browserDefaultFallback = true;
-  browserDefaultFallbackEndpoint.__networkRole = 'native';
-  browserNetwork.appendEndpoint(browserDefaultFallbackEndpoint);
   browserNetwork.appendEndpoint(primaryProxyEndpoint);
   browserNetwork.appendEndpoint(fallbackProxyEndpoint);
+  browserNetwork.appendEndpoint(browserDefaultFallbackEndpoint);
   browserNetwork.__browserBaseEndpoints = {
     primary: primaryProxyEndpoint,
     fallback: fallbackProxyEndpoint,

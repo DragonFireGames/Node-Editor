@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Deployment</title>
+<style>
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color:#ddd;font:13px system-ui,sans-serif}
+#status{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;color:#999;background:#000;z-index:10;pointer-events:none}
+#status.error{color:#f0a0a8;white-space:pre-wrap;text-align:center;padding:24px;box-sizing:border-box}
+#stage{position:fixed;inset:0;display:none;background:#000}
+#stage.ready{display:block}
+#stage iframe{width:100%;height:100%;border:0;display:block;background:#fff}
+</style>
+<script src="browser/external/jszip.js"></script>
+<script src="browser/lib/filesystem.js"></script>
+<script src="browser/lib/network.js"></script>
+<script src="browser/lib/emulator.js"></script>
+<script src="browser/lib/npm.js"></script>
+<script src="browser/lib/endpoints/app.js"></script>
+<script src="browser/lib/endpoints/static.js"></script>
+<script src="browser/lib/keepalive.js"></script>
+</head>
+<body>
+<div id="stage"></div>
+<div id="status">Loading deployment…</div>
+<script>
+(() => {
+  const status = document.getElementById('status');
+  const stage = document.getElementById('stage');
+  const params = new URLSearchParams(location.search);
+  const githubURL = params.get('github') || params.get('githubUrl') || '';
+  const hasCommitOverride = params.has('commit') || params.has('sha');
+  const commitOverride = params.get('commit') ?? params.get('sha') ?? '';
+  const hasUrlOverride = params.has('url') || params.has('path');
+  const requestedUrl = params.get('url') ?? params.get('path') ?? '';
+  const hasPeerOverride = params.has('usePeerNetwork');
+  const peerOverrideValue = params.get('usePeerNetwork');
+  function parsePeerOverride(value) {
+    const s = String(value ?? '').trim().toLowerCase();
+    return !(s === '0' || s === 'false' || s === 'no' || s === 'off');
+  }
+  const native = new NetworkEndpoint();
+  native.__networkRole = 'native';
+  native.__deploymentNative = true;
+
+  function showError(error) {
+    console.error(error);
+    status.textContent = error?.message || String(error);
+    status.className = 'error';
+  }
+  function parseGithub(input) {
+    let url;
+    try { url = new URL(input); } catch (_) { throw new Error('Invalid GitHub URL.'); }
+    if (!/^https?:$/i.test(url.protocol) || !/^(www\.)?github\.com$/i.test(url.hostname)) throw new Error('Deployment requires a GitHub repository URL.');
+    const parts = url.pathname.split('/').filter(Boolean);
+    if (parts.length < 2) throw new Error('Invalid GitHub repository URL.');
+    return {owner:parts[0],repo:parts[1].replace(/\.git$/i,'')};
+  }
+  async function getLatestCommit(owner, repo) {
+    const repoResponse = await fetch(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, {headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2026-03-10'}});
+    if (!repoResponse.ok) throw new Error(`GitHub repository lookup failed (${repoResponse.status}).`);
+    const repoData = await repoResponse.json();
+    const branch = repoData?.default_branch || 'main';
+    const refResponse = await fetch(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/ref/heads/${branch.split('/').map(encodeURIComponent).join('/')}`, {headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2026-03-10'}});
+    if (!refResponse.ok) throw new Error(`GitHub latest commit lookup failed (${refResponse.status}).`);
+    const refData = await refResponse.json();
+    if (!refData?.object?.sha) throw new Error('GitHub did not return a latest commit SHA.');
+    return refData.object.sha;
+  }
+  async function loadArchive(owner, repo, ref) {
+    const codeload = `https://codeload.github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/zip/${encodeURIComponent(ref).replace(/%2F/g,'/')}`;
+    const response = await fetch(codeload);
+    if (!response.ok) throw new Error(`GitHub archive download failed (${response.status}).`);
+    const blob = await response.blob();
+    if (!blob.size) throw new Error('GitHub returned an empty project archive.');
+    return blob;
+  }
+  function flattenZip(file, projectName) {
+    return JSZip.loadAsync(file).then(async zip => {
+      const entries = [], tops = new Set(); let rootFile = false;
+      zip.forEach((path, entry) => {
+        const clean = path.replace(/^\/+|\/+$/g,'');
+        if (!clean) return;
+        const parts = clean.split('/');
+        if (parts.length === 1) { if (!entry.dir) rootFile = true; return; }
+        tops.add(parts[0]); entries.push({clean,entry});
+      });
+      if (rootFile || tops.size !== 1 || !entries.length) return file;
+      const root = [...tops][0];
+      const expected = String(projectName || '').toLowerCase();
+      const rl = root.toLowerCase();
+      if (rl !== expected && rl !== expected + '-main' && rl !== expected + '-master') return file;
+      const out = new JSZip();
+      for (const item of entries) {
+        if (!item.clean.startsWith(root + '/')) continue;
+        const target = item.clean.slice(root.length + 1);
+        if (!target) continue;
+        if (item.entry.dir) out.folder(target);
+        else out.file(target, await item.entry.async('uint8array'));
+      }
+      const blob = await out.generateAsync({type:'blob'});
+      return new File([blob], file.name || 'project.zip', {type:'application/zip'});
+    });
+  }
+  function readJSON(fs, path) {
+    try { return fs.existsSync(path) ? JSON.parse(fs.readFileSync(path,'utf8') || '{}') : {}; }
+    catch (_) { return {}; }
+  }
+  function normalizeRoot(value) { return '/' + String(value || '/').replace(/^\/+|\/+$/g,''); }
+  function normalizePath(value) {
+    let s = String(value || '/').trim();
+    if (!s) return '/';
+    try {
+      const url = new URL(s, 'http://deployment.local');
+      s = url.pathname || '/';
+      if (!s.startsWith('/')) s = '/' + s;
+      return s === '/' ? '/' : s.replace(/\/+$/,'');
+    } catch (_) {
+      if (!s.startsWith('/')) s = '/' + s;
+      return s === '/' ? '/' : s.replace(/\/+$/,'');
+    }
+  }
+  function joinDeploymentURL(domain, path) {
+    let d = String(domain || 'http://localhost:3000/').trim();
+    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(d)) d = 'http://' + d;
+    try { d = new URL(d).origin; } catch (_) { d = 'http://localhost:3000'; }
+    let p = String(path || '/').trim() || '/';
+    if (!p.startsWith('/')) p = '/' + p;
+    return d.replace(/\/+$/,'') + p;
+  }
+  function parseDeploymentURL(value, fallbackDomain, fallbackPath) {
+    const raw = String(value || '').trim();
+    if (!raw) return new URL(joinDeploymentURL(fallbackDomain, fallbackPath));
+    try { return new URL(raw); } catch (_) { return new URL(joinDeploymentURL(fallbackDomain, raw)); }
+  }
+  function normalizeDomain(value) {
+    let s = String(value || 'http://localhost:3000/').trim();
+    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) s = 'http://' + s;
+    try { return new URL(s).origin; } catch (_) { return 'http://localhost:3000'; }
+  }
+  function loadScript(src) {
+    return new Promise((resolve,reject) => {
+      const script = document.createElement('script');
+      script.src = src;
+      script.onload = resolve;
+      script.onerror = () => reject(new Error(`Failed to load ${src}.`));
+      document.head.appendChild(script);
+    });
+  }
+
+  async function main() {
+    if (!githubURL) throw new Error('Deployment requires a github query parameter.');
+    const repo = parseGithub(githubURL);
+    let resolvedCommit = '';
+    let bootstrapFs = null;
+    if (hasCommitOverride) {
+      resolvedCommit = String(commitOverride || '').trim();
+      if (!resolvedCommit || resolvedCommit.toLowerCase() === 'latest') {
+        status.textContent = 'Resolving latest commit…';
+        resolvedCommit = await getLatestCommit(repo.owner, repo.repo);
+      }
+    } else {
+      status.textContent = 'Resolving deployment commit…';
+      const latestCommit = await getLatestCommit(repo.owner, repo.repo);
+      const latestBlob = await loadArchive(repo.owner, repo.repo, latestCommit);
+      const latestFile = await flattenZip(new File([latestBlob], repo.repo + '.zip', {type:'application/zip'}), repo.repo);
+      bootstrapFs = await FileSystem.create(latestFile, {sync:false});
+      const latestMeta = readJSON(bootstrapFs, '.editor/project.json');
+      const savedCommit = String(latestMeta?.deployment?.commit || '').trim();
+      resolvedCommit = savedCommit && savedCommit.toLowerCase() !== 'latest' ? savedCommit : latestCommit;
+      if (resolvedCommit === latestCommit) bootstrapFs = null;
+    }
+    status.textContent = 'Downloading commit…';
+    let fs;
+    if (bootstrapFs) fs = await (async () => {
+      if (!resolvedCommit) return bootstrapFs;
+      const blob = await loadArchive(repo.owner, repo.repo, resolvedCommit);
+      const file = await flattenZip(new File([blob], repo.repo + '.zip', {type:'application/zip'}), repo.repo);
+      return FileSystem.create(file, {sync:false});
+    })();
+    else {
+      const blob = await loadArchive(repo.owner, repo.repo, resolvedCommit);
+      const file = await flattenZip(new File([blob], repo.repo + '.zip', {type:'application/zip'}), repo.repo);
+      fs = await FileSystem.create(file, {sync:false});
+    }
+    const runConfig = readJSON(fs, '.editor/config.json');
+    const projectMeta = readJSON(fs, '.editor/project.json');
+    const type = runConfig.serverType === 'node' ? 'node' : 'static';
+    const savedUsePeerNetwork = !!projectMeta?.deployment?.usePeerNetwork;
+    const usePeerNetwork = hasPeerOverride ? parsePeerOverride(peerOverrideValue) : savedUsePeerNetwork;
+    const runtimeURL = parseDeploymentURL(hasUrlOverride ? requestedUrl : '', runConfig.domain, runConfig.path);
+    const domain = runtimeURL.origin;
+    const path = runtimeURL.pathname || '/';
+    const runtimePath = normalizePath(path);
+    const root = normalizeRoot(runConfig.rootfolder);
+    const network = new Network();
+    network.appendEndpoint(native);
+
+    let runtime;
+    let peerServer = null;
+    if (type === 'static') {
+      runtime = new StaticEndpoint({domain, path:runtimePath, rootfolder:root, runfile:runConfig.runfile || '/index.html', filesystem:fs});
+      network.prependEndpoint(runtime);
+      await runtime.loading;
+    } else {
+      runtime = new NodeEmulator({
+        domain,
+        rootfolder:root,
+        pathPrefix:runtimePath,
+        filesystem:fs,
+        fileSystemSync:false,
+        network,
+        cwd:runConfig.cwd || '/',
+        env:{NODE_ENV:'production',USER:'watermelonkatana_user'}
+      });
+      network.prependEndpoint(runtime.endpoint);
+      await runtime.ready;
+      if (runConfig.nodeCommand) await runtime.terminalCommand(runConfig.nodeCommand);
+      if (!await runtime.waitForServer?.(10000,50)) throw new Error('Node command finished, but no listening server was created.');
+      let peerEndpoint = null;
+      if (usePeerNetwork) {
+        const layer = String(projectMeta.peerLayer || new URLSearchParams(location.search).get('peerLayer') || 'peer').trim() || 'peer';
+        window.__peerLayer = layer;
+        await loadScript('browser/external/peer.js');
+        await loadScript('browser/lib/endpoints/peer.js');
+        if (typeof ensurePeerServer !== 'function' || typeof PeerEndpoint !== 'function') throw new Error('Peer network support is unavailable.');
+        peerEndpoint = new PeerEndpoint({requestTimeout:30000});
+        network.prependEndpoint(peerEndpoint);
+        status.textContent = 'Starting peer network…';
+        peerServer = await ensurePeerServer(domain, async () => runtime.endpoint, {
+          interval: 3000,
+          onHostChange(hosting) {
+            try {
+              if (hosting) { window.keepAlive?.enable?.(); window.keepAlive?.start?.(); }
+              else { window.keepAlive?.disable?.(); }
+            } catch (_) {}
+          }
+        });
+        window.addEventListener('beforeunload', () => {
+          try { peerServer?.close?.(); } catch (_) {}
+          try { peerEndpoint?.close?.(); } catch (_) {}
+          try { window.keepAlive?.disable?.(); } catch (_) {}
+        });
+      }
+    }
+
+    const iframe = document.createElement('iframe');
+    stage.appendChild(iframe);
+    const pageURL = runtimeURL.href;
+    const page = new PageEmulator(iframe, {network, location:{url:pageURL,origin:domain}, history:[]});
+    function makeDeploymentNavigationURL(target) {
+      const resolved = new URL(target, page.location.url);
+      const current = new URL(location.href);
+      current.searchParams.delete('githubUrl');
+      current.searchParams.delete('sha');
+      current.searchParams.set('github', githubURL);
+      if (hasCommitOverride) current.searchParams.set('commit', String(commitOverride || 'latest'));
+      else current.searchParams.delete('commit');
+      current.searchParams.delete('path');
+      current.searchParams.delete('url');
+      if (hasPeerOverride) current.searchParams.set('usePeerNetwork', usePeerNetwork ? 'true' : 'false');
+      else current.searchParams.delete('usePeerNetwork');
+      current.searchParams.delete('peerLayer');
+      current.searchParams.set('url', resolved.href);
+      return current.href;
+    }
+    function navigateReal(target, replace = false) {
+      const resolved = new URL(target, page.location.url);
+      if (resolved.origin !== domain) {
+        if (replace) location.replace(resolved.href);
+        else location.assign(resolved.href);
+        return true;
+      }
+      const href = makeDeploymentNavigationURL(resolved.href);
+      if (replace) location.replace(href);
+      else location.assign(href);
+      return true;
+    }
+    page.interceptEvent('navigate', url => navigateReal(url, false));
+    page.interceptEvent('open', (url, activateTab) => {
+      const resolved = new URL(url, page.location.url);
+      if (resolved.origin !== domain) return window.open(resolved.href, '_blank', 'noopener');
+      const popup = window.open(makeDeploymentNavigationURL(resolved.href), '_blank', 'noopener');
+      if (activateTab === false && popup) { try { popup.opener = null; } catch (_) {} }
+      return popup || true;
+    });
+    try {
+      const canonical = new URL(location.href);
+      canonical.searchParams.delete('githubUrl');
+      canonical.searchParams.delete('sha');
+      canonical.searchParams.set('github', githubURL);
+      if (hasCommitOverride) canonical.searchParams.set('commit', String(commitOverride || 'latest'));
+      else canonical.searchParams.delete('commit');
+      if (hasUrlOverride) canonical.searchParams.set('url', runtimeURL.href);
+      else canonical.searchParams.delete('url');
+      canonical.searchParams.delete('path');
+      if (hasPeerOverride) canonical.searchParams.set('usePeerNetwork', usePeerNetwork ? 'true' : 'false');
+      else canonical.searchParams.delete('usePeerNetwork');
+      canonical.searchParams.delete('peerLayer');
+      history.replaceState({}, document.title, canonical.pathname + canonical.search + canonical.hash);
+    } catch (_) {}
+    status.textContent = 'Starting project…';
+    const response = await network.request(pageURL, location.origin, {}, 'deployment');
+    if (!response?.ok) throw new Error(`Project entry page failed to load (${response?.status || 'no response'}).`);
+    const html = await response.text();
+    await page.setDocument(html, true, pageURL);
+    stage.classList.add('ready');
+    status.remove();
+  }
+  main().catch(showError);
+})();
+</script>
+</body>
+</html>
