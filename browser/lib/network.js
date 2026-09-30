@@ -144,14 +144,22 @@ class Network extends EventHandler {
   }
   async searchEndpoints(callback, type) {
     await wait(1);
-    let endpoints = this.endpoints.slice();
-    if (type === 'ai') {
-      // AI requests always try the browser's default/direct endpoint first.
-      // If it fails, preserve the configured proxy endpoint order for fallback.
-      const defaultEndpoint = endpoints.find(endpoint => endpoint?.__browserDefaultFallback);
-      if (defaultEndpoint) {
-        endpoints = [defaultEndpoint, ...endpoints.filter(endpoint => endpoint !== defaultEndpoint)];
-      }
+    const all = this.endpoints.slice();
+    const endpoints = [];
+    // Runtime/custom endpoints always get first refusal. The base chain is
+    // deliberately ordered native -> primary proxy -> fallback proxy.
+    for (const endpoint of all) {
+      if (endpoint?.enabled === false) continue;
+      if (!endpoint?.__networkBaseRole) endpoints.push(endpoint);
+    }
+    for (const role of ['native','proxy','fallback']) {
+      const endpoint = all.find(item => item?.__networkBaseRole === role);
+      if (endpoint && endpoint.enabled !== false) endpoints.push(endpoint);
+    }
+    // Preserve any unknown base endpoints rather than silently dropping them.
+    for (const endpoint of all) {
+      if (endpoint?.enabled === false || !endpoint?.__networkBaseRole) continue;
+      if (!['native','proxy','fallback'].includes(endpoint.__networkBaseRole)) endpoints.push(endpoint);
     }
     for (var i = 0; i < endpoints.length; i++) {
       var endp = endpoints[i];
@@ -181,11 +189,38 @@ class NetworkEndpoint extends EventHandler {
   }
 }
 
+async function loadJSONThroughNetwork(url, init = {}, type = 'config') {
+  const network = new Network();
+  const native = new NetworkEndpoint();
+  native.__networkBaseRole = 'native';
+  network.appendEndpoint(native);
+  const response = await network.request(new Request(url, init), type);
+  if (!response) throw new Error(`No network endpoint returned a response for ${url}.`);
+  if (!response.ok) throw new Error(`Request failed (${response.status}) for ${url}.`);
+  return await response.json();
+}
+window.loadJSONThroughNetwork = loadJSONThroughNetwork;
+
+function installNetworkFetch(network, type = 'fetch') {
+  if (!network?.request) throw new Error('Network API is unavailable.');
+  const previous = window.fetch;
+  if (!network.__previousGlobalFetch) network.__previousGlobalFetch = previous;
+  const wrapped = function(input, init) {
+    const request = input instanceof Request ? new Request(input, init) : new Request(input, init);
+    return network.request(request, type);
+  };
+  wrapped.__networkFetch = true;
+  window.fetch = wrapped;
+  return () => { if (window.fetch === wrapped) window.fetch = previous; };
+}
+window.installNetworkFetch = installNetworkFetch;
+
 class ProxyNetworkEndpoint extends NetworkEndpoint {
   constructor(proxy, obscureURL = true, enabled) {
     super(enabled);
     this.proxy = proxy;
     this.obscureURL = obscureURL;
+    this.__networkBaseRole = 'proxy';
   }
   async handleRequest(request,type) {
     let targetProxyUrl = request.url;

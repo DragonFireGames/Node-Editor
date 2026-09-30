@@ -10,10 +10,24 @@
     let refreshToken = 0;
     function esc(value) { return String(value ?? '').replace(/[&<>\"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\\':'&#39;'}[ch])); }
     function loadConfig() {
+      if (state.gitRepository?.owner && state.gitRepository?.repo) return {...state.gitRepository};
+      try {
+        const raw = state.fs?.readFileSync?.('.editor/project.json', 'utf8');
+        const value = JSON.parse(raw || '{}');
+        if (value?.git?.provider === 'github' && value.git.owner && value.git.repo) return {owner:String(value.git.owner), repo:String(value.git.repo), branch:String(value.git.branch || 'main')};
+      } catch (_) {}
       try { const value = JSON.parse(localStorage.getItem(configKey()) || 'null'); if (value?.owner && value?.repo) return {...value}; } catch (_) {}
       return {owner:'', repo:'', branch:'main'};
     }
-    function saveConfig() { try { localStorage.setItem(configKey(), JSON.stringify(selected)); } catch (_) {} }
+    function saveConfig() {
+      try { localStorage.setItem(configKey(), JSON.stringify(selected)); } catch (_) {}
+      state.gitRepository = selected?.owner && selected?.repo ? {provider:'github', owner:selected.owner, repo:selected.repo, branch:selected.branch || 'main'} : null;
+      try { state.saveProjectMetadata?.(); } catch (_) {}
+    }
+    function syncGitState() {
+      state.gitRepository = selected?.owner && selected?.repo ? {provider:'github', owner:selected.owner, repo:selected.repo, branch:selected.branch || 'main'} : null;
+      try { window.dispatchEvent(new CustomEvent('editor-git-selection-changed', {detail: state.gitRepository})); } catch (_) {}
+    }
     function show() { renderShell(); void refresh(); }
     function renderShell() {
       tree.classList.remove('activity-collapsed');
@@ -36,10 +50,18 @@
       tree.querySelector('[data-branch-refresh]')?.addEventListener('click', () => selected.repo && loadBranches(true));
       tree.querySelector('[data-repo]')?.addEventListener('change', async e => {
         const fullName = e.target.value;
-        if (!fullName) return;
+        if (!fullName) {
+          selected = {owner:'', repo:'', branch:'main'};
+          branches = [];
+          saveConfig();
+          syncGitState();
+          renderShell();
+          return;
+        }
         const [owner, ...repoParts] = fullName.split('/');
         selected = {owner, repo:repoParts.join('/'), branch:repos.find(r => r.fullName === fullName)?.defaultBranch || 'main'};
         saveConfig();
+        syncGitState();
         branches = [];
         renderShell();
         await loadBranches(false);
@@ -52,7 +74,7 @@
           await createBranch();
           return;
         }
-        selected.branch = value || 'main'; saveConfig(); void refreshStatus(); void loadHistory();
+        selected.branch = value || 'main'; saveConfig(); syncGitState(); void refreshStatus(); void loadHistory(); window.dispatchEvent(new CustomEvent('editor-git-branch-changed', {detail: state.gitRepository}));
       });
       tree.querySelector('[data-commit]')?.addEventListener('click', () => void commit());
     }
@@ -63,6 +85,7 @@
         repos = await github.listRepositories();
         if (selected.repo && !repos.some(r => r.fullName === `${selected.owner}/${selected.repo}`)) selected = {owner:'', repo:'', branch:'main'};
         saveConfig();
+        syncGitState();
         renderShell();
         if (selected.repo) await loadBranches(false);
       } catch (e) { showStatus(e.message || String(e), true); }
@@ -104,6 +127,7 @@
         branches = [];
         selected.branch = branch;
         saveConfig();
+        syncGitState();
         await loadBranches(true);
         showStatus(`Created branch ${branch}.`);
       } catch (e) {

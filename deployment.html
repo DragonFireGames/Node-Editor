@@ -29,7 +29,26 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color:
   const status = document.getElementById('status');
   const stage = document.getElementById('stage');
   const params = new URLSearchParams(location.search);
+  let deploymentNetwork;
+  async function initDeploymentNetwork() {
+    const workers = await loadJSONThroughNetwork('workers.json', {cache:'no-store'}, 'config').catch(() => ({proxy:'',github:''}));
+    const network = new Network();
+    const nativeEndpoint = new NetworkEndpoint();
+    nativeEndpoint.__networkBaseRole = 'native';
+    const primaryProxy = new ProxyNetworkEndpoint(String(workers.proxy || ''), true, !!workers.proxy);
+    primaryProxy.__networkBaseRole = 'proxy';
+    const fallbackProxy = new ProxyNetworkEndpoint('', true, false);
+    fallbackProxy.__networkBaseRole = 'fallback';
+    network.appendEndpoint(primaryProxy);
+    network.appendEndpoint(fallbackProxy);
+    network.appendEndpoint(nativeEndpoint);
+    deploymentNetwork = network;
+    if (window.installNetworkFetch) window.__removeNetworkFetch = window.installNetworkFetch(network, 'deployment-ui');
+    return network;
+  }
   const githubURL = params.get('github') || params.get('githubUrl') || '';
+  const hasBranchOverride = params.has('branch');
+  const branchOverride = params.get('branch') ?? '';
   const hasCommitOverride = params.has('commit') || params.has('sha');
   const commitOverride = params.get('commit') ?? params.get('sha') ?? '';
   const hasUrlOverride = params.has('url') || params.has('path');
@@ -57,20 +76,24 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color:
     if (parts.length < 2) throw new Error('Invalid GitHub repository URL.');
     return {owner:parts[0],repo:parts[1].replace(/\.git$/i,'')};
   }
-  async function getLatestCommit(owner, repo) {
-    const repoResponse = await fetch(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, {headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2026-03-10'}});
-    if (!repoResponse.ok) throw new Error(`GitHub repository lookup failed (${repoResponse.status}).`);
-    const repoData = await repoResponse.json();
-    const branch = repoData?.default_branch || 'main';
-    const refResponse = await fetch(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/ref/heads/${branch.split('/').map(encodeURIComponent).join('/')}`, {headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2026-03-10'}});
+  async function getRepositoryInfo(owner, repo) {
+    const response = await deploymentNetwork.request(new Request(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, {headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2026-03-10'}}), 'deployment-github');
+    if (!response.ok) throw new Error(`GitHub repository lookup failed (${response.status}).`);
+    return response.json();
+  }
+  async function getLatestCommit(owner, repo, branch) {
+    const branchName = String(branch || '').trim();
+    const repoData = branchName ? null : await getRepositoryInfo(owner, repo);
+    const resolvedBranch = branchName || repoData?.default_branch || 'main';
+    const refResponse = await deploymentNetwork.request(new Request(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/ref/heads/${resolvedBranch.split('/').map(encodeURIComponent).join('/')}`, {headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2026-03-10'}}), 'deployment-github');
     if (!refResponse.ok) throw new Error(`GitHub latest commit lookup failed (${refResponse.status}).`);
     const refData = await refResponse.json();
     if (!refData?.object?.sha) throw new Error('GitHub did not return a latest commit SHA.');
-    return refData.object.sha;
+    return {branch:resolvedBranch, sha:refData.object.sha};
   }
   async function loadArchive(owner, repo, ref) {
     const codeload = `https://codeload.github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/zip/${encodeURIComponent(ref).replace(/%2F/g,'/')}`;
-    const response = await fetch(codeload);
+    const response = await deploymentNetwork.request(new Request(codeload), 'deployment-archive');
     if (!response.ok) throw new Error(`GitHub archive download failed (${response.status}).`);
     const blob = await response.blob();
     if (!blob.size) throw new Error('GitHub returned an empty project archive.');
@@ -150,26 +173,43 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color:
   }
 
   async function main() {
+    await initDeploymentNetwork();
     if (!githubURL) throw new Error('Deployment requires a github query parameter.');
     const repo = parseGithub(githubURL);
+    let resolvedBranch = '';
     let resolvedCommit = '';
     let bootstrapFs = null;
-    if (hasCommitOverride) {
-      resolvedCommit = String(commitOverride || '').trim();
-      if (!resolvedCommit || resolvedCommit.toLowerCase() === 'latest') {
-        status.textContent = 'Resolving latest commit…';
-        resolvedCommit = await getLatestCommit(repo.owner, repo.repo);
+    if (hasBranchOverride) {
+      resolvedBranch = String(branchOverride || '').trim();
+      if (!resolvedBranch) {
+        const info = await getRepositoryInfo(repo.owner, repo.repo);
+        resolvedBranch = info?.default_branch || 'main';
       }
+      if (hasCommitOverride) {
+        resolvedCommit = String(commitOverride || '').trim();
+        if (!resolvedCommit || resolvedCommit.toLowerCase() === 'latest') resolvedCommit = (await getLatestCommit(repo.owner, repo.repo, resolvedBranch)).sha;
+      } else {
+        resolvedCommit = (await getLatestCommit(repo.owner, repo.repo, resolvedBranch)).sha;
+      }
+    } else if (hasCommitOverride) {
+      resolvedCommit = String(commitOverride || '').trim();
+      const info = await getRepositoryInfo(repo.owner, repo.repo);
+      resolvedBranch = info?.default_branch || 'main';
+      if (!resolvedCommit || resolvedCommit.toLowerCase() === 'latest') resolvedCommit = (await getLatestCommit(repo.owner, repo.repo, resolvedBranch)).sha;
     } else {
-      status.textContent = 'Resolving deployment commit…';
-      const latestCommit = await getLatestCommit(repo.owner, repo.repo);
-      const latestBlob = await loadArchive(repo.owner, repo.repo, latestCommit);
+      status.textContent = 'Resolving deployment settings…';
+      const bootstrap = await getLatestCommit(repo.owner, repo.repo);
+      resolvedBranch = bootstrap.branch;
+      const latestBlob = await loadArchive(repo.owner, repo.repo, bootstrap.sha);
       const latestFile = await flattenZip(new File([latestBlob], repo.repo + '.zip', {type:'application/zip'}), repo.repo);
       bootstrapFs = await FileSystem.create(latestFile, {sync:false});
       const latestMeta = readJSON(bootstrapFs, '.editor/project.json');
+      const savedBranch = String(latestMeta?.deployment?.branch || '').trim() || bootstrap.branch;
+      resolvedBranch = savedBranch;
       const savedCommit = String(latestMeta?.deployment?.commit || '').trim();
-      resolvedCommit = savedCommit && savedCommit.toLowerCase() !== 'latest' ? savedCommit : latestCommit;
-      if (resolvedCommit === latestCommit) bootstrapFs = null;
+      if (savedCommit && savedCommit.toLowerCase() !== 'latest') resolvedCommit = savedCommit;
+      else resolvedCommit = (await getLatestCommit(repo.owner, repo.repo, resolvedBranch)).sha;
+      if (resolvedBranch !== bootstrap.branch || resolvedCommit !== bootstrap.sha) bootstrapFs = null;
     }
     status.textContent = 'Downloading commit…';
     let fs;
@@ -255,6 +295,8 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color:
       current.searchParams.delete('githubUrl');
       current.searchParams.delete('sha');
       current.searchParams.set('github', githubURL);
+      if (hasBranchOverride) current.searchParams.set('branch', resolvedBranch);
+      else current.searchParams.delete('branch');
       if (hasCommitOverride) current.searchParams.set('commit', String(commitOverride || 'latest'));
       else current.searchParams.delete('commit');
       current.searchParams.delete('path');
@@ -290,6 +332,8 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color:
       canonical.searchParams.delete('githubUrl');
       canonical.searchParams.delete('sha');
       canonical.searchParams.set('github', githubURL);
+      if (hasBranchOverride) canonical.searchParams.set('branch', resolvedBranch);
+      else canonical.searchParams.delete('branch');
       if (hasCommitOverride) canonical.searchParams.set('commit', String(commitOverride || 'latest'));
       else canonical.searchParams.delete('commit');
       if (hasUrlOverride) canonical.searchParams.set('url', runtimeURL.href);

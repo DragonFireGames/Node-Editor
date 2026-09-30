@@ -125,11 +125,13 @@
     try { pending = JSON.parse(pendingRaw || 'null'); } catch (_) {}
     if (!pending || pending.state !== state) throw new Error('GitHub sign-in state did not match. Please try again.');
     if (Date.now() - Number(pending.createdAt || 0) > 10 * 60 * 1000) throw new Error('GitHub sign-in expired. Please try again.');
-    const response = await fetch(workerUrl() + '/exchange', {
+    const network = window.__sharedBrowserNetwork;
+    if (!network?.request) throw new Error('Network API is not ready.');
+    const response = await network.request(new Request(workerUrl() + '/exchange', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({code, code_verifier: pending.verifier})
-    });
+    }), 'github-auth');
     const data = await response.json().catch(() => ({}));
     if (!response.ok || !data.access_token) throw new Error(data.error || data.message || `GitHub token exchange failed (${response.status}).`);
     const profile = await request('/user', {token: data.access_token});
@@ -183,7 +185,9 @@
     headers.set('X-GitHub-Api-Version', API_VERSION);
     headers.set('Authorization', `Bearer ${token}`);
     if (options.body !== undefined && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
-    const response = await fetch(API + path, {...options, headers});
+    const network = window.__sharedBrowserNetwork;
+    if (!network?.request) throw new Error('Network API is not ready.');
+    const response = await network.request(new Request(API + path, {...options, headers}), 'github-api');
     if (response.status === 401) {
       clearStoredAuth();
       notify();
@@ -226,7 +230,9 @@
     if (!branchName) throw new Error('Select a branch.');
     const path = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/zipball/${branchName.split('/').map(encodeURIComponent).join('/')}`;
     const headers = new Headers({Accept:'application/vnd.github+json','X-GitHub-Api-Version':API_VERSION,Authorization:`Bearer ${token}`});
-    const response = await fetch(API + path, {headers});
+    const network = window.__sharedBrowserNetwork;
+    if (!network?.request) throw new Error('Network API is not ready.');
+    const response = await network.request(new Request(API + path, {headers}), 'github-api');
     if (response.status === 401) { clearStoredAuth(); notify(); throw new Error('GitHub authentication expired. Sign in again from Profile.'); }
     if (!response.ok) {
       const data = await response.json().catch(() => null);
@@ -248,6 +254,10 @@
     const sha = base?.object?.sha;
     if (!sha) throw new Error(`Could not find branch "${fromBranch}".`);
     return request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/refs`, {method:'POST', body:JSON.stringify({ref:`refs/heads/${name}`, sha})});
+  }
+  async function getBranchCommit(owner, repo, branch) {
+    const ref = await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/ref/heads/${branchPath(branch)}`);
+    return ref?.object?.sha || null;
   }
   async function getRemoteState(owner, repo, branch) {
     const repoPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
@@ -367,6 +377,7 @@
   root.listBranches = listBranches;
   root.createBranch = createBranch;
   root.getRemoteState = getRemoteState;
+  root.getBranchCommit = getBranchCommit;
   root.listCommits = listCommits;
   root.compareWorkingTree = compareWorkingTree;
   root.commitAndPush = commitAndPush;

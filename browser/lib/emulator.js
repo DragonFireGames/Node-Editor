@@ -2187,7 +2187,6 @@
 
         if (pageEmulator.runtimeInterceptor) eval(pageEmulator.runtimeInterceptor);
 
-        const originalFetch = window.fetch;
         window.fetch = async function(input, data = {}, type = 'fetch') {
           let fetchUrl = input;
           let requestOptions = { ...data };
@@ -2217,9 +2216,8 @@
           
           // Pass the enriched requestOptions into your network handler
           const response = await pageEmulator.network.request(resolvedUrl, BASE_ORIGIN, requestOptions, type);
-          if (response) return response;
-          
-          return await originalFetch.apply(this, arguments);
+          if (!response) throw new TypeError(`Network request failed: ${resolvedUrl}`);
+          return response;
         };
 
         (function() {

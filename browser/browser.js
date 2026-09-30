@@ -28,6 +28,7 @@ try {
 
 browserNetwork = sharedBrowserNetwork || new Network();
 window.browserNetwork = browserNetwork;
+if (window.installNetworkFetch && !window.fetch.__networkFetch) window.__removeNetworkFetch = window.installNetworkFetch(browserNetwork, 'browser-ui');
 browserNetwork.addEventListener('requeststart',function(request, type){
   updateLoadingProgress(30);
 });
@@ -55,10 +56,13 @@ if (browserNetwork.__browserBaseEndpoints) {
   fallbackProxyEndpoint = browserNetwork.__browserBaseEndpoints.fallback;
   browserDefaultFallbackEndpoint = browserNetwork.__browserBaseEndpoints.defaultFallback;
 } else {
-  primaryProxyEndpoint = new ProxyNetworkEndpoint(appSettings.primaryProxy, appSettings.obscureURL);
-  fallbackProxyEndpoint = new ProxyNetworkEndpoint(appSettings.fallbackProxy, appSettings.obscureURL, appSettings.useFallback);
+  primaryProxyEndpoint = new ProxyNetworkEndpoint(appSettings.primaryProxy, appSettings.obscureURL, !!appSettings.primaryProxy);
+  fallbackProxyEndpoint = new ProxyNetworkEndpoint(appSettings.fallbackProxy, appSettings.obscureURL, appSettings.useFallback && !!appSettings.fallbackProxy);
+  primaryProxyEndpoint.__networkBaseRole = 'proxy';
+  fallbackProxyEndpoint.__networkBaseRole = 'fallback';
   browserDefaultFallbackEndpoint = new NetworkEndpoint();
   browserDefaultFallbackEndpoint.__browserDefaultFallback = true;
+  browserDefaultFallbackEndpoint.__networkBaseRole = 'native';
   browserNetwork.appendEndpoint(primaryProxyEndpoint);
   browserNetwork.appendEndpoint(fallbackProxyEndpoint);
   browserNetwork.appendEndpoint(browserDefaultFallbackEndpoint);
@@ -72,9 +76,10 @@ if (browserNetwork.__browserBaseEndpoints) {
 function updateNetworkSettings() {
   primaryProxyEndpoint.proxy = appSettings.primaryProxy;
   primaryProxyEndpoint.obscureURL = appSettings.obscureURL;
+  primaryProxyEndpoint.enabled = !!appSettings.primaryProxy;
   fallbackProxyEndpoint.proxy = appSettings.fallbackProxy;
   fallbackProxyEndpoint.obscureURL = appSettings.obscureURL;
-  fallbackProxyEndpoint.enabled = appSettings.useFallback;
+  fallbackProxyEndpoint.enabled = appSettings.useFallback && !!appSettings.fallbackProxy;
 }
 
 
@@ -957,7 +962,7 @@ function showContextMenu(clientX, clientY, targetInfo) {
           const targetMediaUrl = targetInfo.rawMediaSrc || targetInfo.mediaSrc;
           if (!targetMediaUrl) return;
           try {
-            const response = await fetch(targetMediaUrl);
+            const response = await browserNetwork.request(new Request(targetMediaUrl), 'browser-copy');
             const blob = await response.blob();
             
             await navigator.clipboard.write([

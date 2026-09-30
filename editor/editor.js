@@ -9,8 +9,10 @@ window.__editorInitPromise = (async function () {
       if (typeof ProxyNetworkEndpoint === 'function' && typeof NetworkEndpoint === 'function') {
         const primaryProxy = new ProxyNetworkEndpoint(String(workers.proxy || ''), true);
         const fallbackProxy = new ProxyNetworkEndpoint('', true, false);
+        fallbackProxy.__networkBaseRole = 'fallback';
+        primaryProxy.__networkBaseRole = 'proxy';
         const defaultFallback = new NetworkEndpoint();
-        defaultFallback.__browserDefaultFallback = true;
+        defaultFallback.__networkBaseRole = 'native';
         sharedNetwork.appendEndpoint(primaryProxy);
         sharedNetwork.appendEndpoint(fallbackProxy);
         sharedNetwork.appendEndpoint(defaultFallback);
@@ -21,6 +23,7 @@ window.__editorInitPromise = (async function () {
         };
       }
       window.__sharedBrowserNetwork = sharedNetwork;
+      if (window.installNetworkFetch) window.__removeNetworkFetch = window.installNetworkFetch(sharedNetwork, 'editor-fetch');
     } catch (_) {}
   }
   const state = {
@@ -54,6 +57,8 @@ window.__editorInitPromise = (async function () {
     peerServers: new Map(),
     peerRuntimeEndpoint: null,
     peerSettings: {layer: '', pagePath: '/'},
+    gitRepository: null,
+    deploymentSettings: {commit: 'latest', usePeerNetwork: false},
     ai: null,
     environment: {},
     behavior: {
@@ -165,6 +170,17 @@ window.__editorInitPromise = (async function () {
       layer: String(meta?.peerLayer || '').trim() || makePeerLayer(),
       pagePath: normalizePeerPagePath(meta?.pagePath)
     };
+    state.gitRepository = meta?.git?.provider === 'github' && meta?.git?.owner && meta?.git?.repo ? {
+      provider: 'github',
+      owner: String(meta.git.owner),
+      repo: String(meta.git.repo),
+      branch: String(meta.git.branch || 'main')
+    } : null;
+    state.deploymentSettings = {
+      branch: String(meta?.deployment?.branch || state.gitRepository?.branch || 'main').trim() || 'main',
+      commit: String(meta?.deployment?.commit || 'latest').trim() || 'latest',
+      usePeerNetwork: !!meta?.deployment?.usePeerNetwork
+    };
     if (!state.projectId) state.projectId = makeProjectId();
     return meta;
   }
@@ -174,13 +190,23 @@ window.__editorInitPromise = (async function () {
     if (!state.peerSettings) state.peerSettings = {layer: makePeerLayer(), pagePath: '/'};
     state.peerSettings.layer = String(state.peerSettings.layer || makePeerLayer()).trim();
     state.peerSettings.pagePath = normalizePeerPagePath(state.peerSettings.pagePath);
+    state.deploymentSettings = {
+      branch: String(state.deploymentSettings?.branch || state.gitRepository?.branch || 'main').trim() || 'main',
+      commit: String(state.deploymentSettings?.commit || 'latest').trim() || 'latest',
+      usePeerNetwork: !!state.deploymentSettings?.usePeerNetwork
+    };
     state.fs.mkdirSync?.(EDITOR_DIR);
-    state.fs.writeFileSync(EDITOR_PROJECT_PATH, JSON.stringify({
+    const metadata = {
       id: state.projectId,
       name: state.projectName,
       peerLayer: state.peerSettings.layer,
       pagePath: state.peerSettings.pagePath
-    }, null, 2));
+    };
+    if (state.gitRepository?.provider === 'github' && state.gitRepository.owner && state.gitRepository.repo) metadata.git = {
+      provider: 'github', owner: state.gitRepository.owner, repo: state.gitRepository.repo, branch: state.gitRepository.branch || 'main'
+    };
+    if (state.deploymentSettings) metadata.deployment = {...state.deploymentSettings};
+    state.fs.writeFileSync(EDITOR_PROJECT_PATH, JSON.stringify(metadata, null, 2));
   }
   function loadEditorConfig() {
     const config = readEditorJson(EDITOR_CONFIG_PATH);
@@ -1072,7 +1098,7 @@ window.__editorInitPromise = (async function () {
   let templateCatalogPromise = null;
   async function loadTemplateCatalog() {
     if (!templateCatalogPromise) {
-      templateCatalogPromise = fetch(TEMPLATE_MANIFEST_URL, {cache:'no-store'}).then(async response => {
+      templateCatalogPromise = state.browserNetwork.request(new Request(new URL(TEMPLATE_MANIFEST_URL, document.baseURI).href, {cache:'no-store'}), 'editor-config').then(async response => {
         if (!response.ok) throw new Error(`Failed to load templates (${response.status}).`);
         const data = await response.json();
         if (!Array.isArray(data)) throw new Error('Template manifest must contain an array.');
@@ -1088,7 +1114,7 @@ window.__editorInitPromise = (async function () {
   async function createTemplateProject(template) {
     const manifestURL = new URL(TEMPLATE_MANIFEST_URL, document.baseURI);
     const fileURL = new URL(template.file, manifestURL).href;
-    const response = await fetch(fileURL, {cache:'no-store'});
+    const response = await state.browserNetwork.request(new Request(fileURL, {cache:'no-store'}), 'editor-template');
     if (!response.ok) throw new Error(`Failed to load template "${template.title}" (${response.status}).`);
     const blob = await response.blob();
     const file = new File([blob], basename(template.file) || 'template.zip', {type:'application/zip'});
@@ -1843,6 +1869,7 @@ window.__editorInitPromise = (async function () {
     });
     state.runConfig = new EditorRunConfig(state);
     $('uploadZipBtn').onclick = () => openImportModal();
+    $('loadRemoteBtn').onclick = () => openRemoteImportModal();
     $('projectName').onclick = () => renameProject();
     $('zipInput')?.addEventListener('change', e => {
       const f = e.target.files?.[0];

@@ -5,7 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Proxy Site Browser & DevTools Sandbox</title>
     <script src="style/tailwind.js"></script>
-    <script>window.__workersConfigReady=fetch('../workers.json',{cache:'no-store'}).then(async r=>{if(!r.ok)throw new Error('Failed to load ../workers.json ('+r.status+')');const c=await r.json();if(!c||typeof c!=='object')throw new Error('Invalid workers.json');window.WorkerConfig=c;return c;}).catch(e=>{console.error(e);window.WorkerConfig={proxy:'',github:''};return window.WorkerConfig;});</script>
+    <script src="lib/network.js"></script>
+    <script>window.__workersConfigReady=loadJSONThroughNetwork('../workers.json',{cache:'no-store'},'config').then(c=>{if(!c||typeof c!=='object')throw new Error('Invalid workers.json');window.WorkerConfig=c;return c;}).catch(e=>{console.error(e);window.WorkerConfig={proxy:'',github:''};return window.WorkerConfig;});</script>
     <link rel="stylesheet" href="style/fontawesome.css">
     <link rel="stylesheet" href="style/browser.css">
     <script src="external/acorn.js"></script>
@@ -15,7 +16,6 @@
     <script src="external/7zz.js"></script>
     <script src="external/peer.js"></script>
     <script src="lib/filesystem.js"></script>
-    <script src="lib/network.js"></script>
     <script src="lib/emulator.js"></script>
     <script src="lib/npm.js"></script>
     <script src="lib/endpoints/app.js"></script>
