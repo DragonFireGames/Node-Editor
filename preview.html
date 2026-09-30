@@ -10,12 +10,7 @@
   <script src="browser/lib/endpoints/peer.js" data-layer="new URLSearchParams(window.location.search).get('peerLayer')"></script>
   <script>
     window.__previewNetworkReady = (async function() {
-      const bootstrap = new Network();
-      const bootstrapNative = new NetworkEndpoint();
-      bootstrapNative.__networkRole = 'native';
-      bootstrap.appendEndpoint(bootstrapNative);
-      window.setActiveNetwork?.(bootstrap);
-      const workers = await bootstrap.request('workers.json', location.href, {cache:'no-store'}, 'config').then(async r=>{if(!r?.ok)throw new Error('Failed to load workers.json ('+(r?.status||'no response')+')');const c=await r.json();if(!c||typeof c!=='object')throw new Error('Invalid workers.json');return c;}).catch(e=>{console.error(e);return {proxy:'',github:''};});
+      const workers = await fetch((()=>{const u=new URL(location.href);if(!u.pathname.endsWith('/'))u.pathname=u.pathname.slice(0,u.pathname.lastIndexOf('/')+1);u.pathname+='workers.json';return u.href;})(),{cache:'no-store'}).then(async r=>{if(!r.ok)throw new Error('Failed to load workers.json ('+r.status+')');const c=await r.json();if(!c||typeof c!=='object')throw new Error('Invalid workers.json');return c;}).catch(e=>{console.error(e);return {proxy:'',github:''};});
       window.WorkerConfig = workers;
       const query = new URLSearchParams(location.search);
       const peerLayer = query.get('peerLayer') || 'peer';
@@ -45,7 +40,6 @@
 
       network.appendEndpoint(primaryProxy);
       network.appendEndpoint(fallbackProxy);
-      defaultFallback.__networkRole = 'native';
       network.appendEndpoint(defaultFallback);
 
       network.__browserBaseEndpoints = {
@@ -60,7 +54,6 @@
 
       window.__sharedBrowserNetwork = network;
       window.browserNetwork = network;
-      window.setActiveNetwork?.(network);
     })();
   </script>
 </head>

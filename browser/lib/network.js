@@ -2,25 +2,6 @@
 const originalFetch = window.fetch.bind(window);
 const originalWebSocket = window.WebSocket;
 window.wait = t=>new Promise(r=>setTimeout(r,t));
-let activeNetwork = null;
-function setActiveNetwork(network) {
-  activeNetwork = network || null;
-  window.__activeNetwork = activeNetwork;
-  return activeNetwork;
-}
-window.setActiveNetwork = setActiveNetwork;
-if (!window.__networkFetchInstalled) {
-  window.__networkFetchInstalled = true;
-  window.fetch = function(input, init) {
-    const network = activeNetwork || window.__activeNetwork || window.__sharedBrowserNetwork || window.browserNetwork || window.editorNetwork;
-    if (!network?.request) return Promise.reject(new TypeError('Network is not initialized.'));
-    if (input instanceof Request) {
-      const request = init === undefined ? input : new Request(input, init);
-      return network.request(request, 'fetch');
-    }
-    return network.request(input, location.href, init || {}, 'fetch');
-  };
-}
 
 // Network is loaded before browser.js. Keep URL encoding helpers here so the
 // editor-owned shared Network can proxy requests before a Browser iframe exists.
@@ -149,21 +130,12 @@ class Network extends EventHandler {
     this.dispatchEvent('endpointschange', this.endpoints);
     return endpoint || null;
   }
-  _getOrderedEndpoints() {
-    const roleOrder = {custom:0, native:1, proxy:2};
-    return this.endpoints.slice().sort((a,b) => {
-      const ar = roleOrder[a?.__networkRole || 'custom'] ?? 0;
-      const br = roleOrder[b?.__networkRole || 'custom'] ?? 0;
-      return ar - br;
-    });
-  }
   getEndpointInfo() {
-    return this._getOrderedEndpoints().map((endpoint, index) => ({
+    return this.endpoints.map((endpoint, index) => ({
       index,
       name: endpoint?.constructor?.name || 'Endpoint',
       enabled: endpoint?.enabled !== false,
       runtime: !!endpoint?.__editorRuntimeEndpoint,
-      role: endpoint?.__networkRole || 'custom',
       proxy: endpoint?.proxy || null,
       domain: endpoint?.domain || null,
       path: endpoint?.path || null,
@@ -172,14 +144,15 @@ class Network extends EventHandler {
   }
   async searchEndpoints(callback, type) {
     await wait(1);
-    // Every request uses the same fallback order:
-    //   1. custom/runtime endpoints
-    //   2. native browser fetch
-    //   3. primary proxy
-    //   4. fallback proxy
-    // This is intentionally independent of request type so npm, AI, browser,
-    // emulator, downloads, and other callers all get identical network behavior.
-    const endpoints = this._getOrderedEndpoints();
+    let endpoints = this.endpoints.slice();
+    if (type === 'ai') {
+      // AI requests always try the browser's default/direct endpoint first.
+      // If it fails, preserve the configured proxy endpoint order for fallback.
+      const defaultEndpoint = endpoints.find(endpoint => endpoint?.__browserDefaultFallback);
+      if (defaultEndpoint) {
+        endpoints = [defaultEndpoint, ...endpoints.filter(endpoint => endpoint !== defaultEndpoint)];
+      }
+    }
     for (var i = 0; i < endpoints.length; i++) {
       var endp = endpoints[i];
       if (endp?.enabled === false) continue;
@@ -199,7 +172,6 @@ class NetworkEndpoint extends EventHandler {
   constructor(enabled = true) {
     super();
     this.enabled = enabled;
-    this.__networkRole = 'custom';
   }
   async handleRequest(request,type) {
     return await originalFetch(request);
@@ -214,7 +186,6 @@ class ProxyNetworkEndpoint extends NetworkEndpoint {
     super(enabled);
     this.proxy = proxy;
     this.obscureURL = obscureURL;
-    this.__networkRole = 'proxy';
   }
   async handleRequest(request,type) {
     let targetProxyUrl = request.url;

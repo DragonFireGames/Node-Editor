@@ -59,18 +59,15 @@ if (browserNetwork.__browserBaseEndpoints) {
   fallbackProxyEndpoint = new ProxyNetworkEndpoint(appSettings.fallbackProxy, appSettings.obscureURL, appSettings.useFallback);
   browserDefaultFallbackEndpoint = new NetworkEndpoint();
   browserDefaultFallbackEndpoint.__browserDefaultFallback = true;
-  browserDefaultFallbackEndpoint.__networkRole = 'native';
-  browserNetwork.appendEndpoint(browserDefaultFallbackEndpoint);
   browserNetwork.appendEndpoint(primaryProxyEndpoint);
   browserNetwork.appendEndpoint(fallbackProxyEndpoint);
+  browserNetwork.appendEndpoint(browserDefaultFallbackEndpoint);
   browserNetwork.__browserBaseEndpoints = {
     primary: primaryProxyEndpoint,
     fallback: fallbackProxyEndpoint,
     defaultFallback: browserDefaultFallbackEndpoint
   };
 }
-
-if (window.setActiveNetwork) window.setActiveNetwork(browserNetwork);
 
 function updateNetworkSettings() {
   primaryProxyEndpoint.proxy = appSettings.primaryProxy;
@@ -960,8 +957,7 @@ function showContextMenu(clientX, clientY, targetInfo) {
           const targetMediaUrl = targetInfo.rawMediaSrc || targetInfo.mediaSrc;
           if (!targetMediaUrl) return;
           try {
-            const response = await browserNetwork.request(targetMediaUrl, location.href, {}, 'copy-image');
-            if (!response) throw new Error('Network request failed.');
+            const response = await fetch(targetMediaUrl);
             const blob = await response.blob();
             
             await navigator.clipboard.write([

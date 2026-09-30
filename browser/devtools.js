@@ -3879,8 +3879,7 @@ var DevToolsInternal = {
       let text = mode === 'original' ? value.original : value.active;
       if (!text && mode === 'active' && /^blob:/i.test(value.activeUrl || '')) {
         try {
-          const response = await (window.browserNetwork?.request ? window.browserNetwork.request(value.activeUrl, location.origin, {}, 'devtools-source') : null);
-          if (!response) throw new Error('Network request failed.');
+          const response = await fetch(value.activeUrl);
           const contentType = response.headers.get('content-type') || '';
           if (DevToolsInternal.network.isTextualContent(contentType)) text = await response.text();
         } catch(e) {}
