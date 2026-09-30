@@ -3553,6 +3553,57 @@
         const cwd = nodeEmulator.cwd || '/';
         console.logText(cwd);
         return cwd;
+      } else if (bin === "echo") {
+        const noNewline = args[0] === '-n';
+        const value = args.slice(noNewline ? 1 : 0).join(' ');
+        if (noNewline) {
+          console.logText(value);
+        } else {
+          console.logText(value);
+        }
+        return value;
+      } else if (bin === "printf") {
+        const format = args[0] || '';
+        const values = args.slice(1);
+        let index = 0;
+        const output = format.replace(/%([sd%])/g, (match, type) => {
+          if (type === '%') return '%';
+          const value = values[index++];
+          if (type === 's') return value ?? '';
+          if (type === 'd') {
+            const number = Number(value);
+            return Number.isFinite(number) ? String(Math.trunc(number)) : '0';
+          }
+          return match;
+        });
+        console.logText(output);
+        return output;
+      } else if (bin === "true") {
+        return true;
+      } else if (bin === "false") {
+        return false;
+      } else if (bin === "whoami") {
+        const user = String(ENV_SETTINGS.USER || ENV_SETTINGS.USERNAME || 'user');
+        console.logText(user);
+        return user;
+      } else if (bin === "hostname") {
+        const hostname = String(nodeEmulator.domain || 'localhost');
+        console.logText(hostname);
+        return hostname;
+      } else if (bin === "env") {
+        const entries = Object.keys(ENV_SETTINGS).sort().map(key => `${key}=${ENV_SETTINGS[key]}`);
+        console.logText(entries.join('\n'));
+        return entries;
+      } else if (bin === "which") {
+        const name = args[0];
+        const supported = new Set(['pwd','cd','echo','printf','true','false','whoami','hostname','env','which','ls','dir','node','npm']);
+        if (!name || !supported.has(name)) {
+          console.logText(`${name || ''}: not found`);
+          return null;
+        }
+        const path = name === 'dir' ? '/bin/dir' : `/bin/${name}`;
+        console.logText(path);
+        return path;
       } else if (bin === "cd") {
         const target = args[0] === '-' ? (nodeEmulator.previousCwd || '/') : (args[0] || '/');
         try {
@@ -3605,7 +3656,9 @@
           throw e;
         }
       } else {
-        console.error(`Command not found: ${bin}`);
+        const error = new Error(`Command not found: ${bin}. The virtual terminal is not a real OS shell; supported commands are pwd, cd, echo, printf, true, false, whoami, hostname, env, which, ls/dir, node, and npm.`);
+        console.error(error.message);
+        throw error;
       }
     };
 

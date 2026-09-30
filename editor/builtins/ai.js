@@ -2,7 +2,7 @@
   const factories = window.EditorBuiltinFactories = window.EditorBuiltinFactories || {};
   const aiRoot = window.EditorAI = window.EditorAI || {};
   const CHAT_PREFIX = 'editor.aiChat.';
-  const SYSTEM = 'You are the AI coding assistant inside a browser-based code editor. Be practical, precise, and concise. Use Markdown for explanations and fenced code blocks for code. When working on the project, inspect existing files before changing them, preserve the project\'s existing style, and verify changes by running relevant commands when available.';
+  const SYSTEM = 'You are the AI coding assistant inside a browser-based code editor. Be practical, precise, and concise. Use Markdown for explanations and fenced code blocks for code. When working on the project, inspect existing files before changing them, preserve the project\'s existing style, and verify changes by running relevant commands when available. The run_command tool uses the editor\'s virtual Node runtime, not a real operating-system shell: never prefix commands with $ and do not assume arbitrary shell features such as pipes or shell redirection are available; simple commands such as echo are supported. For project filesystem work, use the dedicated file tools.';
   const TOOL_PERMISSION_LABELS = {
     readFiles:'Read project files', searchFiles:'Search project', createFiles:'Create files', modifyFiles:'Modify files', deleteFiles:'Delete files',
     runCommands:'Run commands', runScripts:'Run scripts', runProject:'Run project', readOutput:'Read runtime output', readEditor:'Read editor state', modifyEditor:'Modify editor', browser:'Access browser', network:'Network requests'
@@ -193,63 +193,94 @@
     const modal=document.createElement('div'); modal.className='editor-modal ai-settings-modal';
     let editingId='';
     const render=()=>{
-      const models=registry.settings.models, protocols=registry.protocols();
-      modal.innerHTML=`<div class="editor-modal-content ai-settings-content"><button class="editor-modal-close" aria-label="Close">×</button><h2>AI Settings</h2><p>Choose a model, select its API format, add your own endpoint, and control what the coding agent may do.</p><div class="ai-settings-columns"><section><div class="ai-section-title">Models</div><div class="ai-model-list">${models.map(m=>`<div class="ai-model-row ${m.id===registry.settings.activeModelId?'active':''}"><div class="ai-model-main"><strong>${escapeHtml(m.name)}</strong><span>${escapeHtml(registry.protocolLabel(m.protocol))} · ${m.supportsTools?'tool calling':'prompt tools'} · ${m.supportsReasoning?'reasoning':'no reasoning'}</span></div><button data-use="${escapeHtml(m.id)}">${m.id===registry.settings.activeModelId?'Active':'Use'}</button>${m.id===aiRoot.DEFAULT_PUBLIC_AI_MODEL.id?'':`<button data-edit="${escapeHtml(m.id)}">Edit</button><button data-remove="${escapeHtml(m.id)}">×</button>`}</div>`).join('')}</div><button class="ai-settings-add" data-add>+ Add model</button><div class="ai-add-model" hidden><label>Provider / API format<select data-protocol><option value="">Auto-detect</option>${Object.entries(protocols).map(([id,p])=>`<option value="${id}">${escapeHtml(p.label)}</option>`).join('')}</select></label><label>Name<input data-name placeholder="My model"></label><label>Endpoint<input data-endpoint placeholder="https://api.example.com/v1"></label><label>Model ID <div class="ai-model-input-row"><input data-model placeholder="model-name"><button type="button" data-browse-hf>Browse Hugging Face</button></div></label><label>API key <input data-key type="password" placeholder="Optional"></label><label class="ai-check"><input data-remember type="checkbox"> Remember API key on this device</label><label class="ai-check"><input data-tools type="checkbox" checked> Supports native tool calling</label><label class="ai-check"><input data-thinking type="checkbox" checked> Supports reasoning</label><div class="ai-add-hint" data-protocol-hint>Select an API format or enter a known provider endpoint and use Auto-detect.</div><div class="ai-add-actions"><button data-cancel-model>Cancel</button><button data-save-model>Save model</button></div></div><div class="ai-hf-account"><div class="ai-section-title">Hugging Face</div><label>Your API key<input data-hf-global-key type="password" placeholder="hf_..."></label><label class="ai-check"><input data-hf-global-remember type="checkbox"> Remember your key on this device</label><div class="ai-add-hint">Used for Hugging Face models that do not have their own key. Add a key here or on an individual model.</div></div></section><section><div class="ai-section-title">Permissions</div><div class="ai-permission-list">${Object.entries(permissions.all()).map(([k,v])=>`<label><span>${escapeHtml(TOOL_PERMISSION_LABELS[k]||k)}</span><select data-permission="${k}"><option value="always" ${v==='always'?'selected':''}>Always allow</option><option value="ask" ${v==='ask'?'selected':''}>Ask each time</option><option value="never" ${v==='never'?'selected':''}>Never allow</option></select></label>`).join('')}</div><button data-reset-permissions class="ai-settings-reset">Reset permissions</button></section></div><div class="ai-settings-note">Hugging Face Router uses the OpenAI Chat Completions API. Browse Hugging Face queries its live <code>/v1/models</code> list, including provider availability, pricing, context length, and tool support.</div></div>`;
+      const models=registry.settings.models, providers=registry.providers();
+      modal.innerHTML=`<div class="editor-modal-content ai-settings-content"><button class="editor-modal-close" aria-label="Close">×</button><h2>AI Settings</h2><p>Choose a model, select its provider, add your key, and control what the coding agent may do.</p><div class="ai-settings-columns"><section><div class="ai-section-title">Models</div><div class="ai-model-list">${models.map(m=>`<div class="ai-model-row ${m.id===registry.settings.activeModelId?'active':''}"><div class="ai-model-main"><strong>${escapeHtml(m.name)}</strong><span>${escapeHtml(registry.protocolLabel(m.protocol))} · ${m.supportsTools?'tool calling':'prompt tools'} · ${m.supportsReasoning?'reasoning':'no reasoning'}</span></div><button data-use="${escapeHtml(m.id)}">${m.id===registry.settings.activeModelId?'Active':'Use'}</button>${m.id===aiRoot.DEFAULT_PUBLIC_AI_MODEL.id?'':`<button data-edit="${escapeHtml(m.id)}">Edit</button><button data-remove="${escapeHtml(m.id)}">×</button>`}</div>`).join('')}</div><button class="ai-settings-add" data-add>+ Add model</button><div class="ai-add-model" hidden><label>Provider<select data-provider>${Object.entries(providers).map(([id,p])=>`<option value="${escapeHtml(id)}">${escapeHtml(p.label)}</option>`).join('')}</select></label><label>API format<select data-format>${Object.entries(aiRoot.AI_PROTOCOLS||{}).map(([id,p])=>`<option value="${escapeHtml(id)}">${escapeHtml(p.label)}</option>`).join('')}</select></label><label>Name<input data-name placeholder="My model"></label><label>Endpoint<input data-endpoint placeholder="https://api.example.com/v1"></label><label>Model ID <div class="ai-model-input-row"><input data-model placeholder="model-name"><button type="button" data-browse-models>Browse models</button></div></label><label>API key <input data-key type="password" placeholder="Enter your provider key"></label><label class="ai-check"><input data-remember type="checkbox"> Remember API key on this device</label><label class="ai-check"><input data-tools type="checkbox" checked> Supports native tool calling</label><label class="ai-check"><input data-thinking type="checkbox" checked> Supports reasoning</label><div class="ai-add-hint" data-protocol-hint>Select a provider to fill in its API format and endpoint. You can override the endpoint for compatible services.</div><div class="ai-add-actions"><button data-cancel-model>Cancel</button><button data-save-model>Save model</button></div></div><div class="ai-hf-account"><div class="ai-section-title">Hugging Face</div><label>Your API key<input data-hf-global-key type="password" placeholder="hf_..."></label><label class="ai-check"><input data-hf-global-remember type="checkbox"> Remember your key on this device</label><div class="ai-add-hint">Used for Hugging Face models that do not have their own key. Add a key here or on an individual model.</div></div></section><section><div class="ai-section-title">Permissions</div><div class="ai-permission-list">${Object.entries(permissions.all()).map(([k,v])=>`<label><span>${escapeHtml(TOOL_PERMISSION_LABELS[k]||k)}</span><select data-permission="${k}"><option value="always" ${v==='always'?'selected':''}>Always allow</option><option value="ask" ${v==='ask'?'selected':''}>Ask each time</option><option value="never" ${v==='never'?'selected':''}>Never allow</option></select></label>`).join('')}</div><button data-reset-permissions class="ai-settings-reset">Reset permissions</button></section></div><div class="ai-settings-note">Providers can fill in the API format and default endpoint automatically. Providers may expose either a live model list or a fixed set of known models.</div></div>`;
       modal.querySelector('.editor-modal-close').onclick=()=>modal.remove(); modal.onclick=e=>{if(e.target===modal)modal.remove();};
       modal.querySelectorAll('[data-use]').forEach(x=>x.onclick=()=>{registry.setActive(x.dataset.use);editingId='';render();onChange?.();});
       modal.querySelectorAll('[data-remove]').forEach(x=>x.onclick=()=>{registry.remove(x.dataset.remove);editingId='';render();onChange?.();});
-      const form=modal.querySelector('.ai-add-model'),add=modal.querySelector('[data-add]'),protocolInput=form.querySelector('[data-protocol]'),endpointInput=form.querySelector('[data-endpoint]'),hint=form.querySelector('[data-protocol-hint]');
-      const browseHF=modal.querySelector('[data-browse-hf]');
+      const form=modal.querySelector('.ai-add-model'),add=modal.querySelector('[data-add]'),providerInput=form.querySelector('[data-provider]'),formatInput=form.querySelector('[data-format]'),endpointInput=form.querySelector('[data-endpoint]'),nameInput=form.querySelector('[data-name]'),modelInput=form.querySelector('[data-model]'),keyInput=form.querySelector('[data-key]'),hint=form.querySelector('[data-protocol-hint]');
       const hfGlobalKey=modal.querySelector('[data-hf-global-key]'),hfGlobalRemember=modal.querySelector('[data-hf-global-remember]');
       hfGlobalKey.value=registry.getHuggingFaceApiKey?.()||''; hfGlobalRemember.checked=!!registry.settings.huggingFaceRememberKey;
-      function openHFModels(){
-        const browser=document.createElement('div'); browser.className='editor-modal ai-hf-browser-modal';
-        browser.innerHTML='<div class="editor-modal-content ai-hf-browser-content"><button class="editor-modal-close" aria-label="Close">×</button><h2>Hugging Face Models</h2><p>Models currently served through Hugging Face Inference Providers.</p><div class="ai-hf-browser-toolbar"><input data-hf-search placeholder="Search model IDs…"><select data-hf-provider><option value="">All providers</option></select><label class="ai-check"><input data-hf-free type="checkbox"> Free only</label><button data-hf-refresh>Refresh</button></div><div class="ai-hf-browser-status" data-hf-status>Loading models…</div><div class="ai-hf-browser-list" data-hf-list></div></div>';
+      function updateProviderFields(force=true){
+        const id=providerInput.value, preset=registry.provider(id)||registry.provider('custom');
+        formatInput.value=preset.protocol; formatInput.disabled=id!=='custom';
+        if(force){
+          endpointInput.value=preset.endpoint||'';
+          modelInput.value=preset.model||'';
+          keyInput.value='';
+          form.querySelector('[data-tools]').checked=preset.supportsTools!==false;
+          form.querySelector('[data-thinking]').checked=preset.supportsReasoning!==false;
+          if(!nameInput.value.trim() && preset.name) nameInput.value=preset.model ? `${preset.name} • ${preset.model.split('/').pop()}` : preset.name;
+        }
+        if(id==='groq')hint.textContent='Groq uses OpenAI-compatible chat completions. Enter your Groq API key, then Browse models for the live /models list.';
+        else if(id==='huggingface')hint.textContent='Hugging Face Router uses OpenAI Chat Completions. Browse models queries its live /v1/models list.';
+        else if(id==='google-gemini')hint.textContent='Google Gemini uses the native generateContent API. Browse models uses GET /v1beta/models and only shows models that advertise generateContent.';
+        else hint.textContent='Custom provider. Choose or override the API format and endpoint as needed.';
+      }
+      function openModelBrowser(providerId){
+        const provider=registry.provider(providerId),config=provider?.modelBrowser,browser=document.createElement('div');
+        if(!config){alert(`${providers[providerId]?.label||providerId} does not have a model browser yet.`);return;}
+        browser.className='editor-modal ai-hf-browser-modal';
+        const title=providers[providerId]?.label||providerId,showFree=!!config.freeFilter;
+        browser.innerHTML=`<div class="editor-modal-content ai-hf-browser-content"><button class="editor-modal-close" aria-label="Close">×</button><h2>${escapeHtml(title)} Models</h2><p>Models currently available through this provider.</p><div class="ai-hf-browser-toolbar"><input data-model-search placeholder="Search model IDs…">${showFree?'<label class="ai-check"><input data-model-free type="checkbox"> Free only</label>':''}<button data-model-refresh>Refresh</button></div><div class="ai-hf-browser-status" data-model-status>Loading models…</div><div class="ai-hf-browser-list" data-model-list></div></div>`;
         document.body.appendChild(browser); requestAnimationFrame(()=>browser.classList.add('show'));
-        const keyInput=form.querySelector('[data-key]'), search=browser.querySelector('[data-hf-search]'),provider=browser.querySelector('[data-hf-provider]'),free=browser.querySelector('[data-hf-free]'),status=browser.querySelector('[data-hf-status]'),list=browser.querySelector('[data-hf-list]');
+        const search=browser.querySelector('[data-model-search]'),free=browser.querySelector('[data-model-free]'),status=browser.querySelector('[data-model-status]'),list=browser.querySelector('[data-model-list]');
         let all=[];
         browser.querySelector('.editor-modal-close').onclick=()=>browser.remove(); browser.onclick=e=>{if(e.target===browser)browser.remove();};
+        function modelId(model){return String(model?.[config.idField||'id']||model?.id||'').replace(/^models\//,'');}
+        function modelIsEligible(model){const filter=config.filter;if(filter==='generateContent')return Array.isArray(model?.supportedGenerationMethods)&&model.supportedGenerationMethods.includes('generateContent');return true;}
         async function load(){
           status.textContent='Loading models…'; list.innerHTML='';
           try {
             if(!network?.request) throw new Error('Network API is unavailable.');
-            const key=String(keyInput?.value||'').trim()||registry.getHuggingFaceRequestKey?.()||'';
-            if(!key) throw new Error('Enter a Hugging Face API key first.');
-            const response=await network.request(new Request('https://router.huggingface.co/v1/models',{headers:{Authorization:'Bearer '+key}}),'ai');
-            if(!response) throw new Error('No response from Hugging Face.');
-            if(!response.ok) throw new Error(`Hugging Face returned ${response.status}: ${await response.text()}`);
-            const data=await response.json(); all=Array.isArray(data?.data)?data.data:[];
-            const names=new Set(); for(const model of all) for(const p of model.providers||[]) if(p.provider)names.add(p.provider);
-            provider.innerHTML='<option value="">All providers</option>'+[...names].sort().map(x=>`<option value="${escapeHtml(x)}">${escapeHtml(x)}</option>`).join('');
+            const key=String(keyInput?.value||'').trim() || (providerId==='huggingface' ? registry.getHuggingFaceRequestKey?.()||'' : '');
+            if(!key) throw new Error(`Enter your ${title} API key first.`);
+            const base=String(endpointInput.value||provider.endpoint||'').replace(/\/+$/,'');
+            if(!base) throw new Error(`${title} has no model-list endpoint configured.`);
+            all=[]; let nextToken='',pages=0;
+            do {
+              let url=base+(config.path||'/models');
+              const query=[]; if(config.query)query.push(config.query); if(nextToken)query.push('pageToken='+encodeURIComponent(nextToken)); if(query.length)url+=(url.includes('?')?'&':'?')+query.join('&');
+              const headers=config.auth==='bearer'?{Authorization:'Bearer '+key}:config.auth==='google'?{'x-goog-api-key':key}:{};
+              const response=await network.request(new Request(url,{headers}),'ai');
+              if(!response)throw new Error(`No response from ${title}.`);
+              if(!response.ok)throw new Error(`${title} returned ${response.status}: ${await response.text()}`);
+              const data=await response.json();
+              const page=Array.isArray(data?.[config.responseKey||'data'])?data[config.responseKey||'data']:[];
+              all.push(...page.filter(modelIsEligible));
+              nextToken=config.kind==='dynamic'?(data?.nextPageToken||''):'';
+              pages++;
+            } while(nextToken&&pages<10);
+            if(nextToken)status.textContent='Showing the first 10 model-list pages.';
             renderList();
           } catch(e){status.textContent=e?.message||String(e);}
         }
         function renderList(){
-          const q=search.value.trim().toLowerCase(), pv=provider.value;
+          const q=search.value.trim().toLowerCase(),onlyFree=!!free?.checked;
           const rows=all.filter(m=>{
-            if(q&&!String(m.id||'').toLowerCase().includes(q))return false;
-            const providers=Array.isArray(m.providers)?m.providers:[];
-            if(pv&&!providers.some(p=>p.provider===pv))return false;
-            if(free.checked&&!providers.some(p=>p.is_free===true || (p.pricing && Number(p.pricing.input)===0 && Number(p.pricing.output)===0)))return false;
+            const id=modelId(m).toLowerCase(); if(!id)return false;
+            if(q&&!id.includes(q)&&!String(m.displayName||'').toLowerCase().includes(q))return false;
+            if(m.active===false)return false;
+            if(onlyFree){const pricing=m.pricing||m.providers?.[0]?.pricing;const freeNow=Array.isArray(m.providers)?m.providers.some(p=>p.is_free===true||(p.pricing&&Number(p.pricing.input)===0&&Number(p.pricing.output)===0)):!!pricing&&(Number(pricing.input??pricing.prompt??-1)===0&&Number(pricing.output??pricing.completion??-1)===0);if(!freeNow)return false;}
             return true;
-          }).slice(0,150);
-          status.textContent=`${rows.length}${rows.length===150?'+':''} model${rows.length===1?'':'s'} shown`;
+          }).slice(0,200);
+          status.textContent=`${rows.length}${rows.length===200?'+':''} model${rows.length===1?'':'s'} shown`;
           list.innerHTML=rows.map(m=>{
-            const providers=Array.isArray(m.providers)?m.providers:[],live=providers.filter(p=>p.status==='live'),freeNow=providers.some(p=>p.is_free===true || (p.pricing && Number(p.pricing.input)===0 && Number(p.pricing.output)===0)),tools=providers.some(p=>p.supports_tools===true),ctx=Math.max(0,...providers.map(p=>Number(p.context_length)||0));
-            return `<div class="ai-hf-model-row"><div class="ai-model-main"><strong>${escapeHtml(m.id||'')}</strong><span>${live.length} provider${live.length===1?'':'s'}${freeNow?' · free':''}${tools?' · tools':''}${ctx?' · '+ctx.toLocaleString()+' ctx':''}</span></div><button data-pick="${escapeHtml(m.id||'')}">Use</button></div>`;
+            const id=modelId(m),ctx=Number(m.context_window||m.context_length||m.inputTokenLimit||0),owner=m.owned_by||m.publisher||'',display=m.displayName||'',meta=providerId==='google-gemini'?[display,ctx?ctx.toLocaleString()+' input ctx':'',m.version?String(m.version):''].filter(Boolean).join(' · '):providerId==='huggingface'?`${Array.isArray(m.providers)?m.providers.length:0} provider${Array.isArray(m.providers)&&m.providers.length===1?'':'s'}${ctx?' · '+ctx.toLocaleString()+' ctx':''}`:`${owner?owner+' · ':''}${ctx?ctx.toLocaleString()+' ctx':''}`;
+            return `<div class="ai-hf-model-row"><div class="ai-model-main"><strong>${escapeHtml(id)}</strong><span>${escapeHtml(meta||'available')}</span></div><button data-pick="${escapeHtml(id)}">Use</button></div>`;
           }).join('');
-          list.querySelectorAll('[data-pick]').forEach(b=>b.onclick=()=>{form.querySelector('[data-model]').value=b.dataset.pick; if(!endpointInput.value)endpointInput.value='https://router.huggingface.co/v1'; if(!protocolInput.value)protocolInput.value='openai-chat'; if(!form.querySelector('[data-name]').value)form.querySelector('[data-name]').value='Hugging Face • '+b.dataset.pick.split('/').pop(); updateHint(); browser.remove();});
+          list.querySelectorAll('[data-pick]').forEach(b=>b.onclick=()=>{modelInput.value=b.dataset.pick;if(!endpointInput.value)endpointInput.value=provider.endpoint||'';if(!nameInput.value.trim()||nameInput.value===provider.name)nameInput.value=`${title} • ${b.dataset.pick.split('/').pop()}`;form.querySelector('[data-tools]').checked=provider.supportsTools!==false;form.querySelector('[data-thinking]').checked=provider.supportsReasoning!==false;browser.remove();});
         }
-        search.oninput=renderList; provider.onchange=renderList; free.onchange=renderList; browser.querySelector('[data-hf-refresh]').onclick=load; load();
+        search.oninput=renderList; if(free)free.onchange=renderList; browser.querySelector('[data-model-refresh]').onclick=load; load();
       }
-      browseHF.onclick=openHFModels;
-      function updateHint(){const selected=protocolInput.value, inferred=registry.inferProtocol(endpointInput.value);if(selected)hint.textContent=`Using ${registry.protocolLabel(selected)}.`;else if(inferred)hint.textContent=`Auto-detected: ${registry.protocolLabel(inferred)}.`;else hint.textContent='The endpoint format is not known yet. Choose a supported API format explicitly, or this provider will be reported as unsupported.';}
-      protocolInput.onchange=updateHint;endpointInput.oninput=updateHint;
-      function fill(model){editingId=model?.id||'';form.hidden=false;protocolInput.value=model?.protocol||'';form.querySelector('[data-name]').value=model?.name||'';endpointInput.value=model?.endpoint||'';form.querySelector('[data-model]').value=model?.model||'';form.querySelector('[data-key]').value=model?.apiKey||'';form.querySelector('[data-remember]').checked=!!model?.rememberKey;form.querySelector('[data-tools]').checked=model?.supportsTools!==false;form.querySelector('[data-thinking]').checked=model?.supportsReasoning!==false;form.querySelector('[data-save-model]').textContent=editingId?'Save changes':'Save model';updateHint();}
-      add.onclick=()=>{form.hidden=!form.hidden;updateHint();};
+      form.querySelector('[data-browse-models]').onclick=()=>openModelBrowser(providerInput.value);
+      providerInput.onchange=()=>updateProviderFields(true);
+      endpointInput.oninput=()=>{if(providerInput.value==='custom')hint.textContent='Custom provider. The endpoint and API format will be used as entered.';};
+      function fill(model){editingId=model?.id||'';form.hidden=false;const providerId=registry.providerForModel(model);providerInput.value=providerId;formatInput.value=model?.protocol||registry.provider(providerId)?.protocol||'openai-chat';formatInput.disabled=providerId!=='custom';nameInput.value=model?.name||'';endpointInput.value=model?.endpoint||'';modelInput.value=model?.model||'';keyInput.value=model?.apiKey||'';form.querySelector('[data-remember]').checked=!!model?.rememberKey;form.querySelector('[data-tools]').checked=model?.supportsTools!==false;form.querySelector('[data-thinking]').checked=model?.supportsReasoning!==false;form.querySelector('[data-save-model]').textContent=editingId?'Save changes':'Save model';updateProviderFields(false);}
+      add.onclick=()=>{form.hidden=!form.hidden;if(!form.hidden&&!editingId){providerInput.value='custom';formatInput.value='openai-chat';formatInput.disabled=false;nameInput.value='';endpointInput.value='';modelInput.value='';keyInput.value='';form.querySelector('[data-tools]').checked=true;form.querySelector('[data-thinking]').checked=true;hint.textContent='Select a provider to fill in its API format and endpoint.';}};
       modal.querySelectorAll('[data-edit]').forEach(x=>x.onclick=()=>{const model=registry.settings.models.find(m=>m.id===x.dataset.edit);if(model)fill(model);});
       modal.querySelector('[data-cancel-model]').onclick=()=>{editingId='';form.hidden=true;};
-      modal.querySelector('[data-save-model]').onclick=()=>{const selectedProtocol=protocolInput.value.trim(),name=form.querySelector('[data-name]').value.trim(),endpoint=endpointInput.value.trim(),modelId=form.querySelector('[data-model]').value.trim(),apiKey=form.querySelector('[data-key]').value,remember=form.querySelector('[data-remember]').checked,tools=form.querySelector('[data-tools]').checked,thinking=form.querySelector('[data-thinking]').checked;const protocol=selectedProtocol||registry.inferProtocol(endpoint);if(!name||!endpoint||!modelId){alert('Name, endpoint, and model ID are required.');return;}if(!protocol){alert('This provider uses an unsupported API format. Choose a supported API format explicitly, or this provider will be reported as unsupported.');return;}registry.setHuggingFaceApiKey(hfGlobalKey.value,hfGlobalRemember.checked);registry.save();const id=editingId||'model-'+Math.random().toString(36).slice(2);try{const clean=registry.add({id,name,endpoint,model:modelId,apiKey,rememberKey:remember,supportsTools:tools,supportsReasoning:thinking,requiresKey:!!apiKey,protocol});registry.setActive(clean.id);editingId='';render();onChange?.();}catch(e){alert(e?.message||String(e));}};
+      modal.querySelector('[data-save-model]').onclick=()=>{const provider=providerInput.value.trim()||'custom',preset=registry.provider(provider)||registry.provider('custom'),name=nameInput.value.trim(),endpoint=endpointInput.value.trim(),modelId=modelInput.value.trim(),apiKey=keyInput.value,remember=form.querySelector('[data-remember]').checked,tools=form.querySelector('[data-tools]').checked,thinking=form.querySelector('[data-thinking]').checked,protocol=provider==='custom'?formatInput.value:preset.protocol;if(!name||!endpoint||!modelId){alert('Name, endpoint, and model ID are required.');return;}registry.setHuggingFaceApiKey(hfGlobalKey.value,hfGlobalRemember.checked);registry.save();const id=editingId||'model-'+Math.random().toString(36).slice(2);try{const clean=registry.add({id,provider,name,endpoint,model:modelId,apiKey,rememberKey:remember,supportsTools:tools,supportsReasoning:thinking,requiresKey:!!apiKey,protocol});registry.setActive(clean.id);editingId='';render();onChange?.();}catch(e){alert(e?.message||String(e));}};
       hfGlobalKey.onchange=()=>{registry.setHuggingFaceApiKey(hfGlobalKey.value,hfGlobalRemember.checked);registry.save();onChange?.();}; hfGlobalRemember.onchange=()=>{registry.setHuggingFaceApiKey(hfGlobalKey.value,hfGlobalRemember.checked);registry.save();onChange?.();};
       modal.querySelectorAll('[data-permission]').forEach(x=>x.onchange=()=>{permissions.set(x.dataset.permission,x.value);onChange?.();});
       modal.querySelector('[data-reset-permissions]').onclick=()=>{permissions.reset();render();onChange?.();};
@@ -268,7 +299,7 @@
     let currentChatId='';
     let chatMessages=[];
     let loadedProjectId=null;
-    let agentMode=false, busy=false, controller=null;
+    let agentMode=false, busy=false, controller=null, editingIndex=-1;
     const toolset=aiRoot.makeAITools({state,openFile:onOpen,onRefresh:()=>{state.fileManager?.refresh?.();updateStatus?.();},runConfigured,ensureNodeRuntime:()=>state.ensureNodeRuntime?.()});
     const agent=new aiRoot.AIAgent({client:new aiRoot.AIClient(registry,state.browserNetwork||window.__sharedBrowserNetwork),tools:toolset,permissions,requestPermission:permissionPrompt,emit:()=>{}});
     function syncChats() {
@@ -284,6 +315,26 @@
     function currentChat() { syncChats(); return chatStore.get(currentChatId); }
     function activeMessages() { return chatMessages.map(m=>({role:m.role,content:m.content})); }
     function persist() { const chat=currentChat(); chat.messages=chatMessages; chatStore.touch(chat.id); }
+    function beginEdit(index) {
+      if (busy || !Number.isInteger(index) || chatMessages[index]?.role !== 'user') return;
+      const view=getAIView(); if (!view) return;
+      const input=view.t?._viewElement?.querySelector?.('[data-input]') || view.g?.viewBody?.querySelector?.('[data-input]');
+      if (!input) return;
+      editingIndex=index;
+      input.value=chatMessages[index].content;
+      input.focus();
+      input.setSelectionRange(input.value.length,input.value.length);
+      const send=view.t?._viewElement?.querySelector?.('[data-send]');
+      if (send) send.textContent='Resend';
+    }
+    function cancelEdit() { editingIndex=-1; }
+    function resendMessage(index,text,g,t,tree) {
+      if (!Number.isInteger(index) || chatMessages[index]?.role !== 'user') return;
+      chatMessages=chatMessages.slice(0,index);
+      editingIndex=-1;
+      persist();
+      sendMessage(text,g,t,tree);
+    }
     function getAIView() {
       let t=currentTab;
       if (!t || t.kind !== 'builtin' || t.builtin !== 'ai') return null;
@@ -297,7 +348,7 @@
       if (!g || !g.tabs.includes(t)) return null;
       return {g,t};
     }
-    function addMessage(chat,role,text){const row=document.createElement('div');row.className='ai-message '+(role==='user'?'ai-user':'ai-assistant');const bubble=document.createElement('div');bubble.className='ai-bubble';if(role==='user')bubble.textContent=text;else renderMessage(bubble,text,code=>insertCode(code));row.appendChild(bubble);chat.appendChild(row);return bubble;}
+    function addMessage(chat,role,text,index){const row=document.createElement('div');row.className='ai-message '+(role==='user'?'ai-user':'ai-assistant');const bubble=document.createElement('div');bubble.className='ai-bubble';if(role==='user')bubble.textContent=text;else renderMessage(bubble,text,code=>insertCode(code));row.appendChild(bubble);if(role==='user'&&Number.isInteger(index)){const edit=document.createElement('button');edit.className='ai-edit-message';edit.textContent='✎';edit.title='Edit and resend';edit.setAttribute('aria-label','Edit and resend prompt');edit.disabled=busy;edit.onclick=()=>beginEdit(index);row.appendChild(edit);}chat.appendChild(row);return bubble;}
     async function insertCode(code){
       const tab=activeEditor(state); if(!tab){alert('Open a text file to insert this snippet.');return;} if(!tab.editor){onOpen?.(tab.path);setTimeout(()=>insertCode(code),150);return;}
       const tool=toolset.map.get('insert_code'); if(!tool)return;
@@ -363,7 +414,7 @@
       if(!model.supportsTools) agentMode=false;
       tree.innerHTML=`<div class="ai-panel-inner"><div class="ai-header"><div class="ai-header-left"><strong>AI Chat</strong><span class="ai-model-label">${escapeHtml(makeModelLabel(model,registry))}</span></div><div class="ai-header-right"><select class="ai-chat-select" data-chat-select ${busy?'disabled':''} title="Recent chats">${chats.map(c=>`<option value="${escapeHtml(c.id)}" ${c.id===currentChatId?'selected':''}>${escapeHtml(c.title)}</option>`).join('')}${!chats.length?'<option>No chats</option>':''}</select><div class="ai-head-actions"><button data-chat-manage ${busy?'disabled':''} title="Manage chats" aria-label="Manage chats">☰</button><button data-new ${busy?'disabled':''} title="New chat" aria-label="New chat">＋</button><button data-settings title="AI Settings" aria-label="AI Settings">⚙</button></div></div></div><div class="ai-chat" data-chat></div><div class="ai-horde-status" data-status ${busy?'':'hidden'}>${busy?'Working…':''}</div><div class="ai-compose"><textarea data-input placeholder="Ask anything about your project…" rows="3"></textarea><div class="ai-compose-bar"><label class="ai-agent-toggle"><input data-agent type="checkbox" ${agentMode?'checked':''} ${model.supportsTools?'':'disabled'}> Agent mode${model.supportsTools?'':' (not supported by this model)'}</label><button data-stop ${busy?'':'disabled'}>Stop</button><button class="primary" data-send ${busy?'disabled':''}>Send</button></div></div></div>`;
       const chat=tree.querySelector('[data-chat]');
-      for(const m of chatMessages) addMessage(chat,m.role,m.content);
+      for(let i=0;i<chatMessages.length;i++){const m=chatMessages[i];addMessage(chat,m.role,m.content,i);}
       tree.querySelector('[data-agent]').onchange=e=>{agentMode=e.target.checked;};
       tree.querySelector('[data-settings]').onclick=()=>settingsModal(registry,permissions,()=>{persist();render(g,t);},state.browserNetwork||window.__sharedBrowserNetwork);
       tree.querySelector('[data-chat-select]').onchange=e=>switchChat(e.target.value);
@@ -371,8 +422,10 @@
       tree.querySelector('[data-new]').onclick=()=>newChat();
       tree.querySelector('[data-stop]').onclick=()=>{controller?.abort();agent.client.cancel();busy=false;render(g,t);};
       const input=tree.querySelector('[data-input]'); const send=tree.querySelector('[data-send]');
-      const submit=async()=>{const text=input.value.trim();if(!text||busy)return;input.value='';await sendMessage(text,g,t,tree);};
+      const submit=async()=>{const text=input.value.trim();if(!text||busy)return;if(editingIndex>=0){const index=editingIndex;input.value='';resendMessage(index,text,g,t,tree);}else{input.value='';await sendMessage(text,g,t,tree);}};
+      send.textContent=editingIndex>=0?'Resend':'Send';
       send.onclick=submit; input.addEventListener('keydown',e=>{if(e.key==='Enter' && !e.shiftKey){e.preventDefault();submit();}});
+      if(editingIndex>=0){const cancel=document.createElement('button');cancel.type='button';cancel.textContent='Cancel';cancel.title='Cancel prompt editing';cancel.onclick=()=>{cancelEdit();render(g,t);};send.parentNode.insertBefore(cancel,send);}
       if(chatMessages.length)chat.scrollTop=chat.scrollHeight;
     }
     async function sendMessage(text,g,t,tree){

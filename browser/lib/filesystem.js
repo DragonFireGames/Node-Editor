@@ -109,6 +109,37 @@
       return this.provider.delete(path);
     }
 
+    moveSync(source, destination) {
+      source = this._normalize(source);
+      destination = this._normalize(destination);
+      if (!source || !destination || source === destination) return false;
+      if (destination.startsWith(source + '/')) throw new Error('Cannot move a path into itself.');
+      if (this.existsSync(destination) || this.isDirectorySync(destination)) throw new Error(`Destination already exists: ${destination}`);
+      const sourceIsDir = this.isDirectorySync(source);
+      if (sourceIsDir) {
+        const files = this.listFilesSync().filter(path => path === source || path.startsWith(source + '/'));
+        const dirs = this.listDirectoriesSync().filter(path => path === source || path.startsWith(source + '/'));
+        this._addParentDirectories(destination);
+        for (const path of dirs) this._addParentDirectories(destination + path.slice(source.length));
+        for (const path of files) {
+          const target = destination + path.slice(source.length);
+          const data = this.readFileSync(path, 'binary');
+          this.writeFileSync(target, data);
+        }
+        for (const path of files) this.deleteFileSync(path);
+        for (const path of dirs.sort((a,b) => b.length - a.length)) this.directories.delete(path);
+        this.provider.directories = this.directories;
+        this.provider.removeDirectory?.(source);
+      } else {
+        const parent = destination.includes('/') ? destination.slice(0, destination.lastIndexOf('/')) : '';
+        this._addParentDirectories(parent);
+        const data = this.readFileSync(source, 'binary');
+        this.writeFileSync(destination, data);
+        this.deleteFileSync(source);
+      }
+      return true;
+    }
+
     deleteDirectorySync(path) {
       path = this._normalize(path);
       if (!path) return false;

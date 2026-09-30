@@ -36,7 +36,7 @@
         const model=this.client.model();
         const toolDefs=toolSchema(this.tools);
         const canNative=!!model.supportsTools;
-        const working=messages.map(x=>({...x}));
+        const working=messages.map(x=>({role:x.role,content:x.content,...(x.tool_call_id?{tool_call_id:x.tool_call_id}:{}),...(x.name?{name:x.name}:{}),...(Array.isArray(x.tool_calls)?{tool_calls:x.tool_calls}:{}),...(x.role==='assistant'&&x._geminiContent?{_geminiContent:x._geminiContent}:{}),...(x._geminiCallId?{_geminiCallId:x._geminiCallId}: {})}));
         if(!canNative){
           const instructions = '\n\nYou have access to project tools. When a tool is needed, output exactly one or more tags in this format:\n<tool_call>{"name":"read_file","arguments":{"path":"file.js"}}</tool_call>\nDo not put tool calls inside Markdown code fences. Use valid JSON arguments matching the schemas below. After receiving tool results, continue the task.\n\nTool schemas:\n' + this.tools.list().map(t => JSON.stringify({name:t.name,description:t.description,parameters:t.parameters||{type:'object',properties:{}}})).join('\n');
           if(working[0]?.role === 'system') working[0] = {...working[0], content:working[0].content + instructions};
@@ -48,10 +48,10 @@
           if(canNative){
             const msg=await this.client.complete(working,{model,tools:toolDefs,systemPrompt:options.systemPrompt,thinking:true,maxTokens:options.maxTokens});
             const think=msg.reasoning_content||msg.reasoning||''; if(think){reasoning+=think;this.emit?.({type:'reasoning',text:think});}
-            const calls=Array.isArray(msg.tool_calls)?msg.tool_calls.map(x=>({id:x.id,name:x.function?.name,arguments:x.function?.arguments||'{}'})).filter(x=>x.name):[];
+            const calls=Array.isArray(msg.tool_calls)?msg.tool_calls.map(x=>({id:x.id,name:x.function?.name,arguments:x.function?.arguments||'{}',_geminiCallId:x._geminiCallId||null})).filter(x=>x.name):[];
             if(!calls.length){ finalText=String(msg.content||''); working.push({role:'assistant',content:finalText}); this.emit?.({type:'final',text:finalText,reasoning}); return {text:finalText,reasoning}; }
-            working.push({role:'assistant',content:msg.content||'',tool_calls:msg.tool_calls});
-            for(const call of calls){ const result=await this.executeTool(call); working.push({role:'tool',tool_call_id:call.id,name:call.name,content:stringifyResult(result)}); }
+            working.push({role:'assistant',content:msg.content||'',tool_calls:msg.tool_calls,_geminiContent:msg._geminiContent||null});
+            for(const call of calls){ const result=await this.executeTool(call); working.push({role:'tool',tool_call_id:call.id,_geminiCallId:call._geminiCallId,name:call.name,content:stringifyResult(result)}); }
           } else {
             let text=''; let lastReasoning='';
             const streamOptions={model,systemPrompt:options.systemPrompt,thinking:true,maxTokens:options.maxTokens};

@@ -14,6 +14,12 @@
     'cohere-v2': {label:'Cohere Chat v2', tools:true},
     'gradio-space': {label:'Gradio Space', tools:false}
   };
+  const PROVIDERS = {
+    huggingface: {label:'Hugging Face', protocol:'openai-chat', endpoint:'https://router.huggingface.co/v1', name:'Hugging Face', model:'', supportsTools:true, supportsReasoning:true, supportsStreaming:true, modelBrowser:{kind:'dynamic',path:'/models',auth:'bearer',responseKey:'data',idField:'id',freeFilter:true}},
+    groq: {label:'Groq', protocol:'openai-chat', endpoint:'https://api.groq.com/openai/v1', name:'Groq', model:'openai/gpt-oss-120b', supportsTools:true, supportsReasoning:true, supportsStreaming:true, modelBrowser:{kind:'dynamic',path:'/models',auth:'bearer',responseKey:'data',idField:'id',freeFilter:false}},
+    'google-gemini': {label:'Google Gemini', protocol:'google-gemini', endpoint:'https://generativelanguage.googleapis.com', name:'Google Gemini', model:'gemini-3.8-flash', supportsTools:true, supportsReasoning:true, supportsStreaming:true, modelBrowser:{kind:'dynamic',path:'/v1beta/models',auth:'google',responseKey:'models',idField:'baseModelId',query:'pageSize=1000',filter:'generateContent',freeFilter:false}},
+    custom: {label:'Custom', protocol:'openai-chat', endpoint:'', name:'', model:'', supportsTools:true, supportsReasoning:true, supportsStreaming:true, modelBrowser:null}
+  };
   function isHuggingFaceEndpoint(endpoint){return /(?:^|\.)huggingface\.co(?:\/|$)/i.test(String(endpoint||''));}
   function getStoredHuggingFaceKey(){try{return String(localStorage.getItem(HF_KEY_STORAGE)||'').trim();}catch(_){return '';}}
   function setStoredHuggingFaceKey(key){try{if(key)localStorage.setItem(HF_KEY_STORAGE,key);else localStorage.removeItem(HF_KEY_STORAGE);}catch(_){}}
@@ -30,7 +36,7 @@
     if (!protocol) protocol = kind === 'gradio-space' ? 'gradio-space' : 'openai-chat';
     if (!PROTOCOLS[protocol]) protocol = inferProtocol(model.endpoint) || '';
     return {
-      id:String(model.id || '').trim(), name:String(model.name || model.model || 'Unnamed Model').trim(),
+      id:String(model.id || '').trim(), provider:String(model.provider || '').trim(), name:String(model.name || model.model || 'Unnamed Model').trim(),
       kind:protocol, protocol, endpoint:String(model.endpoint || '').trim(),
       remoteModel:String(model.remoteModel || model.model || '').trim(), model:String(model.model || model.remoteModel || '').trim(),
       apiKey:String(model.apiKey || ''), anonymousAuth:String(model.anonymousAuth || ''), rememberKey:!!model.rememberKey,
@@ -42,7 +48,7 @@
     const url=String(endpoint || '').toLowerCase();
     if (!url) return '';
     if (url.includes('api.anthropic.com')) return 'anthropic-messages';
-    if (url.includes('generativelanguage.googleapis.com') || url.includes('generativelanguage.googleapis.com')) return 'google-gemini';
+    if (url.includes('generativelanguage.googleapis.com')) return 'google-gemini';
     if (url.includes('api.cohere.com')) return 'cohere-v2';
     if (url.includes('aihorde.net') || url.includes('oai.aihorde.net')) return 'ai-horde';
     if (url.includes('/responses') || url.includes('api.openai.com')) return 'openai-responses';
@@ -108,12 +114,23 @@
     isHuggingFace(model){return isHuggingFaceEndpoint(model?.endpoint);}
     protocolLabel(id){return protocolLabel(id);}
     inferProtocol(endpoint){return inferProtocol(endpoint);}
+    providers(){return {...PROVIDERS};}
+    provider(id){return PROVIDERS[id] ? {...PROVIDERS[id]} : null;}
+    providerForModel(model){
+      if(model?.provider && PROVIDERS[model.provider]) return model.provider;
+      const endpoint=String(model?.endpoint||'').toLowerCase();
+      if(endpoint.includes('api.groq.com')) return 'groq';
+      if(endpoint.includes('generativelanguage.googleapis.com')) return 'google-gemini';
+      if(endpoint.includes('router.huggingface.co')) return 'huggingface';
+      return 'custom';
+    }
     protocols(){return {...PROTOCOLS};}
   }
   root.DEFAULT_PUBLIC_AI_MODEL=DEFAULT_MODEL;
   root.isHuggingFaceEndpoint=isHuggingFaceEndpoint;
   root.getStoredHuggingFaceKey=getStoredHuggingFaceKey;
   root.AI_PROTOCOLS=PROTOCOLS;
+  root.AI_PROVIDERS=PROVIDERS;
   root.ProviderRegistry=ProviderRegistry;
   root.loadModels=loadModels;
   root.saveModels=saveModels;

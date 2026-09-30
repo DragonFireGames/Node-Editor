@@ -7,9 +7,10 @@
   function anthropicUrl(model){const base=trimEndpoint(model.endpoint);if(/\/v1\/messages$/i.test(base))return base;if(/\/v1$/i.test(base))return base+'/messages';return base+'/v1/messages';}
   function cohereUrl(model){const base=trimEndpoint(model.endpoint);return /\/v2\/chat$/i.test(base)?base:base.replace(/\/v2$/i,'')+'/v2/chat';}
   function googleUrl(model,stream){
-    const endpoint=trimEndpoint(model.endpoint), modelId=encodeURIComponent(model.model.replace(/^models\//,''));
-    if (/:(?:streamGenerateContent|generateContent)$/i.test(endpoint)) return endpoint;
-    return endpoint.replace(/\/models$/i,'')+'/v1beta/models/'+modelId+':'+(stream?'streamGenerateContent':'generateContent');
+    let endpoint=trimEndpoint(model.endpoint), modelId=encodeURIComponent(String(model.model||'').replace(/^models\//,''));
+    if(/:(?:streamGenerateContent|generateContent)$/i.test(endpoint)) return endpoint;
+    endpoint=endpoint.replace(/\/v1beta(?:\/models)?$/i,'').replace(/\/models$/i,'');
+    return endpoint+'/v1beta/models/'+modelId+':'+(stream?'streamGenerateContent?alt=sse':'generateContent');
   }
 
   function hordeHeaders(model){
@@ -80,13 +81,19 @@
   function normalizeGeminiData(data){
     let content='',calls=[];
     const parts=data?.candidates?.[0]?.content?.parts || [];
-    for(const p of parts){if(p?.text)content+=p.text;if(p?.functionCall?.name)calls.push({id:p.functionCall.id||('call-'+Math.random().toString(36).slice(2)),type:'function',function:{name:p.functionCall.name,arguments:JSON.stringify(p.functionCall.args||{})}});}
-    return {role:'assistant',content,tool_calls:calls,reasoning_content:''};
+    for(const p of parts){
+      if(p?.text)content+=p.text;
+      if(p?.functionCall?.name){
+        calls.push({id:p.functionCall.id||('call-'+Math.random().toString(36).slice(2)),type:'function',function:{name:p.functionCall.name,arguments:JSON.stringify(p.functionCall.args||{})},_gemini:p,_geminiCallId:p.functionCall.id||null});
+      }
+    }
+    return {role:'assistant',content,tool_calls:calls,reasoning_content:'',_geminiContent:data?.candidates?.[0]?.content||null};
   }
   function normalizeCohereData(data){
     const msg=data?.message || {};let content=textOf(msg.content);let calls=normalizeToolCalls(msg.tool_calls || msg.toolCalls);return {role:'assistant',content,tool_calls:calls,reasoning_content:''};
   }
-  function openAIChatMessages(messages){return messages.map(m=>{if(m.role==='tool')return {role:'tool',tool_call_id:m.tool_call_id||m.id,name:m.name,content:String(m.content||'')};return {...m};});}
+  function openAIToolCall(c){return {id:c?.id,type:'function',function:{name:c?.function?.name||c?.name||'',arguments:typeof c?.function?.arguments==='string'?c.function.arguments:JSON.stringify(c?.function?.arguments||{})}};}
+  function openAIChatMessages(messages){return messages.map(m=>{if(m.role==='tool')return {role:'tool',tool_call_id:m.tool_call_id||m.id,name:m.name,content:String(m.content||'')};return {role:m.role,content:String(m.content||''),...(Array.isArray(m.tool_calls)&&m.tool_calls.length?{tool_calls:m.tool_calls.map(openAIToolCall)}:{})};});}
   function responseInput(messages){
     return messages.flatMap(m=>{
       if(m.role==='tool')return [{type:'function_call_output',call_id:m.tool_call_id||m.id,output:String(m.content||'')}];
@@ -113,9 +120,15 @@
     for(const m of messages){
       if(m.role==='system'){system+=(system?'\n\n':'')+String(m.content||'');continue;}
       if(m.role==='tool'){
-        const response={functionResponse:{name:m.name||'',response:parseJSON(m.content)}};contents.push({role:'user',parts:[response]});continue;
+        const response={functionResponse:{name:m.name||'',response:parseJSON(m.content)}};
+        if(m._geminiCallId)response.functionResponse.id=m._geminiCallId;
+        contents.push({role:'user',parts:[response]});continue;
       }
-      const parts=[];if(m.content)parts.push({text:String(m.content)});for(const c of m.tool_calls||[])parts.push({functionCall:{name:c.function?.name,args:parseJSON(c.function?.arguments)}});
+      if(m.role==='assistant' && m._geminiContent){
+        contents.push(m._geminiContent);
+        continue;
+      }
+      const parts=[];if(m.content)parts.push({text:String(m.content)});for(const c of m.tool_calls||[])parts.push({functionCall:{...(c._gemini?.functionCall||{}),name:c.function?.name,args:parseJSON(c.function?.arguments)}});
       contents.push({role:m.role==='assistant'?'model':'user',parts:parts.length?parts:[{text:''}]});
     }
     return {system,contents};
@@ -126,7 +139,10 @@
     if(!Array.isArray(tools)||!tools.length)return undefined;
     const protocol=model.protocol;
     if(protocol==='anthropic-messages')return tools.map(t=>({name:t.function?.name,description:t.function?.description,input_schema:t.function?.parameters||{type:'object',properties:{}}}));
-    if(protocol==='google-gemini')return [{functionDeclarations:tools.map(t=>({name:t.function?.name,description:t.function?.description,parameters:t.function?.parameters||{type:'object',properties:{}}}))}];
+    if(protocol==='google-gemini')return [{functionDeclarations:tools.map(t=>{
+      const parameters=t.function?.parameters||{type:'object',properties:{}};
+      return {name:t.function?.name,description:t.function?.description||'',parametersJsonSchema:JSON.parse(JSON.stringify(parameters))};
+    })}];
     if(protocol==='openai-responses')return tools.map(t=>({type:'function',name:t.function?.name,description:t.function?.description,parameters:t.function?.parameters||{type:'object',properties:{}}}));
     return tools;
   }
@@ -138,7 +154,7 @@
       case 'openai-chat':return {url:completionUrl(model),headers:authHeaders(model,{},registry),body:{model:model.model,messages:openAIChatMessages(messages),temperature,max_tokens:maxTokens,stream,...(tools?{tools,tool_choice:options.tool_choice||'auto'}:{})}};
       case 'openai-responses':return {url:responseUrl(model),headers:authHeaders(model,{},registry),body:{model:model.model,input:responseInput(messages),stream,...(options.systemPrompt?{}:{}),...(tools?{tools,tool_choice:options.tool_choice||'auto'}:{})}};
       case 'anthropic-messages':{const x=anthropicMessages(messages);return {url:anthropicUrl(model),headers:authHeaders(model,{'anthropic-version':'2023-06-01'},registry),body:{model:model.model,max_tokens:maxTokens,system:x.system,messages:x.messages,stream,temperature,...(tools?{tools,tool_choice:{type:'auto'}}:{})}};}
-      case 'google-gemini':{const x=geminiMessages(messages);return {url:googleUrl(model,stream),headers:authHeaders(model,{},registry),body:{contents:x.contents,...(x.system?{systemInstruction:{parts:[{text:x.system}]} }:{}),...(tools?{tools}:{}),generationConfig:{temperature,maxOutputTokens:maxTokens}}};}
+      case 'google-gemini':{const x=geminiMessages(messages);return {url:googleUrl(model,stream),headers:authHeaders(model,{},registry),body:{contents:x.contents,...(x.system?{systemInstruction:{parts:[{text:x.system}]} }:{}),...(tools?{tools}:{}),generationConfig:{maxOutputTokens:maxTokens}}};}
       case 'cohere-v2':return {url:cohereUrl(model),headers:authHeaders(model,{},registry),body:{model:model.model,messages:cohereMessages(messages),stream,temperature,max_tokens:maxTokens,...(tools?{tools}:{})}};
       default:throw new Error(`Unsupported AI API format "${model.protocol||model.kind||'unknown'}". Open Settings and choose a supported API format.`);
     }
@@ -216,7 +232,7 @@
         if(model.protocol==='gradio-space')yield* this.streamGradio(messages,{...options,signal:controller.signal},model);
         else if(model.protocol==='ai-horde') { const result=await this.completeHorde(messages,{...options,signal:controller.signal},model); yield {text:result.content||'',delta:result.content||'',reasoning:''}; }
         else if(model.supportsStreaming===false) { const result=await this.complete(messages,{...options,signal:controller.signal}); yield {text:result.content||'',delta:result.content||'',reasoning:result.reasoning_content||''}; }
-        else if(['openai-chat','openai-responses','anthropic-messages'].includes(model.protocol))yield* this.streamNative(messages,{...options,signal:controller.signal},model);
+        else if(['openai-chat','openai-responses','anthropic-messages','google-gemini'].includes(model.protocol))yield* this.streamNative(messages,{...options,signal:controller.signal},model);
         else {const result=await this.complete(messages,{...options,signal:controller.signal});yield {text:result.content||'',delta:result.content||'',reasoning:result.reasoning_content||''};}
       } finally {if(this.abortController===controller)this.abortController=null;}
     }
@@ -233,6 +249,8 @@
           const type=data?.type||'';if(type==='response.output_text.delta'){const text=data.delta||'';full+=text;yield {text:full,delta:text,reasoning};}
         } else if(model.protocol==='anthropic-messages'){
           const type=data?.type||'';if(type==='content_block_delta'){const d=data.delta||{};if(d.type==='text_delta'&&d.text){full+=d.text;yield {text:full,delta:d.text,reasoning};}else if(d.type==='thinking_delta'&&d.thinking){reasoning+=d.thinking;yield {text:full,delta:'',reasoning};}}
+        } else if(model.protocol==='google-gemini'){
+          const parts=data?.candidates?.[0]?.content?.parts||[];for(const p of parts){if(p?.text){full+=p.text;yield {text:full,delta:p.text,reasoning};}}
         }
         if(reasoning!==lastReasoning){lastReasoning=reasoning;}
       }
