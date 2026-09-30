@@ -219,14 +219,35 @@
     }));
   }
   async function getRepository(owner, repo) { return request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`); }
+  async function downloadRepositoryArchive(owner, repo, branch = '') {
+    const token = getToken();
+    if (!token) throw new Error('Not signed in to GitHub.');
+    const branchName = String(branch || '').trim();
+    if (!branchName) throw new Error('Select a branch.');
+    const path = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/zipball/${branchName.split('/').map(encodeURIComponent).join('/')}`;
+    const headers = new Headers({Accept:'application/vnd.github+json','X-GitHub-Api-Version':API_VERSION,Authorization:`Bearer ${token}`});
+    const response = await fetch(API + path, {headers});
+    if (response.status === 401) { clearStoredAuth(); notify(); throw new Error('GitHub authentication expired. Sign in again from Profile.'); }
+    if (!response.ok) {
+      const data = await response.json().catch(() => null);
+      const message = data?.message || `GitHub archive request failed (${response.status}).`;
+      const error = new Error(message); error.status = response.status; error.data = data; throw error;
+    }
+    return response.blob();
+  }
   function branchPath(branch) { return String(branch || 'main').split('/').filter(Boolean).map(encodeURIComponent).join('/'); }
   async function listBranches(owner, repo) {
     const branches = await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches?per_page=100`);
     return Array.isArray(branches) ? branches.map(x => x.name).filter(Boolean) : [];
   }
-  async function getBranchCommit(owner, repo, branch) {
-    const ref = await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/ref/heads/${branchPath(branch)}`);
-    return ref?.object?.sha || null;
+  async function createBranch(owner, repo, branch, fromBranch = 'main') {
+    const name = String(branch || '').trim();
+    if (!name) throw new Error('Enter a branch name.');
+    if (!/^[^\x00-\x20\x7f]+$/.test(name) || /[~^:?*\[\\]/.test(name) || name.includes('..') || name.includes('@{') || name.startsWith('/') || name.endsWith('/') || name.endsWith('.') || name.endsWith('.lock')) throw new Error('Invalid Git branch name.');
+    const base = await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/ref/heads/${branchPath(fromBranch)}`);
+    const sha = base?.object?.sha;
+    if (!sha) throw new Error(`Could not find branch "${fromBranch}".`);
+    return request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/refs`, {method:'POST', body:JSON.stringify({ref:`refs/heads/${name}`, sha})});
   }
   async function getRemoteState(owner, repo, branch) {
     const repoPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
@@ -342,9 +363,10 @@
   root.request = request;
   root.listRepositories = listRepositories;
   root.getRepository = getRepository;
+  root.downloadRepositoryArchive = downloadRepositoryArchive;
   root.listBranches = listBranches;
+  root.createBranch = createBranch;
   root.getRemoteState = getRemoteState;
-  root.getBranchCommit = getBranchCommit;
   root.listCommits = listCommits;
   root.compareWorkingTree = compareWorkingTree;
   root.commitAndPush = commitAndPush;

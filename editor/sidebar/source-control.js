@@ -10,24 +10,10 @@
     let refreshToken = 0;
     function esc(value) { return String(value ?? '').replace(/[&<>\"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\\':'&#39;'}[ch])); }
     function loadConfig() {
-      if (state.gitRepository?.owner && state.gitRepository?.repo) return {...state.gitRepository};
-      try {
-        const raw = state.fs?.readFileSync?.('.editor/project.json', 'utf8');
-        const value = JSON.parse(raw || '{}');
-        if (value?.git?.provider === 'github' && value.git.owner && value.git.repo) return {owner:String(value.git.owner), repo:String(value.git.repo), branch:String(value.git.branch || 'main')};
-      } catch (_) {}
       try { const value = JSON.parse(localStorage.getItem(configKey()) || 'null'); if (value?.owner && value?.repo) return {...value}; } catch (_) {}
       return {owner:'', repo:'', branch:'main'};
     }
-    function saveConfig() {
-      try { localStorage.setItem(configKey(), JSON.stringify(selected)); } catch (_) {}
-      state.gitRepository = selected?.owner && selected?.repo ? {provider:'github', owner:selected.owner, repo:selected.repo, branch:selected.branch || 'main'} : null;
-      try { state.saveProjectMetadata?.(); } catch (_) {}
-    }
-    function syncGitState() {
-      state.gitRepository = selected?.owner && selected?.repo ? {provider:'github', owner:selected.owner, repo:selected.repo, branch:selected.branch || 'main'} : null;
-      try { window.dispatchEvent(new CustomEvent('editor-git-selection-changed', {detail: state.gitRepository})); } catch (_) {}
-    }
+    function saveConfig() { try { localStorage.setItem(configKey(), JSON.stringify(selected)); } catch (_) {} }
     function show() { renderShell(); void refresh(); }
     function renderShell() {
       tree.classList.remove('activity-collapsed');
@@ -41,7 +27,7 @@
         <section class="source-control-section">
           <div class="source-control-label">Repository</div>
           <div class="source-control-select-row"><select data-repo ${repos.length ? '' : 'disabled'}><option value="">${repos.length ? 'Select repository…' : 'Loading repositories…'}</option>${repos.map(r => `<option value="${esc(r.fullName)}" ${r.fullName === `${selected.owner}/${selected.repo}` ? 'selected' : ''}>${esc(r.fullName)}${r.private ? ' · private' : ''}</option>`).join('')}</select><button data-repo-refresh title="Refresh repositories">↻</button></div>
-          <div class="source-control-select-row"><select data-branch ${branches.length ? '' : 'disabled'}><option value="">${branches.length ? 'Select branch…' : (selected.repo ? 'Loading branches…' : 'Select repository first')}</option>${branches.map(branch => `<option value="${esc(branch)}" ${branch === selected.branch ? 'selected' : ''}>${esc(branch)}</option>`).join('')}</select><button data-branch-refresh title="Refresh branches">↻</button></div>
+          <div class="source-control-select-row"><select data-branch ${branches.length ? '' : 'disabled'}><option value="">${branches.length ? 'Select branch…' : (selected.repo ? 'Loading branches…' : 'Select repository first')}</option>${branches.map(branch => `<option value="${esc(branch)}" ${branch === selected.branch ? 'selected' : ''}>${esc(branch)}</option>`).join('')}${branches.length ? '<option value="__create_branch__">+ Create new branch…</option>' : ''}</select><button data-branch-refresh title="Refresh branches">↻</button></div>
         </section>
         ${selected.repo ? `<section class="source-control-section"><div class="source-control-section-title">Changes</div><div data-changes class="source-control-changes"><div class="source-control-loading">Checking working tree…</div></div><textarea data-commit-message placeholder="Commit message" rows="3"></textarea><button class="source-control-commit" data-commit disabled>Commit & Push</button><div data-status class="source-control-status"></div></section><section class="source-control-section"><div class="source-control-section-title">History</div><div data-history class="source-control-history"><div class="source-control-loading">Loading commits…</div></div></section>` : `<div class="source-control-empty"><strong>Select a repository</strong><span>Once a repository is selected, the editor compares this workspace against the selected branch.</span></div>`}
       </div>`;
@@ -54,14 +40,19 @@
         const [owner, ...repoParts] = fullName.split('/');
         selected = {owner, repo:repoParts.join('/'), branch:repos.find(r => r.fullName === fullName)?.defaultBranch || 'main'};
         saveConfig();
-        syncGitState();
         branches = [];
         renderShell();
         await loadBranches(false);
         await refreshStatus();
       });
-      tree.querySelector('[data-branch]')?.addEventListener('change', e => {
-        selected.branch = e.target.value || 'main'; saveConfig(); syncGitState(); void refreshStatus(); void loadHistory(); window.dispatchEvent(new CustomEvent('editor-git-branch-changed', {detail: state.gitRepository}));
+      tree.querySelector('[data-branch]')?.addEventListener('change', async e => {
+        const value = e.target.value;
+        if (value === '__create_branch__') {
+          e.target.value = selected.branch || 'main';
+          await createBranch();
+          return;
+        }
+        selected.branch = value || 'main'; saveConfig(); void refreshStatus(); void loadHistory();
       });
       tree.querySelector('[data-commit]')?.addEventListener('click', () => void commit());
     }
@@ -72,7 +63,6 @@
         repos = await github.listRepositories();
         if (selected.repo && !repos.some(r => r.fullName === `${selected.owner}/${selected.repo}`)) selected = {owner:'', repo:'', branch:'main'};
         saveConfig();
-        syncGitState();
         renderShell();
         if (selected.repo) await loadBranches(false);
       } catch (e) { showStatus(e.message || String(e), true); }
@@ -100,6 +90,26 @@
         await refreshStatus();
         await loadHistory();
       } catch (e) { if (token === refreshToken) showStatus(e.message || String(e), true); }
+    }
+    async function createBranch() {
+      if (!selected.repo) return;
+      const base = selected.branch || 'main';
+      const name = window.prompt(`Create a new branch from ${base}:`, base === 'main' ? 'feature/' : `${base}-copy`);
+      if (name == null) return;
+      const branch = String(name).trim();
+      if (!branch) return showStatus('Enter a branch name.', true);
+      showStatus(`Creating ${branch}…`);
+      try {
+        await github.createBranch(selected.owner, selected.repo, branch, base);
+        branches = [];
+        selected.branch = branch;
+        saveConfig();
+        await loadBranches(true);
+        showStatus(`Created branch ${branch}.`);
+      } catch (e) {
+        showStatus(e.message || String(e), true);
+        const select = tree.querySelector('[data-branch]'); if (select) select.value = base;
+      }
     }
     async function refreshStatus() {
       const changesEl = tree.querySelector('[data-changes]');
