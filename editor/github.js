@@ -2,6 +2,7 @@
   const root = window.GitHubService = window.GitHubService || {};
   const API = 'https://api.github.com';
   const API_VERSION = '2026-03-10';
+  const GITHUB_APP_SLUG = 'node-editor';
   const TOKEN_SESSION_KEY = 'editor.github.token.session';
   const TOKEN_LOCAL_KEY = 'editor.github.token';
   const USER_SESSION_KEY = 'editor.github.user.session';
@@ -90,6 +91,22 @@
   function isSignedIn() { return !!getToken(); }
   function getUser() { return user; }
   function workerUrl() { return getConfig().workerUrl; }
+  function getInstallUrl() { return `https://github.com/apps/${GITHUB_APP_SLUG}/installations/new`; }
+  function installApp() {
+    const url = getInstallUrl();
+    const popup = window.open(url, 'github-app-install', 'popup,width=520,height=720,resizable=yes,scrollbars=yes');
+    if (!popup) location.href = url;
+    return url;
+  }
+  async function getInstallations() {
+    const data = await request('/user/installations?per_page=100');
+    return Array.isArray(data?.installations) ? data.installations : [];
+  }
+  async function isAppInstalled() {
+    if (!getToken()) return false;
+    try { return (await getInstallations()).some(item => String(item?.app?.slug || '').toLowerCase() === GITHUB_APP_SLUG); }
+    catch (_) { return false; }
+  }
   async function startLogin() {
     const worker = workerUrl();
     if (!worker) throw new Error('Set the GitHub authentication Worker URL in Profile first.');
@@ -183,7 +200,16 @@
     headers.set('X-GitHub-Api-Version', API_VERSION);
     headers.set('Authorization', `Bearer ${token}`);
     if (options.body !== undefined && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
-    const response = await fetch(API + path, {...options, headers});
+    const init = {...options, headers, credentials:'omit'};
+    delete init.token;
+    const network = window.__sharedBrowserNetwork || window.EditorAppState?.browserNetwork;
+    let response;
+    if (network?.request) {
+      response = await network.request(new Request(API + path, init), 'github-api');
+      if (!response) throw new Error('GitHub API request failed: no Network endpoint returned a response.');
+    } else {
+      response = await fetch(API + path, init);
+    }
     if (response.status === 401) {
       clearStoredAuth();
       notify();
@@ -195,6 +221,8 @@
       const error = new Error(message);
       error.status = response.status;
       error.data = data;
+      error.oauthScopes = response.headers.get('X-OAuth-Scopes') || '';
+      error.acceptedOAuthScopes = response.headers.get('X-Accepted-OAuth-Scopes') || '';
       throw error;
     }
     return data;
@@ -219,6 +247,32 @@
     }));
   }
   async function getRepository(owner, repo) { return request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`); }
+  async function createRepository({name, description = '', privateRepo = false, autoInit = true}) {
+    name = String(name || '').trim();
+    if (!name) throw new Error('Enter a repository name.');
+    return request('/user/repos', {
+      method:'POST',
+      body:JSON.stringify({name, description:String(description || '').trim(), private:!!privateRepo, auto_init:!!autoInit, has_issues:true, has_projects:false, has_wiki:false})
+    });
+  }
+  async function downloadArchive(owner, repo, ref = '') {
+    const token = getToken();
+    if (!token) throw new Error('Not signed in to GitHub.');
+    const path = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/zipball/${branchPath(ref || 'main')}`;
+    const headers = new Headers({Accept:'application/vnd.github+json','X-GitHub-Api-Version':API_VERSION,Authorization:`Bearer ${token}`});
+    const network = window.__sharedBrowserNetwork || window.EditorAppState?.browserNetwork;
+    const request = new Request(API + path, {headers, credentials:'omit'});
+    const response = network?.request ? await network.request(request, 'github-archive') : await fetch(request);
+    if (!response) throw new Error('GitHub archive download failed: no Network endpoint returned a response.');
+    if (response.status === 401) { clearStoredAuth(); notify(); throw new Error('GitHub authentication expired. Sign in again from Profile.'); }
+    if (!response.ok) {
+      const data = await response.json().catch(() => null);
+      const error = new Error(data?.message || `GitHub archive download failed (${response.status}).`);
+      error.status = response.status; error.data = data;
+      throw error;
+    }
+    return response.blob();
+  }
   function branchPath(branch) { return String(branch || 'main').split('/').filter(Boolean).map(encodeURIComponent).join('/'); }
   async function listBranches(owner, repo) {
     const branches = await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches?per_page=100`);
@@ -260,7 +314,7 @@
   }
   function ignoredPath(path) {
     const p = String(path || '').replace(/^\/+/, '');
-    return p === '.editor' || p.startsWith('.editor/') || p === '.git' || p.startsWith('.git/') || p === 'node_modules' || p.startsWith('node_modules/');
+    return p === '.git' || p.startsWith('.git/') || p === 'node_modules' || p.startsWith('node_modules/');
   }
   async function compareWorkingTree(fs, remoteTree) {
     if (!fs) throw new Error('No workspace filesystem is open.');
@@ -305,24 +359,75 @@
     await Promise.all(Array.from({length:Math.min(limit, items.length)}, run));
     return out;
   }
+  async function createGraphQLCommit(owner, repo, branch, message, changes, expectedHead) {
+    const additions = [];
+    const deletions = [];
+    for (const change of changes) {
+      if (change.type === 'deleted') {
+        deletions.push({path:change.path});
+        continue;
+      }
+      const bytes = change.data instanceof Uint8Array ? change.data : new Uint8Array(change.data || []);
+      let binary = '';
+      const chunk = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunk) binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + chunk, bytes.length)));
+      additions.push({path:change.path, contents:btoa(binary)});
+    }
+    const mutation = `mutation($input:CreateCommitOnBranchInput!){createCommitOnBranch(input:$input){commit{oid}}}`;
+    const variables = {input:{branch:{repositoryNameWithOwner:`${owner}/${repo}`,branchName:branch},message:{headline:message},fileChanges:{additions,deletions}}};
+    if (expectedHead) variables.input.expectedHeadOid = expectedHead;
+    const data = await requestGraphQL(mutation, variables);
+    if (data?.errors?.length) {
+      const error = new Error(data.errors.map(x => x.message).join('; ') || 'GitHub GraphQL commit failed.');
+      error.status = 403;
+      error.data = data;
+      throw error;
+    }
+    const oid = data?.data?.createCommitOnBranch?.commit?.oid;
+    if (!oid) throw new Error('GitHub GraphQL commit did not return a commit SHA.');
+    return oid;
+  }
+  async function requestGraphQL(query, variables) {
+    const token = getToken();
+    if (!token) throw new Error('Not signed in to GitHub.');
+    const headers = new Headers({'Accept':'application/json','Content-Type':'application/json','X-GitHub-Api-Version':API_VERSION,'Authorization':`Bearer ${token}`});
+    const init = {method:'POST',headers,body:JSON.stringify({query,variables}),credentials:'omit'};
+    const network = window.__sharedBrowserNetwork || window.EditorAppState?.browserNetwork;
+    let response = network?.request ? await network.request(new Request('https://api.github.com/graphql', init), 'github-graphql') : await fetch('https://api.github.com/graphql', init);
+    if (!response) throw new Error('GitHub GraphQL request failed: no Network endpoint returned a response.');
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      const error = new Error(data?.message || data?.errors?.map(x => x.message).join('; ') || `GitHub GraphQL request failed (${response.status}).`);
+      error.status = response.status;
+      error.data = data;
+      throw error;
+    }
+    return data;
+  }
   async function commitAndPush({owner, repo, branch, message, fs}) {
     message = String(message || '').trim();
     if (!message) throw new Error('Enter a commit message.');
     const remote = await getRemoteState(owner, repo, branch);
     const changes = await compareWorkingTree(fs, remote.tree);
     if (!changes.length) return {changed:false, changes:[], commitSha:remote.commitSha};
-    const blobs = await withConcurrency(changes.filter(x => x.type !== 'deleted'), 4, async change => ({path:change.path, mode:change.mode || '100644', type:'blob', sha:(await createBlob(owner, repo, change.data)).sha}));
-    const treeEntries = [...blobs, ...changes.filter(x => x.type === 'deleted').map(change => ({path:change.path, mode:change.mode || '100644', type:'blob', sha:null}))];
-    const treeBody = {tree:treeEntries};
-    if (remote.treeSha) treeBody.base_tree = remote.treeSha;
-    const tree = await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees`, {method:'POST', body:JSON.stringify(treeBody)});
-    const commitBody = {message, tree:tree.sha};
-    if (remote.commitSha) commitBody.parents = [remote.commitSha];
-    const commit = await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/commits`, {method:'POST', body:JSON.stringify(commitBody)});
-    const refPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/refs/heads/${branchPath(branch)}`;
-    if (remote.commitSha) await request(refPath, {method:'PATCH', body:JSON.stringify({sha:commit.sha, force:false})});
-    else await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/refs`, {method:'POST', body:JSON.stringify({ref:`refs/heads/${branch}`, sha:commit.sha})});
-    return {changed:true, changes, commitSha:commit.sha};
+    try {
+      const blobs = await withConcurrency(changes.filter(x => x.type !== 'deleted'), 4, async change => ({path:change.path, mode:change.mode || '100644', type:'blob', sha:(await createBlob(owner, repo, change.data)).sha}));
+      const treeEntries = [...blobs, ...changes.filter(x => x.type === 'deleted').map(change => ({path:change.path, mode:change.mode || '100644', type:'blob', sha:null}))];
+      const treeBody = {tree:treeEntries};
+      if (remote.treeSha) treeBody.base_tree = remote.treeSha;
+      const tree = await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees`, {method:'POST', body:JSON.stringify(treeBody)});
+      const commitBody = {message, tree:tree.sha};
+      if (remote.commitSha) commitBody.parents = [remote.commitSha];
+      const commit = await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/commits`, {method:'POST', body:JSON.stringify(commitBody)});
+      const refPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/refs/heads/${branchPath(branch)}`;
+      if (remote.commitSha) await request(refPath, {method:'PATCH', body:JSON.stringify({sha:commit.sha, force:false})});
+      else await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/refs`, {method:'POST', body:JSON.stringify({ref:`refs/heads/${branch}`, sha:commit.sha})});
+      return {changed:true, changes, commitSha:commit.sha};
+    } catch (e) {
+      if (e?.status !== 403) throw e;
+      const commitSha = await createGraphQLCommit(owner, repo, branch, message, changes, remote.commitSha);
+      return {changed:true, changes, commitSha};
+    }
   }
   root.init = init;
   root.onChange = onChange;
@@ -334,10 +439,16 @@
   root.getUser = getUser;
   root.isSignedIn = isSignedIn;
   root.startLogin = startLogin;
+  root.getInstallUrl = getInstallUrl;
+  root.installApp = installApp;
+  root.getInstallations = getInstallations;
+  root.isAppInstalled = isAppInstalled;
   root.signOut = () => { localStorage.removeItem(PENDING_KEY); clearStoredAuth(); notify(); };
   root.request = request;
   root.listRepositories = listRepositories;
   root.getRepository = getRepository;
+  root.createRepository = createRepository;
+  root.downloadArchive = downloadArchive;
   root.listBranches = listBranches;
   root.getRemoteState = getRemoteState;
   root.listCommits = listCommits;

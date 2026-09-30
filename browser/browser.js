@@ -59,9 +59,9 @@ if (browserNetwork.__browserBaseEndpoints) {
   fallbackProxyEndpoint = new ProxyNetworkEndpoint(appSettings.fallbackProxy, appSettings.obscureURL, appSettings.useFallback);
   browserDefaultFallbackEndpoint = new NetworkEndpoint();
   browserDefaultFallbackEndpoint.__browserDefaultFallback = true;
+  browserNetwork.appendEndpoint(browserDefaultFallbackEndpoint);
   browserNetwork.appendEndpoint(primaryProxyEndpoint);
   browserNetwork.appendEndpoint(fallbackProxyEndpoint);
-  browserNetwork.appendEndpoint(browserDefaultFallbackEndpoint);
   browserNetwork.__browserBaseEndpoints = {
     primary: primaryProxyEndpoint,
     fallback: fallbackProxyEndpoint,
@@ -2489,8 +2489,61 @@ window.addEventListener('keydown', function(e) {
   }
 });
 
+async function initializeDeployment() {
+  const d = window.__deploymentConfig;
+  if (!d?.repo) return;
+  const parsed = new URL(d.repo);
+  if (parsed.hostname !== 'github.com') throw new Error('Deployment repository must be a GitHub repository.');
+  const parts = parsed.pathname.split('/').filter(Boolean);
+  if (parts.length < 2) throw new Error('Invalid GitHub deployment repository.');
+  const owner = parts[0], repo = parts[1].replace(/\.git$/,'');
+  let fs = null;
+  const downloadRevision = async ref => {
+    const archiveUrl = `https://codeload.github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/zip/${encodeURIComponent(ref).replace(/%2F/g,'/')}`;
+    const archive = await browserNetwork.request(archiveUrl, undefined, {}, 'deployment');
+    if (!archive?.ok) throw new Error('GitHub deployment download failed.');
+    return await FileSystem.create(new File([await archive.blob()], `${repo}.zip`, {type:'application/zip'}), {sync:false});
+  };
+  fs = await downloadRevision(d.commit && d.commit !== 'latest' ? d.commit : (d.branch || 'main'));
+  let meta = {}, run = {};
+  try { meta = JSON.parse(fs.readFileSync('.editor/project.json','utf8') || '{}'); } catch (_) {}
+  try { run = JSON.parse(fs.readFileSync('.editor/config.json','utf8') || '{}'); } catch (_) {}
+  const saved = meta.deployment && typeof meta.deployment === 'object' ? meta.deployment : {};
+  if (d.commit !== 'latest' && !d.commit && saved.commit) {
+    fs = await downloadRevision(saved.commit);
+    try { meta = JSON.parse(fs.readFileSync('.editor/project.json','utf8') || '{}'); } catch (_) {}
+    try { run = JSON.parse(fs.readFileSync('.editor/config.json','utf8') || '{}'); } catch (_) {}
+  }
+  const usePeerServer = d.peerServer === null ? !!(meta.deployment?.usePeerServer) : !!d.peerServer;
+  if (usePeerServer) { try { browserNetwork.prependEndpoint(new PeerEndpoint()); } catch (e) { console.warn('Peer network unavailable:', e); } }
+  const target = d.url || saved.url || `${run.domain || 'http://localhost:3000'}${run.path || '/'}`;
+  const targetUrl = new URL(target);
+  const rootfolder = String(run.rootfolder || '/').replace(/^\/+|\/+$/g,'');
+  const runfile = '/' + String(run.runfile || '/index.html').replace(/^\/+/, '');
+  let endpoint;
+  if (run.serverType === 'node') {
+    const emulator = new NodeEmulator({domain:targetUrl.origin, rootfolder, pathPrefix:targetUrl.pathname === '/' ? '/' : targetUrl.pathname.replace(/\/$/,''), filesystem:fs, fileSystemSync:false, network:browserNetwork, env:{NODE_ENV:'production',USER:'browser_user'}});
+    endpoint = emulator.endpoint;
+    if (run.nodeCommand) await emulator.terminalCommand(run.nodeCommand);
+    const ready = await emulator.waitForServer?.(10000,50);
+    if (ready === false) throw new Error('Node deployment did not create a listening server.');
+  } else {
+    endpoint = new StaticEndpoint({domain:targetUrl.origin, path:targetUrl.pathname === '/' ? '/' : targetUrl.pathname.replace(/\/$/,''), rootfolder, runfile, source:fs});
+    await endpoint.loading;
+  }
+  if (usePeerServer) {
+    const layer = String(d.peerLayer || meta.peerLayer || 'peer').trim() || 'peer';
+    const server = await ensurePeerServer(targetUrl.origin, async()=>endpoint, {peerLayer:layer});
+    window.__deploymentPeerServer = server;
+  }
+  browserNetwork.prependEndpoint(endpoint);
+  appSettings.defaultTab = targetUrl.href;
+}
+
 const startupTab = getStartupUrl();
-if (!browserStartupDeferred) createNewTab(startupTab);
+if (window.__deploymentConfig) {
+  (async()=>{try { await initializeDeployment(); if (!browserStartupDeferred) createNewTab(appSettings.defaultTab || startupTab); } catch(e) { console.error(e); document.title='Deployment Error'; const el=document.createElement('pre'); el.textContent=String(e?.stack||e); el.style.cssText='padding:24px;color:#ddd;background:#111;white-space:pre-wrap;font:13px monospace'; document.body.appendChild(el); }} )();
+} else if (!browserStartupDeferred) createNewTab(startupTab);
 renderBookmarks();
 refreshAllBookmarkIcons();
 updateToolbarUI();

@@ -144,21 +144,13 @@ class Network extends EventHandler {
   }
   async searchEndpoints(callback, type) {
     await wait(1);
-    let endpoints = this.endpoints.slice();
-    if (type === 'ai') {
-      // AI requests always try the browser's default/direct endpoint first.
-      // If it fails, preserve the configured proxy endpoint order for fallback.
-      const defaultEndpoint = endpoints.find(endpoint => endpoint?.__browserDefaultFallback);
-      if (defaultEndpoint) {
-        endpoints = [defaultEndpoint, ...endpoints.filter(endpoint => endpoint !== defaultEndpoint)];
-      }
-    }
+    const endpoints = this.endpoints;
     for (var i = 0; i < endpoints.length; i++) {
       var endp = endpoints[i];
       if (endp?.enabled === false) continue;
       try {
         var response = await callback.call(this, endp);
-        if (!response) continue;
+        if (!response || !response.ok) continue;
         return response;
       } catch (e) {
         console.log('[networkRequest] Endpoint error:', e && e.message || e);

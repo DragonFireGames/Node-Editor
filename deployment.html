@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Deployment</title>
+<style>
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color:#ddd;font:13px system-ui,sans-serif}
+#status{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;color:#999;background:#000;z-index:10;pointer-events:none}
+#status.error{color:#f0a0a8;white-space:pre-wrap;text-align:center;padding:24px;box-sizing:border-box}
+#stage{position:fixed;inset:0;display:none;background:#000}
+#stage.ready{display:block}
+#stage iframe{width:100%;height:100%;border:0;display:block;background:#fff}
+</style>
+<script src="browser/external/jszip.js"></script>
+<script src="browser/lib/filesystem.js"></script>
+<script src="browser/lib/network.js"></script>
+<script src="browser/lib/emulator.js"></script>
+<script src="browser/lib/npm.js"></script>
+<script src="browser/lib/endpoints/app.js"></script>
+<script src="browser/lib/endpoints/static.js"></script>
+<script src="browser/external/peer.js"></script>
+<script>window.__peerLayer = new URLSearchParams(location.search).get('peerLayer') || 'peer';</script>
+<script src="browser/lib/endpoints/peer.js"></script>
+</head>
+<body>
+<div id="stage"></div>
+<div id="status">Loading deployment…</div>
+<script>
+window.__deploymentNetworkReady = (async function() {
+  const workers = await fetch('workers.json',{cache:'no-store'}).then(async r => {
+    if (!r.ok) throw new Error(`Failed to load workers.json (${r.status}).`);
+    return await r.json();
+  }).catch(e => {
+    console.error(e);
+    return {proxy:''};
+  });
+  window.WorkerConfig = workers;
+  const network = new Network();
+  const native = new NetworkEndpoint();
+  native.__networkRole = 'native';
+  const proxy = new ProxyNetworkEndpoint(String(workers.proxy || ''), true, !!workers.proxy);
+  network.appendEndpoint(native);
+  network.appendEndpoint(proxy);
+  return network;
+})();
+
+(async () => {
+  const status = document.getElementById('status');
+  const stage = document.getElementById('stage');
+  const params = new URLSearchParams(location.search);
+  const githubURL = params.get('github') || params.get('githubUrl') || '';
+  let resolvedCommit = params.get('commit') || params.get('sha') || '';
+  const requestedPath = params.get('path') || params.get('url') || '';
+  let usePeerNetwork = params.has('usePeerNetwork') ? (params.get('usePeerNetwork') === '1' || params.get('usePeerNetwork') === 'true' || params.get('usePeerNetwork') === '') : null;
+  const network = await window.__deploymentNetworkReady;
+
+  function showError(error) {
+    console.error(error);
+    status.textContent = error?.message || String(error);
+    status.className = 'error';
+  }
+  function parseGithub(input) {
+    let url;
+    try { url = new URL(input); } catch (_) { throw new Error('Invalid GitHub URL.'); }
+    if (!/^https?:$/i.test(url.protocol) || !/^(www\.)?github\.com$/i.test(url.hostname)) throw new Error('Deployment requires a GitHub repository URL.');
+    const parts = url.pathname.split('/').filter(Boolean);
+    if (parts.length < 2) throw new Error('Invalid GitHub repository URL.');
+    return {owner:parts[0],repo:parts[1].replace(/\.git$/i,'')};
+  }
+  async function getLatestCommit(owner, repo) {
+    const repoResponse = await network.request(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, undefined, {headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2026-03-10'}}, 'deployment-github-api');
+    if (!repoResponse.ok) throw new Error(`GitHub repository lookup failed (${repoResponse.status}).`);
+    const repoData = await repoResponse.json();
+    const branch = repoData?.default_branch || 'main';
+    const refResponse = await network.request(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/ref/heads/${branch.split('/').map(encodeURIComponent).join('/')}`, undefined, {headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2026-03-10'}}, 'deployment-github-api');
+    if (!refResponse.ok) throw new Error(`GitHub latest commit lookup failed (${refResponse.status}).`);
+    const refData = await refResponse.json();
+    if (!refData?.object?.sha) throw new Error('GitHub did not return a latest commit SHA.');
+    return refData.object.sha;
+  }
+  async function loadArchive(owner, repo, ref) {
+    const codeload = `https://codeload.github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/zip/${encodeURIComponent(ref).replace(/%2F/g,'/')}`;
+    const response = await network.request(codeload, undefined, {}, 'deployment-archive');
+    if (!response.ok) throw new Error(`GitHub archive download failed (${response.status}).`);
+    const blob = await response.blob();
+    if (!blob.size) throw new Error('GitHub returned an empty project archive.');
+    return blob;
+  }
+  function flattenZip(file, projectName, owner = '', revision = '') {
+    return JSZip.loadAsync(file).then(async zip => {
+      const entries = [], tops = new Set(); let rootFile = false;
+      zip.forEach((path, entry) => {
+        const clean = path.replace(/^\/+|\/+$/g,'');
+        if (!clean) return;
+        const parts = clean.split('/');
+        if (parts.length === 1) { if (!entry.dir) rootFile = true; return; }
+        tops.add(parts[0]); entries.push({clean,entry});
+      });
+      if (rootFile || tops.size !== 1 || !entries.length) return file;
+      const root = [...tops][0];
+      const project = String(projectName || '').trim();
+      const ownerName = String(owner || '').trim();
+      const ref = String(revision || '').trim();
+      const candidates = new Set([
+        project,
+        ownerName ? `${ownerName}-${project}` : '',
+        `${project}-main`,
+        `${project}-master`,
+        ownerName ? `${ownerName}-${project}-main` : '',
+        ownerName ? `${ownerName}-${project}-master` : '',
+        ref ? `${project}-${ref}` : '',
+        ownerName && ref ? `${ownerName}-${project}-${ref}` : ''
+      ].filter(Boolean).map(value => value.toLowerCase()));
+      const rl = root.toLowerCase();
+      if (!candidates.has(rl)) return file;
+      const out = new JSZip();
+      for (const item of entries) {
+        if (!item.clean.startsWith(root + '/')) continue;
+        const target = item.clean.slice(root.length + 1);
+        if (!target) continue;
+        if (item.entry.dir) out.folder(target);
+        else out.file(target, await item.entry.async('uint8array'));
+      }
+      const blob = await out.generateAsync({type:'blob'});
+      return new File([blob], file.name || 'project.zip', {type:'application/zip'});
+    });
+  }
+  function readJSON(fs, path) {
+    try { return fs.existsSync(path) ? JSON.parse(fs.readFileSync(path,'utf8') || '{}') : {}; }
+    catch (_) { return {}; }
+  }
+  function normalizeRoot(value) { return '/' + String(value || '/').replace(/^\/+|\/+$/g,''); }
+  function normalizePath(value) {
+    let s = String(value || '/').trim();
+    if (!s) return '/';
+    try {
+      const url = new URL(s, 'http://deployment.local');
+      s = url.pathname || '/';
+      if (!s.startsWith('/')) s = '/' + s;
+      const suffix = (url.search || '') + (url.hash || '');
+      return (s === '/' ? '/' : s.replace(/\/+$/,'')) + suffix;
+    } catch (_) {
+      if (!s.startsWith('/')) s = '/' + s;
+      return s === '/' ? '/' : s.replace(/\/+$/,'');
+    }
+  }
+  function pathParts(value) {
+    const raw = normalizePath(value);
+    const match = raw.match(/^([^?#]*)([?#].*)?$/);
+    return {pathname:match?.[1] || '/', suffix:match?.[2] || ''};
+  }
+  function normalizeDomain(value) {
+    let s = String(value || 'http://localhost:3000/').trim();
+    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) s = 'http://' + s;
+    try { return new URL(s).origin; } catch (_) { return 'http://localhost:3000'; }
+  }
+  async function main() {
+    if (!githubURL) throw new Error('Deployment requires a github query parameter.');
+    const repo = parseGithub(githubURL);
+    if (!resolvedCommit) {
+      status.textContent = 'Resolving latest commit…';
+      resolvedCommit = await getLatestCommit(repo.owner, repo.repo);
+    }
+    status.textContent = 'Downloading commit…';
+    let blob = await loadArchive(repo.owner, repo.repo, resolvedCommit);
+    let file = await flattenZip(new File([blob], repo.repo + '.zip', {type:'application/zip'}), repo.repo, repo.owner, resolvedCommit);
+    let fs = await FileSystem.create(file, {sync:false});
+    let deploymentConfig = readJSON(fs, '/.editor/deployment.json');
+    let savedBranch = String(deploymentConfig.branch || '').trim();
+    let savedCommit = String(deploymentConfig.commit || '').trim();
+    if (!params.has('branch') && savedBranch && savedBranch !== repo.repo && savedBranch !== 'main') {
+      const branchRef = savedCommit || savedBranch;
+      if (branchRef && branchRef !== resolvedCommit) {
+        status.textContent = 'Loading saved deployment revision…';
+        resolvedCommit = branchRef;
+        blob = await loadArchive(repo.owner, repo.repo, resolvedCommit);
+        file = await flattenZip(new File([blob], repo.repo + '.zip', {type:'application/zip'}), repo.repo, repo.owner, resolvedCommit);
+        fs = await FileSystem.create(file, {sync:false});
+        deploymentConfig = readJSON(fs, '/.editor/deployment.json');
+      }
+    } else if (!params.has('commit') && savedCommit && savedCommit !== resolvedCommit) {
+      status.textContent = 'Loading saved deployment commit…';
+      resolvedCommit = savedCommit;
+      blob = await loadArchive(repo.owner, repo.repo, resolvedCommit);
+      file = await flattenZip(new File([blob], repo.repo + '.zip', {type:'application/zip'}), repo.repo, repo.owner, resolvedCommit);
+      fs = await FileSystem.create(file, {sync:false});
+      deploymentConfig = readJSON(fs, '/.editor/deployment.json');
+    }
+    const runConfig = readJSON(fs, '.editor/config.json');
+    const projectMeta = readJSON(fs, '.editor/project.json');
+    const type = runConfig.serverType === 'node' ? 'node' : 'static';
+    const domain = normalizeDomain(runConfig.domain);
+    const path = normalizePath(requestedPath || deploymentConfig.url || runConfig.path);
+    const savedPeerNetwork = !!deploymentConfig.usePeerServer || !!projectMeta?.deployment?.usePeerServer;
+    if (usePeerNetwork === null) usePeerNetwork = savedPeerNetwork;
+    const pathInfo = pathParts(path);
+    const runtimePath = pathInfo.pathname || '/';
+    const root = normalizeRoot(runConfig.rootfolder);
+    let runtime;
+    let peerServer = null;
+    if (type === 'static') {
+      runtime = new StaticEndpoint({domain, path:runtimePath, rootfolder:root, runfile:runConfig.runfile || '/index.html', filesystem:fs});
+      network.prependEndpoint(runtime);
+      await runtime.loading;
+    } else {
+      runtime = new NodeEmulator({
+        domain,
+        rootfolder:root,
+        pathPrefix:runtimePath,
+        filesystem:fs,
+        fileSystemSync:false,
+        network,
+        cwd:runConfig.cwd || '/',
+        env:{NODE_ENV:'production',USER:'watermelonkatana_user'}
+      });
+      network.prependEndpoint(runtime.endpoint);
+      await runtime.ready;
+      if (runConfig.nodeCommand) await runtime.terminalCommand(runConfig.nodeCommand);
+      if (!await runtime.waitForServer?.(10000,50)) throw new Error('Node command finished, but no listening server was created.');
+      if (usePeerNetwork) {
+        const layer = String(projectMeta.peerLayer || 'peer').trim() || 'peer';
+        const peerDomain = domain;
+        status.textContent = 'Starting peer server…';
+        peerServer = new PeerServer(runtime.endpoint, peerDomain, {peerLayer:layer});
+        await peerServer.ready;
+        window.addEventListener('beforeunload', () => { try { peerServer?.close?.(); } catch (_) {} });
+      }
+    }
+
+    const iframe = document.createElement('iframe');
+    stage.appendChild(iframe);
+    const pageURL = domain.replace(/\/+$/,'') + path;
+    const page = new PageEmulator(iframe, {network, location:{url:pageURL,origin:domain}, history:[]});
+    function deploymentURL(target) {
+      const resolved = new URL(target, page.location.url);
+      const current = new URL(location.href);
+      const targetPath = normalizePath(resolved.pathname + resolved.search + resolved.hash);
+      current.searchParams.delete('githubUrl');
+      current.searchParams.delete('sha');
+      current.searchParams.set('github', githubURL);
+      current.searchParams.set('commit', resolvedCommit);
+      current.searchParams.delete('path');
+      current.searchParams.delete('url');
+      if (usePeerNetwork) current.searchParams.set('usePeerNetwork', 'true');
+      else current.searchParams.delete('usePeerNetwork');
+      current.searchParams.set('path', targetPath);
+      return current.href;
+    }
+    function navigateReal(target, replace = false) {
+      const resolved = new URL(target, page.location.url);
+      if (resolved.origin !== domain) {
+        if (replace) location.replace(resolved.href);
+        else location.assign(resolved.href);
+        return true;
+      }
+      const href = deploymentURL(resolved.href);
+      if (replace) location.replace(href);
+      else location.assign(href);
+      return true;
+    }
+    page.interceptEvent('navigate', url => navigateReal(url, false));
+    page.interceptEvent('open', (url, activateTab) => {
+      const resolved = new URL(url, page.location.url);
+      if (resolved.origin !== domain) return window.open(resolved.href, '_blank', 'noopener');
+      const popup = window.open(deploymentURL(resolved.href), '_blank', 'noopener');
+      if (activateTab === false && popup) { try { popup.opener = null; } catch (_) {} }
+      return popup || true;
+    });
+    try {
+      const canonical = new URL(location.href);
+      canonical.searchParams.delete('githubUrl');
+      canonical.searchParams.delete('sha');
+      canonical.searchParams.set('github', githubURL);
+      canonical.searchParams.set('commit', resolvedCommit);
+      canonical.searchParams.delete('path');
+      canonical.searchParams.delete('url');
+      const initialParts = pathParts(path);
+      canonical.searchParams.set('path', initialParts.pathname + initialParts.suffix);
+      history.replaceState({}, document.title, canonical.pathname + canonical.search + canonical.hash);
+    } catch (_) {}
+    status.textContent = 'Starting project…';
+    const response = await network.request(pageURL, location.origin, {}, 'deployment');
+    if (!response?.ok) throw new Error(`Project entry page failed to load (${response?.status || 'no response'}).`);
+    const html = await response.text();
+    await page.setDocument(html, true, pageURL);
+    stage.classList.add('ready');
+    status.remove();
+  }
+  main().catch(showError);
+})();
+</script>
+</body>
+</html>

@@ -7,7 +7,7 @@
     throw new Error("PeerJS is required before peer.js.");
   }
 
-  const layer = window.__peerLayer || (v=>{try{return eval(v)}catch(e){return v}})(document.currentScript.getAttribute('data-layer')) || "peer";
+  let layer = window.__peerLayer || (v=>{try{return eval(v)}catch(e){return v}})(document.currentScript?.getAttribute('data-layer')) || "peer";
   console.log(`Peer layer '${layer}'`);
 
   const clientPeerId = layer + "-client-" + randomId();
@@ -430,6 +430,8 @@
   class PeerServer extends (typeof EventHandler !== 'undefined' ? EventHandler : class {}) {
     constructor(endpoint,domain,options = {}) {
       super();
+      const serverLayer = String(options.peerLayer || layer || 'peer').trim() || 'peer';
+      layer = serverLayer;
       if (!endpoint || typeof endpoint.handleRequest !== 'function') {
         throw new TypeError("PeerServer requires a NetworkEndpoint.");
       }
@@ -755,6 +757,7 @@
 
         try {
           await server.ready;
+          try { window.keepAlive?.enable?.(); window.keepAlive?.start?.(); } catch (_) {}
         } catch (error) {
           server = null;
           endpoint = null;
@@ -796,6 +799,7 @@
         if (server) server.close();
         server = null;
         endpoint = null;
+        try { window.keepAlive?.disable?.(); } catch (_) {};
       }
     };
   }

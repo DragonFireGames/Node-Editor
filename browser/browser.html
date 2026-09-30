@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Proxy Site Browser & DevTools Sandbox</title>
     <script src="style/tailwind.js"></script>
-    <script>window.__workersConfigReady=fetch((()=>{const u=new URL(location.href);if(!u.pathname.endsWith('/'))u.pathname=u.pathname.slice(0,u.pathname.lastIndexOf('/')+1);u.pathname+='workers.json';return u.href;})(),{cache:'no-store'}).then(async r=>{if(!r.ok)throw new Error('Failed to load ../workers.json ('+r.status+')');const c=await r.json();if(!c||typeof c!=='object')throw new Error('Invalid workers.json');window.WorkerConfig=c;return c;}).catch(e=>{console.error(e);window.WorkerConfig={proxy:'',github:''};return window.WorkerConfig;});</script>
+    <script>window.__workersConfigReady=fetch('../workers.json',{cache:'no-store'}).then(async r=>{if(!r.ok)throw new Error('Failed to load ../workers.json ('+r.status+')');const c=await r.json();if(!c||typeof c!=='object')throw new Error('Invalid workers.json');window.WorkerConfig=c;return c;}).catch(e=>{console.error(e);window.WorkerConfig={proxy:'',github:''};return window.WorkerConfig;});</script>
     <link rel="stylesheet" href="style/fontawesome.css">
     <link rel="stylesheet" href="style/browser.css">
     <script src="external/acorn.js"></script>
@@ -24,6 +24,7 @@
     <script src="lib/keepalive.js"></script>
   </head>
   <style>
+    html.deployment-mode #tab-strip,html.deployment-mode #nav-bar,html.deployment-mode #bookmarks-bar,html.deployment-mode #browser-chrome-reveal{display:none!important}html.deployment-mode #main-viewport-area{position:fixed;inset:0}html.deployment-mode #viewport-container{width:100%;height:100%;}html.deployment-mode .tab-iframe{width:100%;height:100%;}
     .dt-subtab { border: 0; background: transparent; color: #9ca3af; padding: 3px 7px; border-radius: 3px; font-size: 10px; cursor: pointer; white-space: nowrap; }
     .dt-subtab:hover { color: #fff; background: #2b2d31; }
     .dt-subtab.active { color: #a5b4fc; background: #1e1f22; box-shadow: inset 0 -1px 0 #6366f1; }
@@ -160,6 +161,13 @@
 
     <script src="console.js"></script>
     <script src="devtools.js"></script>
+    <script>
+      (function(){
+        const q=new URLSearchParams(location.search); if(q.get('deploy')!=='1') return;
+        document.documentElement.classList.add('deployment-mode');
+        window.__deploymentConfig={repo:q.get('github')||'',branch:q.get('branch')||'',commit:q.get('commit')||'',url:q.get('url')||'',peerServer:q.has('peerServer') ? q.get('peerServer')==='1' : null,peerLayer:q.get('peerLayer')||'peer'};
+      })();
+    </script>
     <script>window.__workersConfigReady.then(function(workers){window.WorkerConfig=workers;var script=document.createElement('script');script.src='browser.js';document.body.appendChild(script);}).catch(console.error);</script>
   </body>
 </html>
