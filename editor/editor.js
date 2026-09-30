@@ -9,14 +9,6 @@
         const primaryProxy = new ProxyNetworkEndpoint('https://proxy.dragonfire7z.workers.dev/', true);
         const fallbackProxy = new ProxyNetworkEndpoint('', true, false);
         const defaultFallback = new NetworkEndpoint();
-        const directFallbackRequest = defaultFallback.handleRequest.bind(defaultFallback);
-        defaultFallback.handleRequest = async function(request, type) {
-          try {
-            const url = new URL(request.url);
-            if (url.protocol === 'http:' || url.protocol === 'https:') return null;
-          } catch (_) {}
-          return await directFallbackRequest(request, type);
-        };
         defaultFallback.__browserDefaultFallback = true;
         sharedNetwork.appendEndpoint(primaryProxy);
         sharedNetwork.appendEndpoint(fallbackProxy);
@@ -1203,6 +1195,156 @@
       logError(e);
     }
   }
+  function remoteProjectName(url, fallback = 'Remote Project') {
+    try {
+      const u = new URL(url);
+      const parts = u.pathname.split('/').filter(Boolean);
+      let name = parts[parts.length - 1] || fallback;
+      name = name.replace(/\.git$/i, '').replace(/\.zip$/i, '');
+      return decodeURIComponent(name) || fallback;
+    } catch (_) {
+      return fallback;
+    }
+  }
+  function githubArchiveCandidates(input) {
+    let u;
+    try { u = new URL(input); } catch (_) { return []; }
+    if (!/^https?:$/i.test(u.protocol) || !/^(www\.)?github\.com$/i.test(u.hostname)) return [];
+    const parts = u.pathname.split('/').filter(Boolean);
+    if (parts.length < 2) return [];
+    const owner = parts[0];
+    let repo = parts[1].replace(/\.git$/i, '');
+    if (!owner || !repo) return [];
+    let branch = '';
+    if (parts[2] === 'tree' && parts[3]) branch = parts.slice(3).join('/');
+    const encodedOwner = encodeURIComponent(owner);
+    const encodedRepo = encodeURIComponent(repo);
+    const out = [];
+    if (branch) out.push(`https://codeload.github.com/${encodedOwner}/${encodedRepo}/zip/refs/heads/${branch}`);
+    out.push(`https://codeload.github.com/${encodedOwner}/${encodedRepo}/zip/refs/heads/main`);
+    out.push(`https://codeload.github.com/${encodedOwner}/${encodedRepo}/zip/refs/heads/master`);
+    return [...new Set(out)];
+  }
+  function remoteProjectCandidates(input) {
+    const raw = String(input || '').trim();
+    if (!raw) return [];
+    let url;
+    try {
+      url = new URL(raw, document.baseURI);
+    } catch (_) {
+      return [];
+    }
+    if (!/^https?:$/i.test(url.protocol)) return [];
+    const github = githubArchiveCandidates(raw);
+    if (github.length) return github;
+    return [url.href];
+  }
+  async function fetchRemoteProject(url) {
+    if (!state.browserNetwork?.request) throw new Error('Network is not initialized.');
+    const candidates = remoteProjectCandidates(url);
+    if (!candidates.length) throw new Error('Enter a GitHub repository URL or an HTTP(S) URL to a ZIP file.');
+    let lastStatus = '';
+    for (const candidate of candidates) {
+      try {
+        const response = await state.browserNetwork.request(candidate, location.origin, {}, 'project-import');
+        if (!response) continue;
+        if (!response.ok) {
+          lastStatus = `${response.status} ${response.statusText || ''}`.trim();
+          continue;
+        }
+        const blob = await response.blob();
+        if (!blob.size) {
+          lastStatus = 'empty response';
+          continue;
+        }
+        const name = remoteProjectName(url);
+        const file = new File([blob], name + '.zip', {type: 'application/zip'});
+        return {file, name, source: candidate};
+      } catch (e) {
+        lastStatus = e?.message || String(e);
+      }
+    }
+    throw new Error(`Failed to load remote project${lastStatus ? ` (${lastStatus})` : ''}.`);
+  }
+  function closeRemoteImportModal(options = {}) {
+    document.getElementById('remoteImportModal')?.remove();
+    if (options.returnToChooser) showProjectChooser(options.chooserOptions || {}).catch(logError);
+  }
+  function finishRemoteImport() {
+    document.getElementById('remoteImportModal')?.remove();
+  }
+  async function importRemoteProject(input, options = {}) {
+    try {
+      const remote = await fetchRemoteProject(input);
+      const fs = await FileSystem.create(remote.file, {sync:false});
+      await replaceFileSystem(fs, remote.name || 'Remote Project', true);
+      finishRemoteImport();
+      return true;
+    } catch (e) {
+      options.onError?.(e);
+      return false;
+    }
+  }
+  async function openRemoteImportModal(options = {}) {
+    if (!options.skipGuard && !(await confirmWorkspaceSwitch('opening another workspace'))) return;
+    if (document.getElementById('remoteImportModal')) return;
+    const modal = document.createElement('div');
+    modal.id = 'remoteImportModal';
+    modal.className = 'editor-modal';
+    modal.innerHTML = `<div class="editor-modal-content remote-import-modal">
+    <button class="editor-modal-close" aria-label="Close">×</button>
+    <h2>Open Remote Project</h2><p>Paste a GitHub repository URL or a direct HTTP(S) ZIP URL.</p>
+    <label class="remote-import-label">Project URL<input class="remote-import-input" type="text" placeholder="https://github.com/user/repository or https://example.com/project.zip" spellcheck="false" autocomplete="off"></label>
+    <div class="remote-import-hint">GitHub repositories are downloaded from their default branch. A URL ending in <code>.zip</code> is loaded directly.</div>
+    <div class="editor-modal-actions">
+      <button class="remote-import-cancel">Cancel</button>
+      <button class="remote-import-open primary">Open Remote Project</button>
+    </div>
+  </div>`;
+    document.body.appendChild(modal);
+    const input = modal.querySelector('.remote-import-input');
+    const open = modal.querySelector('.remote-import-open');
+    const cancel = modal.querySelector('.remote-import-cancel');
+    let busy = false;
+    const close = () => closeRemoteImportModal({returnToChooser: options.returnToChooser, chooserOptions: options.chooserOptions});
+    const showError = e => {
+      modal.querySelector('.remote-import-error')?.remove();
+      const error = document.createElement('div');
+      error.className = 'remote-import-error';
+      error.textContent = e?.message || String(e);
+      modal.querySelector('.remote-import-hint')?.after(error);
+    };
+    const submit = async () => {
+      if (busy) return;
+      const value = input.value.trim();
+      if (!value) { input.focus(); return; }
+      busy = true;
+      input.disabled = true;
+      open.disabled = true;
+      cancel.disabled = true;
+      open.textContent = 'Loading…';
+      modal.querySelector('.remote-import-error')?.remove();
+      const ok = await importRemoteProject(value, {
+        onError: showError,
+        returnToChooser: options.returnToChooser,
+        chooserOptions: options.chooserOptions
+      });
+      if (!ok) {
+        busy = false;
+        input.disabled = false;
+        open.disabled = false;
+        cancel.disabled = false;
+        open.textContent = 'Open Remote Project';
+        input.focus();
+      }
+    };
+    modal.querySelector('.editor-modal-close').onclick = close;
+    cancel.onclick = close;
+    open.onclick = submit;
+    input.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } else if (e.key === 'Escape') { e.preventDefault(); close(); } };
+    modal.addEventListener('click', e => { if (e.target === modal) close(); });
+    requestAnimationFrame(() => { modal.classList.add('show'); input.focus(); });
+  }
   async function openImportModal(options = {}) {
     if (!options.skipGuard && !(await confirmWorkspaceSwitch('opening another workspace'))) return;
     if (document.getElementById('importModal')) return;
@@ -1211,7 +1353,7 @@
     modal.className = 'editor-modal';
     modal.innerHTML = `<div class="editor-modal-content import-source-modal">
     <button class="editor-modal-close" aria-label="Close">×</button>
-    <h2>Open Workspace</h2><p>Drop a ZIP, files, or a folder here, or choose a source.</p>
+    <h2>Open Local Project</h2><p>Drop a ZIP, files, or a folder here, or choose a source.</p>
     <div class="import-dropzone">Drop ZIP / files / folder here</div>
     <div class="editor-modal-actions">
       <button data-source="zip">ZIP File</button>
@@ -1369,7 +1511,7 @@
     const canClose = !!options.canClose;
     const modal = document.createElement('div');
     modal.className = 'editor-modal startup-modal';
-    modal.innerHTML = `<div class="editor-modal-content startup-content">${canClose ? '<button class="editor-modal-close startup-close" aria-label="Close">×</button>' : ''}<h2>Projects</h2><p>Create a new project, continue working on a recent project, or open a project file.</p><div class="startup-templates" data-templates></div><div class="startup-section"><div class="startup-section-header"><h3>Recent Projects</h3><button class="startup-clear" data-clear>Clear Cache</button></div><div class="startup-list" data-recent-list></div></div><div class="editor-modal-actions"><button data-open>Open Project…</button></div></div>`;
+    modal.innerHTML = `<div class="editor-modal-content startup-content">${canClose ? '<button class="editor-modal-close startup-close" aria-label="Close">×</button>' : ''}<h2>Projects</h2><p>Create a new project, continue working on a recent project, or open a project file.</p><div class="startup-templates" data-templates></div><div class="startup-section"><div class="startup-section-header"><h3>Recent Projects</h3><button class="startup-clear" data-clear>Clear Cache</button></div><div class="startup-list" data-recent-list></div></div><div class="startup-open-actions"><button data-open>Open Local Project…</button><button data-open-remote>Open Remote Project…</button></div></div>`;
     document.body.appendChild(modal);
     const listEl = modal.querySelector('[data-recent-list]');
     const clearButton = modal.querySelector('[data-clear]');
@@ -1444,6 +1586,12 @@
       busy = true;
       modal.remove();
       openImportModal({skipGuard:true, returnToChooser:true, chooserOptions:{canClose}}).catch(logError);
+    };
+    modal.querySelector('[data-open-remote]').onclick = () => {
+      if (busy) return;
+      busy = true;
+      modal.remove();
+      openRemoteImportModal({skipGuard:true, returnToChooser:true, chooserOptions:{canClose}}).catch(logError);
     };
     if (canClose) {
       modal.querySelector('.startup-close').onclick = () => {

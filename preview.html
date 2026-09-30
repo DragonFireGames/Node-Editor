@@ -27,8 +27,7 @@
       defaultFallback.handleRequest = async function(request, type) {
         try {
           const url = new URL(request.url);
-          if (url.protocol === 'http:' || url.protocol === 'https:') return null;
-        } catch (_) {}
+          } catch (_) {}
 
         return await directFallbackRequest(request, type);
       };

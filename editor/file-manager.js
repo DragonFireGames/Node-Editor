@@ -317,6 +317,8 @@
         };
         li.draggable = true;
         li.ondragstart = e => {
+          const sourceLi = e.target?.closest?.('li[data-path]');
+          if (sourceLi !== li) return;
           if (!this.selectedNodes.has(child.path)) this.select(child);
           const paths = [...this.selectedNodes];
           e.dataTransfer.setData('text/plain', JSON.stringify(paths));
@@ -332,6 +334,7 @@
         li.ondragleave = () => li.classList.remove('draghover');
         li.ondrop = e => {
           e.preventDefault();
+          e.stopPropagation();
           li.classList.remove('draghover');
           const browserToken = e.dataTransfer.getData('application/x-proxy-download');
           if (browserToken) {
