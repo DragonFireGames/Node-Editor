@@ -39,10 +39,13 @@
         <div class="source-control-head"><div class="activity-sidebar-title">Source Control</div><button data-refresh title="Refresh">↻</button></div>
         ${local ? `<section class="source-control-section"><div class="source-control-section-title">GitHub repository</div><div class="source-control-local-hint">This project is local.</div><button data-create-local-repo class="source-control-create-repo">Create GitHub Repository</button><div class="source-control-create-panel" data-create-panel hidden><label>Repository name<input data-create-name type="text" placeholder="my-game" spellcheck="false"></label><label>Description<input data-create-description type="text" placeholder="Optional"></label><label class="source-control-private"><input data-create-private type="checkbox"> Private repository</label><div class="source-control-create-actions"><button data-create-cancel>Cancel</button><button data-create-confirm class="primary">Create Repository</button></div></div></section>` : ''}
         <section class="source-control-section">
-          <div class="source-control-label">Repository</div>
+          <div class="source-control-label">Repository <button data-create-repo class="source-control-inline-action">+ New</button></div>
           <div class="source-control-select-row"><select data-repo ${repos.length ? '' : 'disabled'}><option value="">${repos.length ? 'Select repository…' : 'Loading repositories…'}</option>${repos.map(r => `<option value="${esc(r.fullName)}" ${r.fullName === `${selected.owner}/${selected.repo}` ? 'selected' : ''}>${esc(r.fullName)}${r.private ? ' · private' : ''}</option>`).join('')}</select><button data-repo-refresh title="Refresh repositories">↻</button></div>
-          <div class="source-control-select-row"><select data-branch ${branches.length ? '' : 'disabled'}><option value="">${branches.length ? 'Select branch…' : (hasRepo ? 'Loading branches…' : 'Select repository first')}</option>${branches.map(b => `<option value="${esc(b)}" ${b === selected.branch ? 'selected' : ''}>${esc(b)}</option>`).join('')}<option value="__create__">+ Create new branch…</option></select><button data-branch-refresh title="Refresh branches">↻</button></div>
+          <div class="source-control-label">Branch</div>
+          <div class="source-control-select-row"><select data-branch ${branches.length ? '' : 'disabled'}><option value="">${branches.length ? 'Select branch…' : (hasRepo ? 'Loading branches…' : 'Select repository first')}</option>${branches.map(b => `<option value="${esc(b)}" ${b === selected.branch ? 'selected' : ''}>${esc(b)}</option>`).join('')}</select><button data-branch-new title="Create branch" ${hasRepo && branches.length ? '' : 'disabled'}>+</button><button data-branch-refresh title="Refresh branches" ${hasRepo ? '' : 'disabled'}>↻</button></div>
+          <div class="source-control-branch-status" data-branch-status></div>
         </section>
+        ${hasRepo ? `<div class="source-control-create-panel" data-create-panel-remote hidden><label>Repository name<input data-create-name-remote type="text" placeholder="my-game" spellcheck="false"></label><label>Description<input data-create-description-remote type="text" placeholder="Optional"></label><label class="source-control-private"><input data-create-private-remote type="checkbox"> Private repository</label><div class="source-control-create-actions"><button data-create-cancel-remote>Cancel</button><button data-create-confirm-remote class="primary">Create Repository</button></div></div>` : ''}
         ${hasRepo ? `<section class="source-control-section"><div class="source-control-section-title">Changes</div><div data-changes class="source-control-changes"><div class="source-control-loading">Checking working tree…</div></div><textarea data-commit-message placeholder="Commit message" rows="3"></textarea><button class="source-control-commit" data-commit disabled>Commit & Push</button><div data-status class="source-control-status"></div></section><section class="source-control-section"><div class="source-control-section-title">History</div><div data-history class="source-control-history"><div class="source-control-loading">Loading commits…</div></div></section>` : `<div class="source-control-empty"><strong>Select a repository</strong><span>Once a repository is selected, the editor compares this workspace against the selected branch.</span></div>`}
       </div>`;
 
@@ -50,8 +53,42 @@
       tree.querySelector('[data-repo-refresh]')?.addEventListener('click', () => loadRepositories(true));
       tree.querySelector('[data-branch-refresh]')?.addEventListener('click', () => selected.repo && loadBranches(true));
       const createLocalButton = tree.querySelector('[data-create-local-repo]');
+      const createRepoButton = tree.querySelector('[data-create-repo]');
       const createPanel = tree.querySelector('[data-create-panel]');
-      createLocalButton?.addEventListener('click', () => { createPanel.hidden = !createPanel.hidden; if (!createPanel.hidden) createPanel.querySelector('[data-create-name]')?.focus(); });
+      const remoteCreatePanel = tree.querySelector('[data-create-panel-remote]');
+      const openCreateRepo = () => {
+        const panel = createPanel || remoteCreatePanel;
+        if (!panel) return;
+        panel.hidden = false;
+        panel.querySelector('[data-create-name], [data-create-name-remote]')?.focus();
+      };
+      createLocalButton?.addEventListener('click', openCreateRepo);
+      createRepoButton?.addEventListener('click', openCreateRepo);
+      remoteCreatePanel?.querySelector('[data-create-cancel-remote]')?.addEventListener('click', () => { remoteCreatePanel.hidden = true; });
+      remoteCreatePanel?.querySelector('[data-create-confirm-remote]')?.addEventListener('click', async e => {
+        const name = remoteCreatePanel.querySelector('[data-create-name-remote]')?.value.trim();
+        const description = remoteCreatePanel.querySelector('[data-create-description-remote]')?.value.trim();
+        const privateRepo = !!remoteCreatePanel.querySelector('[data-create-private-remote]')?.checked;
+        const button = e.currentTarget;
+        if (!name) { remoteCreatePanel.querySelector('[data-create-name-remote]')?.focus(); return; }
+        button.disabled = true; button.textContent = 'Creating…';
+        try {
+          const created = await github.createRepository({name, description, privateRepo, autoInit:false});
+          const owner = created?.owner?.login || github.getUser()?.login;
+          const repo = created?.name || name;
+          const branch = created?.default_branch || 'main';
+          if (!owner || !repo) throw new Error('GitHub did not return the new repository details.');
+          state.gitRemote = {provider:'github', owner:String(owner), repo:String(repo), branch:String(branch)};
+          state.saveProjectMetadata?.();
+          selected = {owner:String(owner), repo:String(repo), branch:String(branch)};
+          branches = [];
+          remoteCreatePanel.hidden = true;
+          await loadRepositories(true);
+          await loadBranches(true);
+          await refreshStatus();
+          await loadHistory();
+        } catch (e) { button.disabled = false; button.textContent = 'Create Repository'; showStatus(e.message || String(e), true); }
+      });
       createPanel?.querySelector('[data-create-cancel]')?.addEventListener('click', () => { createPanel.hidden = true; });
       createPanel?.querySelector('[data-create-confirm]')?.addEventListener('click', async () => {
         const name = createPanel.querySelector('[data-create-name]')?.value.trim();
@@ -99,26 +136,33 @@
       });
       tree.querySelector('[data-branch]')?.addEventListener('change', async e => {
         const value = e.target.value;
-        if (value === '__create__') {
-          e.target.value = selected.branch || 'main';
-          const name = prompt(`Create a new branch from ${selected.branch || 'main'}:`);
-          if (!name?.trim()) return;
-          try {
-            const created = await github.createBranch(selected.owner, selected.repo, selected.branch || 'main', name.trim());
-            const newBranch = created?.ref?.split('/').slice(2).join('/') || name.trim();
-            selected.branch = newBranch;
-            state.gitRemote = {provider:'github', owner:selected.owner, repo:selected.repo, branch:newBranch};
-            state.saveProjectMetadata?.();
-            branches = [];
-            await loadBranches(true);
-            await refreshStatus();
-            await loadHistory();
-          } catch (err) { showStatus(err.message || String(err), true); }
-          return;
-        }
-        selected.branch = value || 'main';
+        if (!value) return;
+        selected.branch = value;
         persistSelection();
         void refreshStatus(); void loadHistory();
+      });
+      tree.querySelector('[data-branch-new]')?.addEventListener('click', async e => {
+        if (!selected.repo || !selected.owner) return;
+        const button = e.currentTarget;
+        const status = tree.querySelector('[data-branch-status]');
+        const name = prompt(`Create a new branch from ${selected.branch || 'main'}:`);
+        if (!name?.trim()) return;
+        button.disabled = true;
+        if (status) status.textContent = 'Creating branch…';
+        try {
+          const created = await github.createBranch(selected.owner, selected.repo, selected.branch || 'main', name.trim());
+          const newBranch = created?.ref?.split('/').slice(2).join('/') || name.trim();
+          selected.branch = newBranch;
+          state.gitRemote = {provider:'github', owner:selected.owner, repo:selected.repo, branch:newBranch};
+          state.saveProjectMetadata?.();
+          branches = [];
+          await loadBranches(true);
+          await refreshStatus();
+          await loadHistory();
+        } catch (err) {
+          if (status) status.textContent = err.message || String(err);
+          showStatus(err.message || String(err), true);
+        } finally { button.disabled = false; }
       });
       tree.querySelector('[data-commit]')?.addEventListener('click', () => void commit());
     }
@@ -198,6 +242,6 @@
     function showStatus(message,error=false) { const el=tree.querySelector('[data-status]'); if(!el)return; el.textContent=message||''; el.classList.toggle('error',!!error); }
     function clearStatus() { showStatus(''); }
     function show() { syncSelection(); renderShell(); void refresh(); }
-    return {show};
+    return {show, refresh};
   };
 })();
