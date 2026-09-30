@@ -34,7 +34,19 @@
           <div class="github-profile-hint">Off keeps the access token in session storage. On keeps it in local storage.</div>
         </section>
       </div>`;
-      tree.querySelector('[data-github-install]')?.addEventListener('click', () => github.installApp());
+      tree.querySelector('[data-github-install]')?.addEventListener('click', async e => {
+        const button = e.currentTarget;
+        button.disabled = true;
+        button.textContent = 'Waiting for installation…';
+        installation = null;
+        render();
+        try {
+          github.installApp();
+          const installed = await github.waitForInstallation?.();
+          installation = installed ? true : await github.isAppInstalled?.();
+        } catch (_) { installation = false; }
+        render();
+      });
       const signIn = tree.querySelector('[data-github-signin]');
       signIn?.addEventListener('click', async () => {
         signIn.disabled = true; signIn.textContent = 'Opening GitHub…';

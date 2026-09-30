@@ -2515,7 +2515,11 @@ async function initializeDeployment() {
     try { run = JSON.parse(fs.readFileSync('.editor/config.json','utf8') || '{}'); } catch (_) {}
   }
   const usePeerServer = d.peerServer === null ? !!(meta.deployment?.usePeerServer) : !!d.peerServer;
-  if (usePeerServer) { try { browserNetwork.prependEndpoint(new PeerEndpoint()); } catch (e) { console.warn('Peer network unavailable:', e); } }
+  let peerEndpoint = null;
+  if (usePeerServer) {
+    try { peerEndpoint = new PeerEndpoint(); }
+    catch (e) { console.warn('Peer network unavailable:', e); }
+  }
   const target = d.url || saved.url || `${run.domain || 'http://localhost:3000'}${run.path || '/'}`;
   const targetUrl = new URL(target);
   const rootfolder = String(run.rootfolder || '/').replace(/^\/+|\/+$/g,'');
@@ -2531,12 +2535,13 @@ async function initializeDeployment() {
     endpoint = new StaticEndpoint({domain:targetUrl.origin, path:targetUrl.pathname === '/' ? '/' : targetUrl.pathname.replace(/\/$/,''), rootfolder, runfile, source:fs});
     await endpoint.loading;
   }
-  if (usePeerServer) {
+  browserNetwork.prependEndpoint(endpoint);
+  if (usePeerServer && peerEndpoint) {
     const layer = String(d.peerLayer || meta.peerLayer || 'peer').trim() || 'peer';
     const server = await ensurePeerServer(targetUrl.origin, async()=>endpoint, {peerLayer:layer});
     window.__deploymentPeerServer = server;
+    browserNetwork.prependEndpoint(peerEndpoint);
   }
-  browserNetwork.prependEndpoint(endpoint);
   appSettings.defaultTab = targetUrl.href;
 }
 

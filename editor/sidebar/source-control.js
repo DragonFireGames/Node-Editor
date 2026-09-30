@@ -8,6 +8,7 @@
     let branches = [];
     let selected = loadConfig();
     let refreshToken = 0;
+    let branchLoadToken = 0;
     let selectionProjectId = null;
     function esc(value) { return String(value ?? '').replace(/[&<>\"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\\':'&#39;'}[ch])); }
     function loadConfig() {
@@ -35,6 +36,11 @@
         return;
       }
       selected = loadConfig();
+      if (selected.owner && selected.repo) {
+        state.gitRemote = {provider:'github', owner:String(selected.owner), repo:String(selected.repo), branch:String(selected.branch || 'main')};
+        state.deploymentSettings = {...(state.deploymentSettings || {}), branch: state.deploymentSettings?.branch || String(selected.branch || 'main')};
+        try { state.saveProjectMetadata?.(); } catch (_) {}
+      }
     }
     function show() { syncSelection(); renderShell(); void refresh(); }
     function isLocalProject() { return !state.gitRemote?.provider; }
@@ -82,6 +88,7 @@
           const branch = created?.default_branch || 'main';
           if (!owner || !repo) throw new Error('GitHub did not return the new repository details.');
           setLocalGitRemote(owner, repo, branch);
+          state.runDebugRefresh?.();
           repos = []; branches = [];
           await loadRepositories(true);
           selected = {owner:String(owner), repo:String(repo), branch:String(branch)};
@@ -100,13 +107,14 @@
       tree.querySelector('[data-branch-refresh]')?.addEventListener('click', () => selected.repo && loadBranches(true));
       tree.querySelector('[data-repo]')?.addEventListener('change', async e => {
         const fullName = e.target.value;
-        if (!fullName) { selected = {owner:'', repo:'', branch:'main'}; branches = []; state.gitRemote = null; state.saveProjectMetadata?.(); saveConfig(); state.runDebugRefresh?.(); renderShell(); return; }
+        if (!fullName) { ++branchLoadToken; ++refreshToken; selected = {owner:'', repo:'', branch:'main'}; branches = []; state.gitRemote = null; state.deploymentSettings = {...(state.deploymentSettings || {}), branch:'', commit:''}; state.saveProjectMetadata?.(); saveConfig(); state.runDebugRefresh?.(); renderShell(); return; }
         const [owner, ...repoParts] = fullName.split('/');
         selected = {owner, repo:repoParts.join('/'), branch:repos.find(r => r.fullName === fullName)?.defaultBranch || 'main'};
         state.gitRemote = {provider:'github', owner, repo:selected.repo, branch:selected.branch};
         state.deploymentSettings = {...(state.deploymentSettings || {}), branch: state.deploymentSettings?.branch || selected.branch};
         state.saveProjectMetadata?.(); state.markDirty?.('editor/project.json');
         saveConfig();
+        ++branchLoadToken;
         branches = [];
         renderShell();
         await loadBranches(false);
@@ -135,15 +143,19 @@
     async function loadBranches(force = false) {
       if (!selected.repo || !selected.owner) return;
       if (!force && branches.length) return;
+      const token = ++branchLoadToken;
+      const owner = selected.owner, repo = selected.repo, branch = selected.branch;
       try {
-        branches = await github.listBranches(selected.owner, selected.repo);
-        if (!branches.length) branches = [selected.branch || 'main'];
+        const loaded = await github.listBranches(owner, repo);
+        if (token !== branchLoadToken || selected.owner !== owner || selected.repo !== repo) return;
+        branches = loaded.length ? loaded : [branch || 'main'];
         if (!branches.includes(selected.branch)) selected.branch = branches[0];
         saveConfig();
         renderShell();
         await refreshStatus();
         await loadHistory();
       } catch (e) {
+        if (token !== branchLoadToken || selected.owner !== owner || selected.repo !== repo) return;
         if (e?.status === 409 || e?.status === 404) {
           branches = [selected.branch || 'main'];
           renderShell();

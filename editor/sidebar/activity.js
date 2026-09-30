@@ -77,7 +77,7 @@
         show(entry.kind);
       });
     }
-    const githubUnsubscribe = github?.onChange?.(() => syncProfileButton()) || null;
+    const githubUnsubscribe = github?.onChange?.(() => { syncProfileButton(); state.runDebugRefresh?.(); }) || null;
     syncProfileButton();
     resizer?.addEventListener('mousedown', e => {
       if (e.button !== 0) return;

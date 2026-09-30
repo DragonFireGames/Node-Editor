@@ -92,10 +92,25 @@
   function getUser() { return user; }
   function workerUrl() { return getConfig().workerUrl; }
   function getInstallUrl() { return `https://github.com/apps/${GITHUB_APP_SLUG}/installations/new`; }
+  async function waitForInstallation(timeout = 60000) {
+    const started = Date.now();
+    while (Date.now() - started < timeout) {
+      try {
+        if (await isAppInstalled()) { notify(); return true; }
+      } catch (_) {}
+      await new Promise(resolve => setTimeout(resolve, 1500));
+    }
+    return false;
+  }
   function installApp() {
     const url = getInstallUrl();
     const popup = window.open(url, 'github-app-install', 'popup,width=520,height=720,resizable=yes,scrollbars=yes');
-    if (!popup) location.href = url;
+    if (!popup) { location.href = url; return url; }
+    const watch = setInterval(async () => {
+      if (!popup.closed) return;
+      clearInterval(watch);
+      await waitForInstallation();
+    }, 500);
     return url;
   }
   async function getInstallations() {
@@ -104,7 +119,7 @@
   }
   async function isAppInstalled() {
     if (!getToken()) return false;
-    try { return (await getInstallations()).some(item => String(item?.app?.slug || '').toLowerCase() === GITHUB_APP_SLUG); }
+    try { return (await getInstallations()).some(item => String(item?.app_slug || item?.app?.slug || '').toLowerCase() === GITHUB_APP_SLUG); }
     catch (_) { return false; }
   }
   async function startLogin() {
@@ -441,6 +456,7 @@
   root.startLogin = startLogin;
   root.getInstallUrl = getInstallUrl;
   root.installApp = installApp;
+  root.waitForInstallation = waitForInstallation;
   root.getInstallations = getInstallations;
   root.isAppInstalled = isAppInstalled;
   root.signOut = () => { localStorage.removeItem(PENDING_KEY); clearStoredAuth(); notify(); };

@@ -3031,6 +3031,11 @@
             console.log("Failed to clone 2:", prop);
           }
         });
+        function virtualizeDocumentSelector(selector) {
+          if (typeof selector !== 'string') return selector;
+          return selector.replace(/(^|[,>+~\s])script(\s*)\[src([\s~|^$*]?=)/gi, '$1script$2[data-raw-src$3');
+        }
+
         const documentProxy = new Proxy(documentTarget, {
           has(target, prop) {
             if (prop === 'location') return true;
@@ -3074,8 +3079,20 @@
             }
             
             const value = Reflect.get(document, prop, document);
-            
-            // Handle native methods (like document.getElementById, querySelector, etc.)
+
+            // Virtualized resource attributes are stored in data-raw-* while the
+            // live DOM uses rewritten URLs. Make selector queries see the same
+            // logical attributes that getAttribute()/element.src expose.
+            if (prop === 'querySelector' || prop === 'querySelectorAll') {
+              return function(selector) {
+                const virtualSelector = virtualizeDocumentSelector(selector);
+                const result = value.call(document, virtualSelector);
+                if (prop === 'querySelectorAll') return Array.from(result).map(wrapElement);
+                return wrapElement(result);
+              };
+            }
+
+            // Handle native methods (like document.getElementById, etc.)
             if (isNativeFunction(value) && !value.prototype && prop != 'constructor') {
               return function(){ return wrapElement(value.apply(document, Array.from(arguments).map(v => v == documentProxy ? document : v))); };
             }
