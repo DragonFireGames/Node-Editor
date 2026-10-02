@@ -51,9 +51,13 @@
       tree.style.maxWidth = MAX_WIDTH + 'px';
     }
     function collapse() {
+      const previous = state.sidebar;
       tree.classList.add('activity-collapsed');
       document.querySelectorAll('.activity-button').forEach(x => x.classList.remove('active'));
       scheduleWorkspaceLayoutSave();
+      window.EditorEvents?.emit?.('sidebarChange', {
+        sidebar: null, previous, collapsed: true, tree, button: null
+      }, true);
     }
     function expand() {
       tree.classList.remove('activity-collapsed');
@@ -65,12 +69,17 @@
       const button = Object.entries(activities).find(([, x]) => x === entry)?.[0];
       const same = state.sidebar === kind && !tree.classList.contains('activity-collapsed');
       if (same) { collapse(); return; }
+      const previous = state.sidebar;
       expand();
       explorer.hideContextMenu?.();
       state.sidebar = kind;
       document.querySelectorAll('.activity-button').forEach(x => x.classList.toggle('active', x.id === button));
       entry.show();
       scheduleWorkspaceLayoutSave();
+      window.EditorEvents?.emit?.('sidebarChange', {
+        sidebar: kind, previous, collapsed: false, tree,
+        button: document.getElementById(button) || null
+      }, true);
     }
     for (const [id, entry] of Object.entries(activities)) {
       $(id)?.addEventListener('click', e => {

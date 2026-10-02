@@ -64,6 +64,7 @@
       try {
         this.groups.clear();
         this.nextId = 1;
+        this.activeGroup = null;
         const build = data => {
           if (!data) return null;
           if (data.type === 'group') {
@@ -101,6 +102,7 @@
     createGroup() {
       const g = {
         id: 'group-' + this.nextId++,
+        theme: window.EditorTheme,
         tabs: [],
         active: null,
         el: null,
@@ -215,14 +217,22 @@
     }
     rebuild() {
       this.ensureRoot();
+      const preferred = this.activeGroup && this.groups.has(this.activeGroup.id)
+        ? this.activeGroup
+        : this.getFirstLeaf();
       this.root.innerHTML = '';
       this.renderNode(this.rootNode, this.root);
       for (const g of this.groups.values()) this.renderGroup(g);
+      window.EditorEvents?.emit?.('workbenchRebuild', {
+        workbench: this, root: this.root, groups: [...this.groups.values()], activeGroup: preferred
+      }, true);
       queueMicrotask(() => {
         for (const g of this.groups.values()) {
           const t = g.tabs.find(x => x.id === g.active);
-          if (t) this.onActivate(t, g); else if (!g.tabs.length) this.onActivate(null, g);
+          if (t) this.onActivate(t, g, {preserveActive: g !== preferred});
+          else if (!g.tabs.length) this.onActivate(null, g, {preserveActive: g !== preferred});
         }
+        if (preferred && this.groups.has(preferred.id)) this.setActiveGroup(preferred);
       });
     }
     applyRatio(node) {
@@ -263,19 +273,11 @@
         icon.className = 'tab-icon';
         if (t.icon) {
           try {
-            const raw = String(t.icon).trim();
+            const raw = String(t.icon).replace(/^\s*<\?xml[^>]*>\s*/i, '').trim();
             const tpl = document.createElement('template');
             tpl.innerHTML = raw;
-            const img = tpl.content.querySelector('img');
             const svg = tpl.content.querySelector('svg');
-            if (img) {
-              img.style.width = '100%';
-              img.style.height = '100%';
-              img.style.objectFit = 'contain';
-              icon.appendChild(img.cloneNode(true));
-            } else if (svg) {
-              icon.appendChild(svg.cloneNode(true));
-            }
+            if (svg) icon.appendChild(svg.cloneNode(true)); else icon.textContent = '';
           } catch (_) {
             icon.textContent = '';
           }

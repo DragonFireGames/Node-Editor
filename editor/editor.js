@@ -81,6 +81,196 @@ window.__editorInitPromise = (async function () {
   };
   const $ = id => document.getElementById(id);
 
+  // ---------------------------------------------------------------------------
+  // Global editor theme
+  // ---------------------------------------------------------------------------
+  // One mutable theme object is shared by the whole editor, including nested
+  // tab-group workbenches. Embedding pages/extensions can update it after the
+  // editor has loaded and the change is applied to both CSS and Monaco.
+  const defaultTheme = {
+    id: 'node-editor',
+    css: {
+      bg: '#111',
+      surface: '#222',
+      surface2: '#1e1e1e',
+      tabs: '#181818',
+      tab: '#1f1f1f',
+      tabActive: '#252526',
+      text: '#eee',
+      textSecondary: '#ddd',
+      muted: '#aaa',
+      muted2: '#888',
+      border: '#333',
+      borderStrong: '#555',
+      hover: '#444',
+      divider: '#2b2b2b',
+      accent: '#2563a6',
+      accentStrong: '#4a86bd',
+      status: '#007acc'
+    },
+    monaco: {
+      base: 'vs-dark',
+      inherit: true,
+      colors: {},
+      rules: []
+    }
+  };
+
+  function cloneTheme(value) {
+    return JSON.parse(JSON.stringify(value));
+  }
+
+  const themeStyleMap = {
+    '--editor-bg': 'css.bg',
+    '--editor-surface': 'css.surface',
+    '--editor-surface-2': 'css.surface2',
+    '--editor-tabs': 'css.tabs',
+    '--editor-tab': 'css.tab',
+    '--editor-tab-active': 'css.tabActive',
+    '--editor-text': 'css.text',
+    '--editor-text-secondary': 'css.textSecondary',
+    '--editor-muted': 'css.muted',
+    '--editor-muted-2': 'css.muted2',
+    '--editor-border': 'css.border',
+    '--editor-border-strong': 'css.borderStrong',
+    '--editor-hover': 'css.hover',
+    '--editor-divider': 'css.divider',
+    '--editor-accent': 'css.accent',
+    '--editor-accent-strong': 'css.accentStrong',
+    '--editor-status': 'css.status'
+  };
+
+  function getPath(root, path) {
+    return path.split('.').reduce((value, key) => value?.[key], root);
+  }
+
+  function applyThemeCSS(theme) {
+    const root = document.documentElement;
+    for (const [variable, path] of Object.entries(themeStyleMap)) {
+      const value = getPath(theme, path);
+      if (value != null) root.style.setProperty(variable, String(value));
+    }
+  }
+
+  function applyThemeMonaco(theme, monaco = window.monaco) {
+    if (!monaco?.editor) return false;
+    const name = String(theme.id || 'node-editor');
+    monaco.editor.defineTheme(name, {
+      base: theme.monaco?.base || 'vs-dark',
+      inherit: theme.monaco?.inherit !== false,
+      colors: {...(theme.monaco?.colors || {})},
+      rules: [...(theme.monaco?.rules || [])]
+    });
+    monaco.editor.setTheme(name);
+    return true;
+  }
+
+  function applyTheme() {
+    applyThemeCSS(window.EditorTheme);
+    applyThemeMonaco(window.EditorTheme, window.monaco);
+    editorEventListeners?.get?.('themeChange')?.forEach?.(listener => {
+      try { listener({theme: window.EditorTheme}); } catch (error) { console.error('Editor event themeChange failed', error); }
+    });
+  }
+
+  const themeObject = cloneTheme(defaultTheme);
+  themeObject.set = patch => {
+    const source = patch && typeof patch === 'object' ? patch : {};
+    const merge = (target, value) => {
+      for (const [key, entry] of Object.entries(value)) {
+        if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+          if (!target[key] || typeof target[key] !== 'object' || Array.isArray(target[key])) target[key] = {};
+          merge(target[key], entry);
+        } else target[key] = entry;
+      }
+    };
+    merge(themeObject, source);
+    applyTheme();
+    return themeObject;
+  };
+  themeObject.setColor = (key, value) => themeObject.set({css: {[key]: value}});
+  themeObject.setMonacoColor = (key, value) => themeObject.set({monaco: {colors: {[key]: value}}});
+  themeObject.setTokenColor = (token, foreground, fontStyle) => {
+    const rules = [...(themeObject.monaco?.rules || [])];
+    const index = rules.findIndex(rule => rule.token === token);
+    const rule = {token, foreground};
+    if (fontStyle != null) rule.fontStyle = fontStyle;
+    if (index >= 0) rules[index] = {...rules[index], ...rule};
+    else rules.push(rule);
+    themeObject.set({monaco: {rules}});
+  };
+  themeObject.apply = applyTheme;
+  window.EditorTheme = themeObject;
+  applyThemeCSS(window.EditorTheme);
+
+  // ---------------------------------------------------------------------------
+  // Editor event bus
+  // ---------------------------------------------------------------------------
+  // Embedding pages/extensions can observe semantic editor events without
+  // reaching into internal handlers. DOM-related callbacks are scheduled after
+  // the relevant mutation has been applied.
+  const editorEventListeners = new Map();
+  let editorDomObserver = null;
+  let editorDomObserverStarted = false;
+
+  function onEditorEvent(name, listener) {
+    const key = String(name || '').trim();
+    if (!key || typeof listener !== 'function') return () => {};
+    let set = editorEventListeners.get(key);
+    if (!set) editorEventListeners.set(key, set = new Set());
+    set.add(listener);
+    return () => set.delete(listener);
+  }
+
+  function offEditorEvent(name, listener) {
+    const set = editorEventListeners.get(String(name || '').trim());
+    return !!set?.delete(listener);
+  }
+
+  function emitEditorEvent(name, detail = {}, afterDom = true) {
+    const key = String(name || '').trim();
+    const set = editorEventListeners.get(key);
+    if (!set?.size) return;
+    const payload = detail && typeof detail === 'object' ? detail : { value: detail };
+    const fire = () => {
+      for (const listener of [...set]) {
+        try { listener(payload); } catch (error) { console.error(`Editor event ${key} failed`, error); }
+      }
+    };
+    if (afterDom) queueMicrotask(fire);
+    else fire();
+  }
+
+  function startEditorDOMObserver() {
+    if (editorDomObserverStarted || typeof MutationObserver !== 'function' || !document.body) return;
+    editorDomObserverStarted = true;
+    editorDomObserver = new MutationObserver(records => {
+      const addedNodes = [];
+      for (const record of records) {
+        for (const node of record.addedNodes || []) addedNodes.push(node);
+      }
+      if (!addedNodes.length) return;
+      emitEditorEvent('domAdded', {
+        records,
+        nodes: addedNodes,
+        elements: addedNodes.filter(node => node.nodeType === 1),
+        targets: [...new Set(records.map(record => record.target).filter(Boolean))]
+      }, true);
+    });
+    editorDomObserver.observe(document.body, { childList: true, subtree: true });
+  }
+
+  window.EditorEvents = window.EditorEvents || {};
+  window.EditorEvents.on = onEditorEvent;
+  window.EditorEvents.off = offEditorEvent;
+  window.EditorEvents.emit = emitEditorEvent;
+  window.EditorEvents.startDOMObserver = startEditorDOMObserver;
+  for (const eventName of ['sidebarChange','tabOpen','tabActivate','tabClose','builtinRender','viewRender','domAdded','workbenchRebuild','themeChange']) {
+    const method = 'on' + eventName.charAt(0).toUpperCase() + eventName.slice(1);
+    window.EditorEvents[method] = listener => onEditorEvent(eventName, listener);
+  }
+  startEditorDOMObserver();
+
   const BROWSER_SETTINGS_KEY = 'editor.browserSettings';
   const browserSettingSubscribers = new Set();
   const browserSettingDefaults = { ...state.browserSettings };
@@ -685,6 +875,7 @@ window.__editorInitPromise = (async function () {
       openBuiltin,
       setupRuntime,
       getBuiltin,
+      theme: window.EditorTheme,
       makePeerLayer,
       normalizePeerPagePath,
       saveProjectMetadata,
@@ -765,7 +956,7 @@ window.__editorInitPromise = (async function () {
     g.viewBody.appendChild(wrap);
   }
   function disposeTabView(t) {
-    if (!t) return;
+    if (!t || t._previewHost) return;
     if (t.editor) {
       try {
         t.editor.dispose();
@@ -789,6 +980,11 @@ window.__editorInitPromise = (async function () {
     t.editor?.dispose?.();
     const wb = g.ownerWorkbench || state.workbench;
     wb.removeTab(g, t.id);
+    emitEditorEvent('tabClose', {
+      tab:t, group:g, workbench:wb,
+      builtin:t.kind === 'builtin' ? t.builtin : null,
+      kind:t.kind, path:t.kind === 'file' ? t.path : null
+    }, true);
   }
   function renderGroupBuiltin(g, t) {
     const wrap = document.createElement('div');
@@ -801,7 +997,7 @@ window.__editorInitPromise = (async function () {
     const nested = new Workbench(surface, {
       hostTab: t,
       keepEmpty: true,
-      onActivate: (innerT, innerG) => activate(innerT, innerG),
+      onActivate: (innerT, innerG, lifecycle) => activate(innerT, innerG, lifecycle),
       onBuiltin: (kind, innerG) => openBuiltin(kind, innerG),
       onClose: (innerT, innerG) => closeWorkbenchTab(innerT, innerG),
       onLayoutChange: () => scheduleWorkspaceLayoutSave()
@@ -812,20 +1008,35 @@ window.__editorInitPromise = (async function () {
       if (!restored) nested.rebuild();
     } else nested.rebuild();
   }
-  async function activate(t, g) {
+  function emitTabLifecycle(t, g, eventName) {
+    if (!t || !g) return;
+    emitEditorEvent(eventName, {
+      tab: t,
+      group: g,
+      workbench: g.ownerWorkbench || state.workbench,
+      tabElement: [...(g.tabBar?.querySelectorAll?.('.workbench-tab') || [])].find(el => el.dataset.tabId === t.id) || null,
+      viewElement: t._viewElement || g.viewBody?.lastElementChild || null,
+      builtin: t.kind === 'builtin' ? t.builtin : null,
+      kind: t.kind,
+      path: t.kind === 'file' ? t.path : null
+    }, true);
+  }
+
+  async function activate(t, g, lifecycle = {}) {
     g.active = t?.id || null;
     if (t) t._viewActivation = (t._viewActivation || 0) + 1;
     const wb = g?.ownerWorkbench || state.workbench;
+    // Keep the global active-group pointer aligned with nested/workbench groups.
+    // Explorer/search/AI file opens rely on Workbench.getActiveGroup().
+    if (!lifecycle.preserveActive) wb.setActiveGroup?.(g);
     wb.renderGroup(g);
     if (!t) {
       if (wb.hostTab) renderGroupEmpty(g);
       else renderEmpty(g);
+      emitEditorEvent('viewRender', { tab:null, group:g, workbench:wb, element:g.viewBody?.lastElementChild || null }, true);
       return;
     }
-    // Switching groups/tabs should not destroy an embedded preview. If the
-    // user actually changes the preview type (for example Piskel -> Preview),
-    // dispose the old view so its resources are released and the new view is
-    // rendered from the current filesystem contents.
+
     if (t.kind === 'file' && t._previewViewId && t._previewViewId !== t.view) {
       state.previews?.dispose(t);
     }
@@ -838,6 +1049,16 @@ window.__editorInitPromise = (async function () {
       if (!t.view || !views.some(v => v.id === t.view)) t.view = state.previews?.getDefaultView(file)?.id || null;
     }
     renderViewBar(g, t);
+
+    const finish = (kind, element, extra = {}) => {
+      if (!t._tabOpenEventFired) {
+        t._tabOpenEventFired = true;
+        emitTabLifecycle(t, g, 'tabOpen');
+      }
+      emitTabLifecycle(t, g, 'tabActivate');
+      emitEditorEvent(kind, { tab:t, group:g, workbench:wb, element:element || null, ...extra }, true);
+    };
+
     if (t.kind === 'builtin') {
       if (t.builtin === 'group') {
         if (t._viewElement) {
@@ -845,10 +1066,12 @@ window.__editorInitPromise = (async function () {
           t._viewElement.style.display = '';
           g.__renderedTab = t;
           if (!t._groupWorkbench) renderGroupBuiltin(g, t);
+          finish('builtinRender', t._viewElement, { builtin:t.builtin });
           return;
         }
         renderGroupBuiltin(g, t);
         g.__renderedTab = t;
+        finish('builtinRender', t._viewElement, { builtin:t.builtin });
         return;
       }
       if (t._viewElement) {
@@ -860,33 +1083,53 @@ window.__editorInitPromise = (async function () {
           terminal?.attach(state.nodeEmulator);
           terminal?.updatePrompt();
         }
+        finish('builtinRender', t._viewElement, { builtin:t.builtin });
         return;
       }
       const builtin = getBuiltin(t.builtin);
-      if (builtin?.render) builtin.render(g, t);
-      else renderWelcome(g);
+      const renderResult = builtin?.render ? builtin.render(g, t) : renderWelcome(g);
+      if (renderResult && typeof renderResult.then === 'function') await renderResult;
       t._viewElement = g.viewBody.lastElementChild || null;
       g.__renderedTab = t;
+      finish('builtinRender', t._viewElement, { builtin:t.builtin });
       return;
     }
+
     g.__renderedTab = t;
     const file = { path: t.path, name: basename(t.path), mime: mime(t.path), id: t.id };
     if (state.previews?.getView(file, t.view)) {
-      return state.previews.render(file, t.view, g.viewBody, g);
+      const renderResult = state.previews.render(file, t.view, g.viewBody, g);
+      if (renderResult && typeof renderResult.then === 'function') await renderResult;
+      finish('viewRender', g.viewBody.lastElementChild, { path:t.path, view:t.view });
+      return;
     }
     const fallback = document.createElement('div');
     fallback.className = 'editor-binary';
     fallback.textContent = `No editor or preview available for ${file.name}`;
     g.viewBody.appendChild(fallback);
+    finish('viewRender', fallback, { path:t.path, view:t.view });
   }
+  function getAllWorkbenchGroups() {
+    const groups = [];
+    for (const wb of Workbench.getInstances?.() || []) {
+      for (const g of wb.groups?.values?.() || []) groups.push(g);
+    }
+    return groups;
+  }
+
   function openFile(path, target) {
     path = normalize(path);
     if (!state.fs?.existsSync(path)) return;
-    const requestedGroup = target?.ownerWorkbench ? target : null;
-    const wb = requestedGroup?.ownerWorkbench || state.workbench;
-    let g = requestedGroup || Workbench.getActiveGroup?.();
-    if (!g || g.ownerWorkbench !== wb || !wb.groups.has(g.id)) g = wb.getActiveGroup?.() || wb.getFirstLeaf();
+
+    // A file opened from Explorer/Search should target the currently active
+    // leaf even when that leaf belongs to a nested tab-group Workbench.
+    let g = target?.ownerWorkbench ? target : Workbench.getActiveGroup?.();
+    if (!g || !g.ownerWorkbench?.groups?.has?.(g.id)) {
+      g = state.workbench?.getActiveGroup?.() || state.workbench?.getFirstLeaf?.();
+    }
     if (!g) return;
+
+    const wb = g.ownerWorkbench || state.workbench;
     let t = g.tabs.find(x => x.kind === 'file' && x.path === path);
     if (!t) {
       t = makeFileTab(path);
@@ -1212,24 +1455,34 @@ window.__editorInitPromise = (async function () {
     await getBuiltin('browser')?.navigatePreview();
   }
   function onMove(oldPath, newPath, isDir) {
-    for (const g of state.workbench.groups.values()) for (const t of g.tabs) {
+    for (const g of getAllWorkbenchGroups()) for (const t of g.tabs) {
       if (t.kind !== 'file') continue;
       const hit = isDir ? t.path === oldPath || t.path.startsWith(oldPath + '/') : t.path === oldPath;
-      if (hit) {
-        t.path = isDir ? newPath + t.path.slice(oldPath.length) : newPath;
-        t.title = basename(t.path);
-        t.icon = fileIcon(t.path);
-        t.model?.dispose();
-        t.editor?.dispose();
-        t.model = null;
-        t.editor = null;
-      }
+      if (!hit) continue;
+      const oldId = t.id;
+      t.path = isDir ? newPath + t.path.slice(oldPath.length) : newPath;
+      t.id = 'file:' + t.path;
+      t.title = basename(t.path);
+      t.icon = fileIcon(t.path);
+      if (g.active === oldId) g.active = t.id;
+      state.previews?.dispose?.(t);
+      t.model?.dispose?.();
+      t.editor?.dispose?.();
+      t.model = null;
+      t.editor = null;
+      t.listener = null;
     }
     state.workbench.rebuild();
     updateStatus();
   }
   function onDelete(path, isDir) {
-    for (const g of [...state.workbench.groups.values()]) for (const t of [...g.tabs]) if (t.kind === 'file' && (t.path === path || isDir && t.path.startsWith(path + '/'))) state.workbench.removeTab(g, t.id);
+    for (const g of getAllWorkbenchGroups()) {
+      for (const t of [...g.tabs]) {
+        if (!g.ownerWorkbench?.groups?.has?.(g.id)) continue;
+        if (t.kind !== 'file' || !(t.path === path || isDir && t.path.startsWith(path + '/'))) continue;
+        closeWorkbenchTab(t, g);
+      }
+    }
     updateStatus();
   }
   async function openZipFile(f) {
@@ -1347,6 +1600,26 @@ window.__editorInitPromise = (async function () {
     if (!(await confirmWorkspaceSwitch('starting a new project'))) return;
     showProjectChooser({canClose:true});
   }
+  function disposeAllWorkbenchTabs() {
+    const seen = new Set();
+    for (const wb of Workbench.getInstances?.() || []) {
+      for (const g of [...(wb.groups?.values?.() || [])]) {
+        for (const t of [...(g.tabs || [])]) {
+          if (seen.has(t)) continue;
+          seen.add(t);
+          if (t.builtin === 'group') {
+            try { t._groupWorkbench?.dispose?.(); } catch (_) {}
+          }
+          try { state.previews?.dispose?.(t); } catch (_) {}
+          try { t.editor?.dispose?.(); } catch (_) {}
+          try { t.model?.dispose?.(); } catch (_) {}
+          t.editor = null;
+          t.model = null;
+        }
+      }
+    }
+  }
+
   function resetRunContext() {
     const net = state.browserNetwork;
     detachRuntime(net);
@@ -1367,6 +1640,7 @@ window.__editorInitPromise = (async function () {
     clearTimeout(state.cacheTimer);
     state.cacheTimer = null;
     resetRunContext();
+    disposeAllWorkbenchTabs();
     state.loading = true;
     state.fs = fs;
     state.saveProjectPermission = 'denied';
@@ -2058,7 +2332,8 @@ window.__editorInitPromise = (async function () {
   function openSearchResult(path, line, column) {
     openFile(path);
     const active = Workbench.getActiveGroup?.();
-    const groups = active?.ownerWorkbench === state.workbench ? [active] : [...state.workbench.groups.values()];
+    const allGroups = getAllWorkbenchGroups();
+    const groups = active ? [active, ...allGroups.filter(group => group !== active)] : allGroups;
     let attempts = 0;
     const reveal = () => {
       attempts++;
@@ -2202,6 +2477,7 @@ window.__editorInitPromise = (async function () {
   }
 
   async function start() {
+    startEditorDOMObserver();
     loadBehaviorSettings();
     await window.__workersConfigReady?.catch?.(() => {});
     await window.GitHubService?.init?.();
@@ -2242,6 +2518,20 @@ window.__editorInitPromise = (async function () {
     saveProjectNow,
     exportProject,
     logError,
-    extensionAPI
+    extensionAPI,
+    on: onEditorEvent,
+    off: offEditorEvent,
+    emit: emitEditorEvent,
+    onSidebarChange: listener => onEditorEvent('sidebarChange', listener),
+    onTabOpen: listener => onEditorEvent('tabOpen', listener),
+    onTabActivate: listener => onEditorEvent('tabActivate', listener),
+    onTabClose: listener => onEditorEvent('tabClose', listener),
+    onBuiltinRender: listener => onEditorEvent('builtinRender', listener),
+    onViewRender: listener => onEditorEvent('viewRender', listener),
+    onDOMAdded: listener => onEditorEvent('domAdded', listener),
+    onWorkbenchRebuild: listener => onEditorEvent('workbenchRebuild', listener),
+    onThemeChange: listener => onEditorEvent('themeChange', listener),
+    theme: window.EditorTheme,
+    events: { on: onEditorEvent, off: offEditorEvent }
   };
 })();

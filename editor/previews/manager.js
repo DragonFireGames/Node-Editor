@@ -43,20 +43,22 @@
       if (!view) return false;
       const tab = group?.tabs?.find(t => t.id === file.id) || file;
 
-      // Keep the actual preview surface alive while the tab is moved or
-      // temporarily deactivated. This is especially important for embedded
-      // editors such as Piskel: detaching an iframe does not reload it, while
-      // destroying it loses the entire editor state.
+      // Preview ownership lives here. Temporarily activating another tab must
+      // not dispose the embedded editor; the same host can be reattached later.
       if (tab._previewHost && tab._previewViewId === id) {
-        host.appendChild(tab._previewHost);
-        return true;
+        if (tab._previewHost.parentNode !== host) host.appendChild(tab._previewHost);
+        if (tab._previewPromise) {
+          try { await tab._previewPromise; } catch (_) {}
+        }
+        return !!tab._previewHost;
       }
 
       // A different preview view is being opened, so the previous preview
       // must really be disposed before constructing the new one.
       if (tab._previewHost || tab._previewViewId) this.dispose(tab);
 
-      const activation = tab._viewActivation || 0;
+      const generation = (tab._previewGeneration || 0) + 1;
+      tab._previewGeneration = generation;
       const previewHost = document.createElement('div');
       previewHost.className = 'editor-preview-surface';
       previewHost.style.cssText = 'position:relative;width:100%;height:100%;min-height:0;overflow:hidden;';
@@ -64,6 +66,7 @@
       tab._previewHost = previewHost;
       tab._previewViewId = id;
 
+      const activation = tab._viewActivation || 0;
       const context = {
         state: this.state,
         file,
@@ -104,22 +107,29 @@
           this.state.markDirty?.(path || file.path);
           this.state.updateStatus?.();
         },
-        isActive: () => group?.active === file.id && host.isConnected && tab.view === id && tab._viewActivation === activation,
+        isActive: () => group?.active === file.id && tab.view === id && tab._viewActivation === activation,
+        isCurrent: () => tab._previewGeneration === generation && tab._previewViewId === id && !previewHost.dataset.disposed,
         addCleanup: cleanup => {
           if (typeof cleanup !== 'function') return;
           (tab._previewCleanups ||= []).push(cleanup);
         }
       };
-      if (!context.isActive()) return false;
       try {
-        await view.create(context);
+        const promise = Promise.resolve().then(() => view.create(context));
+        tab._previewPromise = promise;
+        await promise;
       } catch (error) {
-        this.dispose(tab);
+        if (context.isCurrent()) this.dispose(tab);
         throw error;
+      } finally {
+        if (tab._previewPromise) tab._previewPromise = null;
       }
-      return context.isActive();
+      return context.isCurrent();
     }
     dispose(file) {
+      if (!file) return;
+      file._previewGeneration = (file._previewGeneration || 0) + 1;
+      if (file._previewHost) file._previewHost.dataset.disposed = '1';
       for (const cleanup of file?._previewCleanups || []) {
         try { cleanup(); } catch (_) {}
       }
@@ -133,6 +143,7 @@
       }
       file._previewHost = null;
       file._previewViewId = null;
+      file._previewPromise = null;
     }
   }
   window.EditorPreviewManager = EditorPreviewManager;
