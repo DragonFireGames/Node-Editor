@@ -16,7 +16,10 @@
   };
   const PROVIDERS = {
     huggingface: {label:'Hugging Face', protocol:'openai-chat', endpoint:'https://router.huggingface.co/v1', name:'Hugging Face', model:'', supportsTools:true, supportsReasoning:true, supportsStreaming:true, modelBrowser:{kind:'dynamic',path:'/models',auth:'bearer',responseKey:'data',idField:'id',freeFilter:true}},
-    groq: {label:'Groq', protocol:'openai-chat', endpoint:'https://api.groq.com/openai/v1', name:'Groq', model:'openai/gpt-oss-120b', supportsTools:true, supportsReasoning:true, supportsStreaming:true, modelBrowser:{kind:'dynamic',path:'/models',auth:'bearer',responseKey:'data',idField:'id',freeFilter:false}},
+    groq: {label:'Groq', protocol:'openai-chat', endpoint:'https://api.groq.com/openai/v1', name:'Groq', model:'openai/gpt-oss-120b', supportsTools:true, supportsReasoning:true, supportsStreaming:true, modelBrowser:{kind:'dynamic',path:'/models',auth:'bearer',responseKey:'data',idField:'id',freeFilter:false}, chatOptions:[
+      {match:/gpt-oss/i,body:{include_reasoning:true}},
+      {match:/^(?:qwen\/)?qwen3(?:\.|\-|$)/i,body:{reasoning_format:'parsed'}}
+    ], toolCallRecovery:{status:400,errorCodes:['output_parse_failed'],strategy:'lower-temperature',maxRetries:2,factor:.5,minTemperature:.2}},
     'google-gemini': {label:'Google Gemini', protocol:'google-gemini', endpoint:'https://generativelanguage.googleapis.com', name:'Google Gemini', model:'gemini-3.8-flash', supportsTools:true, supportsReasoning:true, supportsStreaming:true, modelBrowser:{kind:'dynamic',path:'/v1beta/models',auth:'google',responseKey:'models',idField:'baseModelId',query:'pageSize=1000',filter:'generateContent',freeFilter:false}},
     custom: {label:'Custom', protocol:'openai-chat', endpoint:'', name:'', model:'', supportsTools:true, supportsReasoning:true, supportsStreaming:true, modelBrowser:null}
   };
@@ -111,6 +114,22 @@
       this.settings=saveModels(this.settings); return true;
     }
     save(){this.settings=saveModels(this.settings);return this.settings;}
+    exportSettings(options={}){
+      const preserveKeys=options.preserveKeys!==false;
+      return {version:1,activeModelId:this.settings.activeModelId,huggingFaceApiKey:preserveKeys?String(this.settings.huggingFaceApiKey||''):'',huggingFaceRememberKey:preserveKeys?!!this.settings.huggingFaceRememberKey:false,models:(this.settings.models||[]).filter(x=>x.id!==DEFAULT_MODEL.id).map(x=>{const model={...x}; if(preserveKeys) model.apiKey=String(x.apiKey||''); else {model.apiKey=''; model.rememberKey=false;} return model;})};
+    }
+    importSettings(payload){
+      if(!payload || typeof payload!=='object' || !Array.isArray(payload.models)) throw new Error('Invalid AI model settings JSON.');
+      const imported=payload.models.map(x=>cleanModel({...x,rememberKey:!!x.rememberKey || !!x.apiKey})).filter(x=>x.id && x.endpoint && x.protocol && x.model);
+      const ids=new Set();
+      for(const model of imported){ if(ids.has(model.id)) throw new Error(`Duplicate model ID: ${model.id}`); ids.add(model.id); }
+      const active=String(payload.activeModelId||'');
+      this.settings={activeModelId:active,models:imported,huggingFaceApiKey:String(payload.huggingFaceApiKey||''),huggingFaceRememberKey:!!payload.huggingFaceRememberKey};
+      this.settings=saveModels(this.settings);
+      if(this.settings.huggingFaceRememberKey) setStoredHuggingFaceKey(this.settings.huggingFaceApiKey);
+      else setStoredHuggingFaceKey('');
+      return this.settings;
+    }
     isHuggingFace(model){return isHuggingFaceEndpoint(model?.endpoint);}
     protocolLabel(id){return protocolLabel(id);}
     inferProtocol(endpoint){return inferProtocol(endpoint);}

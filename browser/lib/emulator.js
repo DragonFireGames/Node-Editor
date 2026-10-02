@@ -264,6 +264,7 @@
 
       Array.from(doc.querySelectorAll('style')).map(async (styleEl) => {
         if (styleEl.textContent) {
+          styleEl.setAttribute('data-raw-style-text', styleEl.textContent);
           styleEl.textContent = await rewriteCSSURLs(styleEl.textContent, page);
         }
       }),
@@ -272,6 +273,7 @@
         const styleAttr = el.getAttribute('style');
 
         if (styleAttr && styleAttr.includes('url(')) {
+          el.setAttribute('data-raw-style', styleAttr);
           const updatedStyle = await rewriteCSSURLs(styleAttr,page);
           el.setAttribute('style', updatedStyle);
         }
@@ -282,6 +284,7 @@
     doc.querySelectorAll('*').forEach(node => {
       Array.from(node.attributes || []).forEach(attr => {
         if (attr.name.startsWith('on') && attr.value && !attr.value.includes('__executeCode')) {
+          node.setAttribute('data-raw-' + attr.name, attr.value);
           node.setAttribute(attr.name, `return window.__executeCode(${JSON.stringify(attr.value)}, '<anonymous onevent>', this, typeof event !== 'undefined' ? {event: event} : {})`);
         }
       });
@@ -289,13 +292,15 @@
 
     doc.querySelectorAll('script:not([src])').forEach(script => {
       if (script.textContent && !script.textContent.includes('__executeCode')) {
+        const rawScript = script.textContent;
+        script.setAttribute('data-raw-script', rawScript);
         const isModule = script.getAttribute('type') === 'module';
 
         if (isModule) script.removeAttribute('type');
 
         const execFn = isModule ? '__executeCodeModule' : '__executeCode';
 
-        script.textContent = `window.${execFn}(${JSON.stringify(script.textContent)}, ${JSON.stringify(pageUrl)}, this);\n`;
+        script.textContent = `window.${execFn}(${JSON.stringify(rawScript)}, ${JSON.stringify(pageUrl)}, this);\n`;
       }
     });
 
@@ -1387,6 +1392,7 @@
           Array.from(node.attributes || []).forEach(attr => {
             if (attr.name.startsWith('on') && attr.value && !attr.value.includes('__executeCode')) {
               const rawCode = attr.value;
+              if (!node.hasAttribute('data-raw-' + attr.name)) node.setAttribute('data-raw-' + attr.name, rawCode);
               // Override attribute value to dispatch through sandboxed executor
               node.setAttribute(
                 attr.name, 
@@ -1530,6 +1536,14 @@
 
           // 1. Rewrite dynamic event handlers
           patchInlineEvents(node);
+          if (node.tagName === 'SCRIPT' && !node.getAttribute('src') && node.textContent && !node.textContent.includes('__executeCode') && !node.hasAttribute('data-raw-script')) {
+            const rawScript = node.textContent;
+            node.setAttribute('data-raw-script', rawScript);
+            const isModule = node.getAttribute('type') === 'module';
+            if (isModule) node.removeAttribute('type');
+            const execFn = isModule ? '__executeCodeModule' : '__executeCode';
+            node.textContent = `window.${execFn}(${JSON.stringify(rawScript)}, ${JSON.stringify(CURRENT_PAGE_URL)}, this);\n`;
+          }
 
           // 2. Process inline styles and <style> tags
           processStyleNode(node);
@@ -1560,6 +1574,7 @@
 
         function processStyleNode(node) {
           if (node.tagName && node.tagName.toLowerCase() === 'style' && node.textContent.includes('url(')) {
+            if (!node.hasAttribute('data-raw-style-text')) node.setAttribute('data-raw-style-text', node.textContent);
             usefulHelpers.rewriteCSSURLs(node.textContent, pageEmulator)
               .then(newCss => { node.textContent = newCss; });
           }
@@ -1571,6 +1586,7 @@
         function processInlineStyleAttr(el) {
           const styleAttr = el.getAttribute('style');
           if (styleAttr && styleAttr.includes('url(') && !el.__processing_style) {
+            if (!el.hasAttribute('data-raw-style')) el.setAttribute('data-raw-style', styleAttr);
             el.__processing_style = true;
             usefulHelpers.rewriteCSSURLs(styleAttr, pageEmulator)
               .then(newStyle => {
@@ -3461,17 +3477,24 @@
         if (!root || root.nodeType !== Node.ELEMENT_NODE) return root;
         const elements = [root, ...root.querySelectorAll('*')];
         for (const el of elements) {
-          if (el.hasAttribute('data-embed-frame') || el.hasAttribute('data-embed-wrapper')) {
+          if (el.hasAttribute('data-embed-frame') || el.hasAttribute('data-embed-wrapper') || el.hasAttribute('data-page-id')) {
             if (el.parentNode) el.parentNode.removeChild(el);
             continue;
           }
+          if (el.tagName === 'SCRIPT' && /createRuntimeInterceptor|__runSyncInterceptor|__pageRegistry/.test(el.textContent || '')) {
+            if (el.parentNode) el.parentNode.removeChild(el);
+            continue;
+          }
+          const rawScript = el.getAttribute('data-raw-script');
+          if (el.tagName === 'SCRIPT' && rawScript != null) el.textContent = rawScript;
+          const rawStyleText = el.getAttribute('data-raw-style-text');
+          if (el.tagName === 'STYLE' && rawStyleText != null) el.textContent = rawStyleText;
+          const rawStyle = el.getAttribute('data-raw-style');
+          if (rawStyle != null) el.setAttribute('style', rawStyle);
           for (const attr of Array.from(el.attributes || [])) {
-            if (attr.name === 'data-page-id') {
-              el.removeAttribute(attr.name);
-              continue;
-            }
             if (!attr.name.startsWith('data-raw-')) continue;
             const publicName = attr.name.slice('data-raw-'.length);
+            if (publicName === 'script') { el.removeAttribute(attr.name); continue; }
             if (publicName) el.setAttribute(publicName, attr.value);
             el.removeAttribute(attr.name);
           }
@@ -3479,11 +3502,18 @@
         return root;
       }
 
-      function serializePageElement(elem, outer) {
+      function serializePublicElement(elem, outer) {
+        if (!elem) return '';
         const clone = elem.cloneNode(true);
         cleanSerializedElement(clone);
         return outer ? nativeElementOuterHTML.get.call(clone) : nativeElementInnerHTML.get.call(clone);
       }
+
+      function serializePageElement(elem, outer) {
+        return serializePublicElement(elem, outer);
+      }
+      window.__serializePublicElement = function(elem, outer) { return serializePublicElement(elem, outer); };
+      window.__isEmulatorInjectedScript = function(code) { return /createRuntimeInterceptor|__runSyncInterceptor|__pageRegistry/.test(String(code || '')); };
 
       Object.defineProperty(Element.prototype, 'innerHTML', {
         configurable: nativeElementInnerHTML.configurable,

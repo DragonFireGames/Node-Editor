@@ -10,7 +10,7 @@
   <script src="browser/lib/endpoints/peer.js" data-layer="new URLSearchParams(window.location.search).get('peerLayer')"></script>
   <script>
     window.__previewNetworkReady = (async function() {
-      const workers = await fetch('workers.json',{cache:'no-store'}).then(async r=>{if(!r.ok)throw new Error('Failed to load workers.json ('+r.status+')');const c=await r.json();if(!c||typeof c!=='object')throw new Error('Invalid workers.json');return c;}).catch(e=>{console.error(e);return {proxy:'',github:''};});
+      const workers = await fetch('workers.json',{cache:'no-store'}).then(async r=>{if(!r.ok)throw new Error('Failed to load workers.json ('+r.status+')');const c=await r.json();if(!c||typeof c!=='object')throw new Error('Invalid workers.json');return c;}).catch(e=>{console.error(e);return {proxy:'',fallbackProxy:false,github:''};});
       window.WorkerConfig = workers;
       const query = new URLSearchParams(location.search);
       const peerLayer = query.get('peerLayer') || 'peer';
@@ -21,7 +21,8 @@
         true
       );
 
-      const fallbackProxy = new ProxyNetworkEndpoint('', true, false);
+      const configuredFallbackProxy = typeof workers.fallbackProxy === 'string' ? workers.fallbackProxy.trim() : '';
+      const fallbackProxy = new ProxyNetworkEndpoint(configuredFallbackProxy, true, !!configuredFallbackProxy);
 
       const defaultFallback = new NetworkEndpoint();
       const directFallbackRequest = defaultFallback.handleRequest.bind(defaultFallback);

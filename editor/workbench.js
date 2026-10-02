@@ -322,14 +322,16 @@
       document.querySelectorAll('.workbench-builtin-menu').forEach(x => x.remove());
       const menu = document.createElement('div');
       menu.className = 'workbench-builtin-menu';
-      menu.innerHTML = '<button data-kind="browser">Browser</button><button data-kind="peer">Peer Server</button><button data-kind="terminal">Terminal</button><button data-kind="run">Run Configuration</button><button data-kind="environment">Environment Variables</button><button data-kind="ai">AI</button><button data-kind="welcome">Welcome</button>';
+      menu.innerHTML = '<button data-kind="browser">Browser</button><button data-kind="peer">Peer Server</button><button data-kind="terminal">Terminal</button><button data-kind="run">Run Configuration</button><button data-kind="environment">Environment Variables</button><button data-kind="ai">AI</button><button data-kind="welcome">Welcome</button>' + (window.EditorExtensionAPI?.list?.() || []).map(x => '<button data-extension="' + String(x.id).replace(/\"/g, '&quot;') + '">' + String(x.name || x.id).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])) + '</button>').join('');
       const r = anchor.getBoundingClientRect();
       menu.style.left = Math.min(r.left, innerWidth - 210) + 'px';
       menu.style.top = r.bottom + 2 + 'px';
       document.body.appendChild(menu);
       menu.addEventListener('click', e => {
         const k = e.target.closest('[data-kind]')?.dataset.kind;
+        const extensionId = e.target.closest('[data-extension]')?.dataset.extension;
         if (k) this.onBuiltin(k, g);
+        else if (extensionId) window.EditorExtensionAPI?.open?.(extensionId);
         menu.remove();
       });
       setTimeout(() => document.addEventListener('click', () => menu.remove(), {

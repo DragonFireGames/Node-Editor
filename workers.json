@@ -1,4 +1,5 @@
 {
   "proxy": "https://proxy.dragonfire7z.workers.dev/",
+  "fallbackProxy": false,
   "github": "https://github-auth.dragonfire7z.workers.dev/"
 }

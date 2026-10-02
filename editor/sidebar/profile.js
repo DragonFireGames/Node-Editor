@@ -27,7 +27,7 @@
         <section class="github-profile-section">
           <div class="github-profile-heading">Authentication Worker</div>
           <div class="github-profile-value">${esc(config.workerUrl || 'Not configured')}</div>
-          <div class="github-profile-hint">Configured by workers.json. The editor uses this worker only for the GitHub OAuth code exchange.</div>
+          
         </section>
         <section class="github-profile-section">
           <label class="github-remember"><input data-github-remember type="checkbox" ${remember ? 'checked' : ''}> Remember GitHub login on this device</label>

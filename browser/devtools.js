@@ -2468,17 +2468,26 @@ var DevToolsInternal = {
 
     function buildAttributeHtml(node) {
       let attrHtml = '';
-      Array.from(node.attributes).forEach(attr => {
+      const seen = new Set();
+      Array.from(node.attributes || []).forEach(attr => {
+        if (attr.name === 'data-page-id' || attr.name === 'data-embed-frame' || attr.name === 'data-embed-wrapper') return;
         if (attr.name.startsWith('data-raw-')) return;
-        const info = getOriginalAttributeInfo(node,attr.name,attr.value);
-        attrHtml += ` <span class="dom-attr-name">${sanitizeHTML(attr.name)}</span>=<span class="dom-attr-val">"${sanitizeHTML(info.value)}"</span>`;
-        if (info.processed != null) attrHtml += `<span class="text-[9px] text-gray-600" title="Processed value is available in the live DOM">*</span>`;
+        const raw = node.getAttribute('data-raw-' + attr.name);
+        const value = raw != null ? raw : attr.value;
+        seen.add(attr.name.toLowerCase());
+        attrHtml += ` <span class="dom-attr-name">${sanitizeHTML(attr.name)}</span>=<span class="dom-attr-val">"${sanitizeHTML(value)}"</span>`;
+      });
+      Array.from(node.attributes || []).forEach(attr => {
+        if (!attr.name.startsWith('data-raw-')) return;
+        const publicName = attr.name.slice('data-raw-'.length);
+        if (!publicName || seen.has(publicName.toLowerCase())) return;
+        attrHtml += ` <span class="dom-attr-name">${sanitizeHTML(publicName)}</span>=<span class="dom-attr-val">"${sanitizeHTML(attr.value)}"</span>`;
       });
       return attrHtml;
     }
 
     function createChildren(container,node,depth) {
-      Array.from(node.children).forEach(child => container.appendChild(buildNode(child,depth)));
+      Array.from(node.children).forEach(child => { if (child.hasAttribute?.('data-embed-frame') || child.hasAttribute?.('data-embed-wrapper') || child.getAttribute?.('data-page-id') != null) return; if (child.tagName === 'SCRIPT' && window.__isEmulatorInjectedScript?.(child.textContent)) return; container.appendChild(buildNode(child,depth)); });
     }
 
     function buildNode(node,depth = 0) {
@@ -2621,8 +2630,10 @@ var DevToolsInternal = {
       editor.id = 'selected-element-editor';
       editor.className = 'dt-code-editor w-full h-full bg-[#1e1f22] text-gray-200 font-mono text-xs p-3 outline-none overflow-auto';
       editor.style.minHeight = '180px';
-      editor.dataset.rawHtml = selected.outerHTML;
-      editor.textContent = selected.outerHTML;
+      const serializer = selected.ownerDocument?.defaultView?.__serializePublicElement;
+      const publicHtml = typeof serializer === 'function' ? serializer(selected,true) : selected.outerHTML;
+      editor.dataset.rawHtml = publicHtml;
+      editor.textContent = publicHtml;
       editorWrap.appendChild(editor);
       container.appendChild(editorWrap);
       DevToolsInternal.syntax.attachEditable(editor,'html');
@@ -2697,12 +2708,23 @@ var DevToolsInternal = {
     function renderAttributes(container) {
       const table = document.createElement('table');
       table.className = 'w-full border-collapse text-[10px] font-mono';
+      const seen = new Set();
       Array.from(selected.attributes).forEach(attr => {
-        if (attr.name.startsWith('data-raw-')) return;
-        const info = getOriginalAttributeInfo(selected,attr.name,attr.value);
+        if (attr.name === 'data-page-id' || attr.name === 'data-embed-frame' || attr.name === 'data-embed-wrapper' || attr.name.startsWith('data-raw-')) return;
+        const raw = selected.getAttribute('data-raw-' + attr.name);
         const tr = document.createElement('tr');
         tr.className = 'border-b border-gray-800/60';
-        tr.innerHTML = `<td class="px-2 py-1 text-gray-500 align-top w-1/3">${sanitizeHTML(attr.name)}</td><td class="px-2 py-1 text-indigo-300 break-all">${sanitizeHTML(info.value)}</td><td class="px-2 py-1 text-gray-500 break-all">${info.processed != null ? sanitizeHTML(info.processed) : ''}</td>`;
+        tr.innerHTML = `<td class="px-2 py-1 text-gray-500 align-top w-1/3">${sanitizeHTML(attr.name)}</td><td class="px-2 py-1 text-indigo-300 break-all">${sanitizeHTML(raw != null ? raw : attr.value)}</td><td class="px-2 py-1 text-gray-500 break-all">${raw != null && raw !== attr.value ? sanitizeHTML(attr.value) : ''}</td>`;
+        table.appendChild(tr);
+        seen.add(attr.name.toLowerCase());
+      });
+      Array.from(selected.attributes).forEach(attr => {
+        if (!attr.name.startsWith('data-raw-')) return;
+        const publicName = attr.name.slice('data-raw-'.length);
+        if (!publicName || seen.has(publicName.toLowerCase())) return;
+        const tr = document.createElement('tr');
+        tr.className = 'border-b border-gray-800/60';
+        tr.innerHTML = `<td class="px-2 py-1 text-gray-500 align-top w-1/3">${sanitizeHTML(publicName)}</td><td class="px-2 py-1 text-indigo-300 break-all">${sanitizeHTML(attr.value)}</td><td class="px-2 py-1 text-gray-500 break-all"></td>`;
         table.appendChild(tr);
       });
       const head = document.createElement('div');
@@ -3380,7 +3402,7 @@ var DevToolsInternal = {
       return (
         code.includes('createRuntimeInterceptor') &&
         code.includes('__pageRegistry') &&
-        code.includes('__executeCodeModule') &&
+        code.includes('__pageRegistry') &&
         code.includes('__runSyncInterceptor')
       );
     }
@@ -3962,7 +3984,8 @@ var DevToolsInternal = {
       const doc = tab.iframe.contentDocument || tab.iframe.contentWindow?.document;
       if (!doc?.documentElement) return;
       getTabState(tab);
-      const snapshot = doc.documentElement.outerHTML;
+      const serializer = doc.defaultView?.__serializePublicElement;
+      const snapshot = String(typeof serializer === 'function' ? serializer(doc.documentElement,true) : doc.documentElement.outerHTML || '');
       getTabState(tab).processedDocument = snapshot;
       if (tab.page) tab.page.processedDocument = snapshot;
       DevToolsInternal.ui.refreshActiveViews();

@@ -8,7 +8,8 @@ window.__editorInitPromise = (async function () {
       const sharedNetwork = new Network();
       if (typeof ProxyNetworkEndpoint === 'function' && typeof NetworkEndpoint === 'function') {
         const primaryProxy = new ProxyNetworkEndpoint(String(workers.proxy || ''), true);
-        const fallbackProxy = new ProxyNetworkEndpoint('', true, false);
+        const configuredFallbackProxy = typeof workers.fallbackProxy === 'string' ? workers.fallbackProxy.trim() : '';
+        const fallbackProxy = new ProxyNetworkEndpoint(configuredFallbackProxy, true, !!configuredFallbackProxy);
         const defaultFallback = new NetworkEndpoint();
         defaultFallback.__browserDefaultFallback = true;
         defaultFallback.__networkRole = 'native';
@@ -59,6 +60,16 @@ window.__editorInitPromise = (async function () {
     deploymentSettings: {url: '', usePeerServer: false, branch: '', commit: ''},
     ai: null,
     environment: {},
+    browserSettings: {
+      primaryProxy: String(workers.proxy || '').trim(),
+      fallbackProxy: (typeof workers.fallbackProxy === 'string' ? workers.fallbackProxy.trim() : ''),
+      searchEngine: 'https://mojeek.com/search?q=',
+      useFallback: typeof workers.fallbackProxy === 'string' && workers.fallbackProxy.trim().length > 0,
+      obscureURL: true,
+      defaultTab: 'https://example.com',
+      clearDevToolsOnReload: true,
+      autoDownload: false
+    },
     behavior: {
       autoSaveOnRun: false,
       autoClearTerminal: false,
@@ -69,6 +80,83 @@ window.__editorInitPromise = (async function () {
     }
   };
   const $ = id => document.getElementById(id);
+
+  const BROWSER_SETTINGS_KEY = 'editor.browserSettings';
+  const browserSettingSubscribers = new Set();
+  const browserSettingDefaults = { ...state.browserSettings };
+  const workerBrowserDefaults = {
+    primaryProxy: String(workers.proxy || '').trim(),
+    fallbackProxy: typeof workers.fallbackProxy === 'string' ? workers.fallbackProxy.trim() : '',
+    useFallback: typeof workers.fallbackProxy === 'string' && workers.fallbackProxy.trim().length > 0
+  };
+  function normalizeBrowserSettings(value) {
+    const input = value && typeof value === 'object' ? value : {};
+    const out = { ...browserSettingDefaults };
+    for (const key of Object.keys(browserSettingDefaults)) {
+      if (input[key] !== undefined) out[key] = input[key];
+    }
+    out.primaryProxy = String(out.primaryProxy || '');
+    out.fallbackProxy = String(out.fallbackProxy || '');
+    out.searchEngine = String(out.searchEngine || browserSettingDefaults.searchEngine);
+    out.defaultTab = String(out.defaultTab || browserSettingDefaults.defaultTab);
+    out.useFallback = !!out.useFallback;
+    out.obscureURL = !!out.obscureURL;
+    out.clearDevToolsOnReload = !!out.clearDevToolsOnReload;
+    out.autoDownload = !!out.autoDownload;
+    return out;
+  }
+  function loadBrowserSettings() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(BROWSER_SETTINGS_KEY) || 'null');
+      if (saved && typeof saved === 'object') state.browserSettings = normalizeBrowserSettings(saved);
+    } catch (_) {}
+  }
+  function saveBrowserSettings(value, notify = true) {
+    const previous = state.browserSettings;
+    const next = normalizeBrowserSettings({ ...previous, ...(value || {}) });
+    const changed = Object.keys(browserSettingDefaults).some(key => previous[key] !== next[key]);
+    state.browserSettings = next;
+    try { localStorage.setItem(BROWSER_SETTINGS_KEY, JSON.stringify(state.browserSettings)); } catch (_) {}
+    try {
+      const base = state.browserNetwork?.__browserBaseEndpoints;
+      if (base?.primary) {
+        base.primary.proxy = state.browserSettings.primaryProxy;
+        base.primary.enabled = !!state.browserSettings.primaryProxy;
+        base.primary.obscureURL = state.browserSettings.obscureURL;
+      }
+      if (base?.fallback) {
+        base.fallback.proxy = state.browserSettings.fallbackProxy;
+        base.fallback.enabled = !!state.browserSettings.useFallback && !!state.browserSettings.fallbackProxy;
+        base.fallback.obscureURL = state.browserSettings.obscureURL;
+      }
+    } catch (_) {}
+    try { saveEditorSettings(); } catch (_) {}
+    if (notify && changed) {
+      for (const listener of [...browserSettingSubscribers]) {
+        try { listener({ ...state.browserSettings }); } catch (_) {}
+      }
+    }
+    return { ...state.browserSettings };
+  }
+  function installBrowserStateBridge() {
+    window.__editorBrowserStateBridge = {
+      read() {
+        return { settings: { ...state.browserSettings } };
+      },
+      write(next) {
+        const settings = next?.settings && typeof next.settings === 'object' ? next.settings : next;
+        return { settings: saveBrowserSettings(settings) };
+      },
+      subscribe(listener) {
+        if (typeof listener !== 'function') return () => {};
+        browserSettingSubscribers.add(listener);
+        return () => browserSettingSubscribers.delete(listener);
+      }
+    };
+  }
+  loadBrowserSettings();
+  installBrowserStateBridge();
+
   const normalize = p => {
     const out = [];
     for (const x of String(p ?? '').replace(/\\/g, '/').split('/')) {
@@ -133,7 +221,11 @@ window.__editorInitPromise = (async function () {
   }
   function applyEditorSettings(settings) {
     if (!settings || typeof settings !== 'object' || Array.isArray(settings)) return;
-    state.behavior = { ...state.behavior, ...settings };
+    const { browserSettings, ...behaviorSettings } = settings;
+    state.behavior = { ...state.behavior, ...behaviorSettings };
+    if (browserSettings && typeof browserSettings === 'object' && !Array.isArray(browserSettings)) {
+      state.browserSettings = normalizeBrowserSettings({ ...state.browserSettings, ...browserSettings });
+    }
   }
   function applyEditorEnvironment(environment) {
     if (!environment || typeof environment !== 'object' || Array.isArray(environment)) return;
@@ -227,8 +319,14 @@ window.__editorInitPromise = (async function () {
   function saveEditorSettings() {
     if (!state.fs) return;
     try {
+      const data = { ...(state.behavior || {}) };
+      const browserOverrides = {};
+      for (const key of ['primaryProxy', 'fallbackProxy', 'useFallback']) {
+        if (state.browserSettings[key] !== workerBrowserDefaults[key]) browserOverrides[key] = state.browserSettings[key];
+      }
+      if (Object.keys(browserOverrides).length) data.browserSettings = browserOverrides;
       state.fs.mkdirSync?.(EDITOR_DIR);
-      state.fs.writeFileSync(EDITOR_SETTINGS_PATH, JSON.stringify(state.behavior || {}, null, 2));
+      state.fs.writeFileSync(EDITOR_SETTINGS_PATH, JSON.stringify(data, null, 2));
       if (!state.loading) state.markDirty?.('editor/settings.json');
     } catch (e) {
       console.error('Failed to save editor settings:', e);
@@ -674,7 +772,6 @@ window.__editorInitPromise = (async function () {
       } catch (_) {}
     }
     t.editor = null;
-    state.previews?.dispose(t);
   }
   function renderGroupEmpty(g) {
     g.viewBody.innerHTML = '';
@@ -724,6 +821,13 @@ window.__editorInitPromise = (async function () {
       if (wb.hostTab) renderGroupEmpty(g);
       else renderEmpty(g);
       return;
+    }
+    // Switching groups/tabs should not destroy an embedded preview. If the
+    // user actually changes the preview type (for example Piskel -> Preview),
+    // dispose the old view so its resources are released and the new view is
+    // rendered from the current filesystem contents.
+    if (t.kind === 'file' && t._previewViewId && t._previewViewId !== t.view) {
+      state.previews?.dispose(t);
     }
     disposeTabView(t);
     clearView(g);
@@ -789,13 +893,84 @@ window.__editorInitPromise = (async function () {
       wb.addTab(t, g);
     } else wb.activateTab(g, t.id);
   }
+  function installExtensionAPI() {
+    if (window.EditorExtensionAPI?.__nodeEditorAPI) return window.EditorExtensionAPI;
+    const extensions = new Map();
+    const listeners = new Set();
+    const notify = () => {
+      listeners.forEach(fn => { try { fn(api.list()); } catch (_) {} });
+      try {
+        for (const g of state.workbench?.groups?.values?.() || []) {
+          const active = g.tabs.find(t => t.id === g.active);
+          if (active?.kind === 'builtin' && active.builtin === 'welcome') state.workbench.activateTab(g, active.id);
+        }
+      } catch (_) {}
+    };
+    const api = {
+      __nodeEditorAPI: true,
+      register(extension) {
+        if (!extension || typeof extension !== 'object') throw new TypeError('Extension must be an object.');
+        const id = String(extension.id || '').trim();
+        if (!id) throw new Error('Extension id is required.');
+        const entry = {
+          id,
+          name: String(extension.name || id),
+          description: String(extension.description || ''),
+          icon: String(extension.icon || ''),
+          open: typeof extension.open === 'function' ? extension.open : null
+        };
+        extensions.set(id, entry);
+        notify();
+        return api.createHandle(id);
+      },
+      unregister(id) {
+        const removed = extensions.delete(String(id));
+        if (removed) notify();
+        return removed;
+      },
+      list() {
+        return [...extensions.values()].map(x => ({...x}));
+      },
+      get(id) {
+        const x = extensions.get(String(id));
+        return x ? {...x} : null;
+      },
+      open(id) {
+        const ext = extensions.get(String(id));
+        if (!ext) return null;
+        if (ext.open) return ext.open({state, api});
+        return null;
+      },
+      onChange(fn) {
+        if (typeof fn !== 'function') return () => {};
+        listeners.add(fn);
+        return () => listeners.delete(fn);
+      },
+      createHandle(id) {
+        const key = String(id);
+        return {
+          id: key,
+          update(patch = {}) {
+            const ext = extensions.get(key);
+            if (!ext) return false;
+            for (const k of ['name','description','icon']) if (patch[k] != null) ext[k] = String(patch[k]);
+            if (typeof patch.open === 'function') ext.open = patch.open;
+            notify();
+            return true;
+          },
+          open() { return api.open(key); },
+          unregister() { return api.unregister(key); }
+        };
+      }
+    };
+    window.EditorExtensionAPI = api;
+    return api;
+  }
+  const extensionAPI = installExtensionAPI();
+
   function openBuiltin(kind, g, options = {}) {
     const wb = g?.ownerWorkbench || state.workbench;
     g = g || wb.getFirstLeaf();
-    if (kind === 'settings') {
-      state.sidebarController.show('settings');
-      return null;
-    }
     if (kind === 'group') {
       const t = makeBuiltinTab('group', {groupName: options.groupName ?? options.name});
       wb.addTab(t, g);
@@ -870,6 +1045,12 @@ window.__editorInitPromise = (async function () {
       const b = document.createElement('button');
       b.textContent = label;
       b.onclick = () => openBuiltin(kind, g);
+      actions.appendChild(b);
+    }
+    for (const ext of extensionAPI.list()) {
+      const b = document.createElement('button');
+      b.textContent = ext.name || ext.id;
+      b.onclick = () => extensionAPI.open(ext.id);
       actions.appendChild(b);
     }
     card.appendChild(actions);
@@ -1062,8 +1243,9 @@ window.__editorInitPromise = (async function () {
       return t;
     }
     if (data.kind === 'builtin') {
-      if (data.builtin === 'settings') return null;
-      return makeBuiltinTab(data.builtin, data);
+      const builtin = String(data.builtin || '');
+      if (!builtin || (builtin !== 'group' && builtin !== 'welcome' && !window.EditorBuiltinFactories?.[builtin])) return null;
+      return makeBuiltinTab(builtin, data);
     }
     return null;
   }
@@ -1878,8 +2060,16 @@ window.__editorInitPromise = (async function () {
       runConfigured,
       logError,
       saveBehaviorSettings,
+      getBrowserSettings: () => ({ ...state.browserSettings }),
+      saveBrowserSettings,
+      subscribeBrowserSettings: listener => {
+        if (typeof listener !== 'function') return () => {};
+        browserSettingSubscribers.add(listener);
+        return () => browserSettingSubscribers.delete(listener);
+      },
       scheduleWorkspaceLayoutSave,
       updateStatus,
+      extensionAPI,
       onOpen: openFile,
       onMove,
       onDelete,
@@ -2020,6 +2210,7 @@ window.__editorInitPromise = (async function () {
     runConfigured,
     saveProjectNow,
     exportProject,
-    logError
+    logError,
+    extensionAPI
   };
 })();

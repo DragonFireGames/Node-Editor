@@ -9,9 +9,9 @@ const browserQuery = new URLSearchParams(window.location.search);
 
 let appSettings = {
   primaryProxy: (window.WorkerConfig && window.WorkerConfig.proxy) || "",
-  fallbackProxy: "",
+  fallbackProxy: (typeof window.WorkerConfig?.fallbackProxy === 'string' ? window.WorkerConfig.fallbackProxy.trim() : ''),
   searchEngine: "https://mojeek.com/search?q=",
-  useFallback: false,
+  useFallback: typeof window.WorkerConfig?.fallbackProxy === 'string' && window.WorkerConfig.fallbackProxy.trim().length > 0,
   obscureURL: true,
   defaultTab: "https://example.com",
   clearDevToolsOnReload: true,
@@ -145,6 +145,7 @@ function subscribeEditorBrowserState() {
       const next = normalizeBrowserState(state);
       appSettings = { ...appSettings, ...next.settings };
       bookmarks = next.bookmarks;
+      try { updateNetworkSettings(); } catch (_) {}
       try { updateSettings(); } catch (_) {}
       renderBookmarks();
       updateBookmarkStar();
@@ -178,12 +179,17 @@ window.addEventListener('pagehide', () => {
 try {
   const savedAppSettings = getStorageItem('appSettings');
   if (savedAppSettings) appSettings = { ...appSettings, ...savedAppSettings };
+  const configuredFallbackProxy = typeof window.WorkerConfig?.fallbackProxy === 'string' ? window.WorkerConfig.fallbackProxy.trim() : '';
+  if (configuredFallbackProxy && !savedAppSettings) {
+    appSettings.fallbackProxy = configuredFallbackProxy;
+    appSettings.useFallback = true;
+  }
   const savedBookmarks = getStorageItem('bookmarks');
   if (Array.isArray(savedBookmarks)) bookmarks = normalizeBrowserState({ bookmarks: savedBookmarks }).bookmarks;
 } catch(e) {}
 loadEditorBrowserState();
 subscribeEditorBrowserState();
-appSettings.primaryProxy = String(window.WorkerConfig?.proxy || '');
+if (!appSettings.primaryProxy) appSettings.primaryProxy = String(window.WorkerConfig?.proxy || '');
 
 function saveBrowserState() {
   const normalizedBookmarks = bookmarks.map(bookmark => ({
@@ -2314,7 +2320,9 @@ function clearHistoryLog() {
 }
 
 function updateSettings() {
-  appSettings.primaryProxy = String(window.WorkerConfig?.proxy || '');
+  const configuredFallbackProxy = typeof window.WorkerConfig?.fallbackProxy === 'string' ? window.WorkerConfig.fallbackProxy.trim() : '';
+  if (configuredFallbackProxy && !appSettings.fallbackProxy) { appSettings.fallbackProxy = configuredFallbackProxy; appSettings.useFallback = true; }
+  appSettings.primaryProxy = String(appSettings.primaryProxy || window.WorkerConfig?.proxy || '');
   document.getElementById('setting-default-tab').value = appSettings.defaultTab;
   document.getElementById('setting-proxy-url').value = appSettings.primaryProxy;
   document.getElementById('setting-fallback-proxy-url').value = appSettings.fallbackProxy;
@@ -2328,7 +2336,7 @@ function updateSettings() {
 
 function saveSettings() {
   appSettings.defaultTab = document.getElementById('setting-default-tab').value;
-  appSettings.primaryProxy = String(window.WorkerConfig?.proxy || '');
+  appSettings.primaryProxy = document.getElementById('setting-proxy-url').value.trim();
   appSettings.fallbackProxy = document.getElementById('setting-fallback-proxy-url').value;
   appSettings.searchEngine = document.getElementById('setting-search-engine').value;
   appSettings.useFallback = document.getElementById('setting-fallback-enable').checked;
@@ -2454,7 +2462,9 @@ window.reloadAIBrowserTab = async function(tabId) {
 window.getAIBrowserHTML = function(tabId, maxChars=100000) {
   const tab = tabs.find(t => t.id === tabId) || getActiveTab();
   if (!tab?.iframe?.contentDocument?.documentElement) throw new Error('Browser tab has no rendered document yet.');
-  const html = String(tab.iframe.contentDocument.documentElement.outerHTML || '');
+  const doc = tab.iframe.contentDocument;
+  const serializer = tab.iframe.contentWindow?.__serializePublicElement;
+  const html = String(typeof serializer === 'function' ? serializer(doc.documentElement, true) : (doc.documentElement.outerHTML || ''));
   const limit = Math.max(1000, Math.min(500000, Number(maxChars) || 100000));
   return {id:tab.id,url:tab.url,title:tab.title,html:html.slice(0,limit),truncated:html.length>limit,totalLength:html.length};
 };

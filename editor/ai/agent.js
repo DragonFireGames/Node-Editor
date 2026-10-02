@@ -7,7 +7,13 @@
     return out;
   }
   function stripToolProtocol(text) { return String(text||'').replace(/<tool_call>[\s\S]*?<\/tool_call>/g,'').trim(); }
-  function stringifyResult(value) { try{return JSON.stringify(value)}catch(_){return String(value)} }
+  function stringifyResult(value, maxChars=120000) {
+    let text;
+    try { text=JSON.stringify(value); } catch(_) { text=String(value); }
+    text=String(text ?? '');
+    if(text.length<=maxChars)return text;
+    return text.slice(0,maxChars)+`\n… [truncated ${text.length-maxChars} characters]`;
+  }
   class AIAgent {
     constructor(options) { Object.assign(this,options); this.maxSteps=options.maxSteps||24; this.running=false; }
     async permission(tool,args,resultPreview) {
@@ -22,12 +28,27 @@
       return true;
     }
     async executeTool(call) {
-      const tool=this.tools.map.get(call.name); if(!tool)throw new Error(`Unknown tool: ${call.name}`);
-      const args=typeof call.arguments==='string' ? JSON.parse(call.arguments||'{}') : (call.arguments||{});
-      await this.permission(tool,args,call.preview || args);
-      this.emit?.({type:'tool_call',name:tool.name,args});
-      try { const result=await tool.execute(args); this.emit?.({type:'tool_result',name:tool.name,args,result,ok:true}); return result; }
-      catch(e){ const error={error:e?.message||String(e)}; this.emit?.({type:'tool_result',name:tool.name,args,result:error,ok:false}); return error; }
+      const started=performance.now?.() ?? Date.now();
+      let tool=this.tools.map.get(call?.name);
+      let args={};
+      try {
+        if(!tool) throw new Error(`Unknown tool: ${call?.name || 'unnamed tool'}`);
+        args=typeof call.arguments==='string' ? JSON.parse(call.arguments||'{}') : (call.arguments||{});
+        if(!args || typeof args!=='object' || Array.isArray(args)) throw new Error('Tool arguments must be a JSON object.');
+        this.emit?.({type:'tool_call',name:tool.name,args});
+        await this.permission(tool,args,call.preview || args);
+        const result=await tool.execute(args);
+        const durationMs=Math.max(0,Math.round((performance.now?.() ?? Date.now())-started));
+        this.emit?.({type:'tool_result',name:tool.name,args,result,ok:true,durationMs});
+        return result;
+      } catch(e) {
+        const durationMs=Math.max(0,Math.round((performance.now?.() ?? Date.now())-started));
+        const error={error:e?.message||String(e)};
+        if(!tool) error.tool=call?.name||'';
+        if(/Permission denied|Permission required/.test(error.error)) error.permissionDenied=true;
+        this.emit?.({type:'tool_result',name:tool?.name||call?.name||'unknown',args,result:error,ok:false,durationMs});
+        return error;
+      }
     }
     async run(messages, options={}) {
       if(this.running)throw new Error('An AI task is already running.');
@@ -46,16 +67,18 @@
         for(let step=0;step<this.maxSteps;step++){
           this.emit?.({type:'step',step:step+1,maxSteps:this.maxSteps});
           if(canNative){
-            const msg=await this.client.complete(working,{model,tools:toolDefs,systemPrompt:options.systemPrompt,thinking:true,maxTokens:options.maxTokens});
-            const think=msg.reasoning_content||msg.reasoning||''; if(think){reasoning+=think;this.emit?.({type:'reasoning',text:think});}
-            const calls=Array.isArray(msg.tool_calls)?msg.tool_calls.map(x=>({id:x.id,name:x.function?.name,arguments:x.function?.arguments||'{}',_geminiCallId:x._geminiCallId||null})).filter(x=>x.name):[];
+            this.emit?.({type:'request_start',model:model.model||model.id||'model',protocol:model.protocol||model.kind||'unknown',step:step+1,maxSteps:this.maxSteps});
+            const msg=await this.client.complete(working,{model,tools:toolDefs,systemPrompt:options.systemPrompt,thinking:true,maxTokens:options.maxTokens,onRetry:options.onRetry,max429Retries:options.max429Retries,baseRetryDelay:options.baseRetryDelay,retry429:options.retry429,retryTransport:options.retryTransport,maxTransportRetries:options.maxTransportRetries,transportRetryDelay:options.transportRetryDelay,onResponse:info=>this.emit?.({type:'request_response',...info})});
+            const think=msg.reasoning_content||msg.reasoning||''; if(think){reasoning+=think;this.emit?.({type:msg.reasoning_kind==='summary'?'reasoning_summary':'reasoning',text:think});}
+            const calls=Array.isArray(msg.tool_calls)?msg.tool_calls.map((x,i)=>({id:x.id||x._geminiCallId||`tool-${Date.now()}-${i}`,name:x.function?.name,arguments:x.function?.arguments||'{}',_geminiCallId:x._geminiCallId||null})).filter(x=>x.name):[];
             if(!calls.length){ finalText=String(msg.content||''); working.push({role:'assistant',content:finalText}); this.emit?.({type:'final',text:finalText,reasoning}); return {text:finalText,reasoning}; }
             working.push({role:'assistant',content:msg.content||'',tool_calls:msg.tool_calls,_geminiContent:msg._geminiContent||null});
             for(const call of calls){ const result=await this.executeTool(call); working.push({role:'tool',tool_call_id:call.id,_geminiCallId:call._geminiCallId,name:call.name,content:stringifyResult(result)}); }
           } else {
             let text=''; let lastReasoning='';
-            const streamOptions={model,systemPrompt:options.systemPrompt,thinking:true,maxTokens:options.maxTokens};
-            for await(const chunk of this.client.stream(working,streamOptions)){text=chunk.text||text; if(chunk.reasoning&&chunk.reasoning!==lastReasoning){const delta=chunk.reasoning.slice(lastReasoning.length);if(delta){reasoning+=delta;this.emit?.({type:'reasoning',text:delta});}lastReasoning=chunk.reasoning;} this.emit?.({type:'assistant',text});}
+            this.emit?.({type:'request_start',model:model.model||model.id||'model',protocol:model.protocol||model.kind||'unknown',step:step+1,maxSteps:this.maxSteps});
+            const streamOptions={model,systemPrompt:options.systemPrompt,thinking:true,maxTokens:options.maxTokens,onRetry:options.onRetry,max429Retries:options.max429Retries,baseRetryDelay:options.baseRetryDelay,retry429:options.retry429};
+            for await(const chunk of this.client.stream(working,streamOptions)){text=chunk.text||text; if(chunk.reasoning&&chunk.reasoning!==lastReasoning){const delta=chunk.reasoning.slice(lastReasoning.length);if(delta){reasoning+=delta;this.emit?.({type:chunk.reasoningKind==='summary'?'reasoning_summary':'reasoning',text:delta});}lastReasoning=chunk.reasoning;} this.emit?.({type:'assistant',text});}
             const calls=parseToolProtocol(text);
             if(!calls.length){finalText=stripToolProtocol(text);this.emit?.({type:'final',text:finalText,reasoning});return {text:finalText,reasoning};}
             const clean=stripToolProtocol(text);working.push({role:'assistant',content:clean});

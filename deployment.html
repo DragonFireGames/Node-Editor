@@ -37,13 +37,15 @@ window.__deploymentNetworkReady = (async function() {
     return await r.json();
   }).catch(e => {
     console.error(e);
-    return {proxy:''};
+    return {proxy:'',fallbackProxy:false};
   });
   window.WorkerConfig = workers;
   const network = new Network();
-  const native = new NetworkEndpoint();
+  const native = new NetworkEndpoint(true, true);
   native.__networkRole = 'native';
-  const proxy = new ProxyNetworkEndpoint(String(workers.proxy || ''), true, !!workers.proxy);
+  const configuredFallbackProxy = typeof workers.fallbackProxy === 'string' ? workers.fallbackProxy.trim() : '';
+  const selectedProxy = configuredFallbackProxy || String(workers.proxy || '');
+  const proxy = new ProxyNetworkEndpoint(selectedProxy, true, !!selectedProxy);
   network.appendEndpoint(native);
   network.appendEndpoint(proxy);
   return network;

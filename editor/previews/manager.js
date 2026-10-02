@@ -42,12 +42,33 @@
       const view = this.getView(file, id);
       if (!view) return false;
       const tab = group?.tabs?.find(t => t.id === file.id) || file;
+
+      // Keep the actual preview surface alive while the tab is moved or
+      // temporarily deactivated. This is especially important for embedded
+      // editors such as Piskel: detaching an iframe does not reload it, while
+      // destroying it loses the entire editor state.
+      if (tab._previewHost && tab._previewViewId === id) {
+        host.appendChild(tab._previewHost);
+        return true;
+      }
+
+      // A different preview view is being opened, so the previous preview
+      // must really be disposed before constructing the new one.
+      if (tab._previewHost || tab._previewViewId) this.dispose(tab);
+
       const activation = tab._viewActivation || 0;
+      const previewHost = document.createElement('div');
+      previewHost.className = 'editor-preview-surface';
+      previewHost.style.cssText = 'position:relative;width:100%;height:100%;min-height:0;overflow:hidden;';
+      host.appendChild(previewHost);
+      tab._previewHost = previewHost;
+      tab._previewViewId = id;
+
       const context = {
         state: this.state,
         file,
         tab,
-        host,
+        host: previewHost,
         group,
         manager: this,
         readText: path => this.state.fs.readFileSync(path || file.path, 'utf8') || '',
@@ -90,7 +111,12 @@
         }
       };
       if (!context.isActive()) return false;
-      await view.create(context);
+      try {
+        await view.create(context);
+      } catch (error) {
+        this.dispose(tab);
+        throw error;
+      }
       return context.isActive();
     }
     dispose(file) {
@@ -102,6 +128,11 @@
         try { URL.revokeObjectURL(url); } catch (_) {}
       }
       file._previewURLs = [];
+      if (file?._previewHost) {
+        try { file._previewHost.remove(); } catch (_) {}
+      }
+      file._previewHost = null;
+      file._previewViewId = null;
     }
   }
   window.EditorPreviewManager = EditorPreviewManager;

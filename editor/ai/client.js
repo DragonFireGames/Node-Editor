@@ -56,8 +56,8 @@
   }
   function normalizeChatData(data){
     const msg=data?.choices?.[0]?.message;
-    if(msg)return {role:'assistant',content:textOf(msg.content),tool_calls:normalizeToolCalls(msg.tool_calls),reasoning_content:msg.reasoning_content||msg.reasoning||''};
-    return {role:'assistant',content:textOf(data?.output_text || data?.text || ''),tool_calls:[],reasoning_content:data?.reasoning_content||''};
+    if(msg)return {role:'assistant',content:textOf(msg.content),tool_calls:normalizeToolCalls(msg.tool_calls),reasoning_content:msg.reasoning_content||msg.reasoning||'',reasoning_kind:(msg.reasoning||msg.reasoning_content)?'reasoning':'',_usage:data?.usage||null};
+    return {role:'assistant',content:textOf(data?.output_text || data?.text || ''),tool_calls:[],reasoning_content:data?.reasoning_content||'',_usage:data?.usage||null};
   }
   function normalizeResponsesData(data){
     const output=Array.isArray(data?.output)?data.output:[];let content=String(data?.output_text || '');const calls=[];let reasoning='';
@@ -68,7 +68,7 @@
       } else if(item?.type==='function_call') calls.push({id:item.call_id||item.id,type:'function',function:{name:item.name,arguments:typeof item.arguments==='string'?item.arguments:JSON.stringify(item.arguments||{})}});
       else if(item?.type==='reasoning') reasoning += textOf(item.summary || item.content || '');
     }
-    return {role:'assistant',content,tool_calls:calls,reasoning_content:reasoning};
+    return {role:'assistant',content,tool_calls:calls,reasoning_content:reasoning,reasoning_kind:reasoning?'summary':'',_usage:data?.usage||null};
   }
   function normalizeAnthropicData(data){
     let content='',calls=[];
@@ -76,7 +76,7 @@
       if(item?.type==='text')content+=item.text||'';
       else if(item?.type==='tool_use')calls.push({id:item.id,type:'function',function:{name:item.name,arguments:JSON.stringify(item.input||{})}});
     }
-    return {role:'assistant',content,tool_calls:calls,reasoning_content:''};
+    return {role:'assistant',content,tool_calls:calls,reasoning_content:'',_usage:data?.usage||null};
   }
   function normalizeGeminiData(data){
     let content='',calls=[];
@@ -87,10 +87,10 @@
         calls.push({id:p.functionCall.id||('call-'+Math.random().toString(36).slice(2)),type:'function',function:{name:p.functionCall.name,arguments:JSON.stringify(p.functionCall.args||{})},_gemini:p,_geminiCallId:p.functionCall.id||null});
       }
     }
-    return {role:'assistant',content,tool_calls:calls,reasoning_content:'',_geminiContent:data?.candidates?.[0]?.content||null};
+    return {role:'assistant',content,tool_calls:calls,reasoning_content:'',reasoning_kind:'',_geminiContent:data?.candidates?.[0]?.content||null};
   }
   function normalizeCohereData(data){
-    const msg=data?.message || {};let content=textOf(msg.content);let calls=normalizeToolCalls(msg.tool_calls || msg.toolCalls);return {role:'assistant',content,tool_calls:calls,reasoning_content:''};
+    const msg=data?.message || {};let content=textOf(msg.content);let calls=normalizeToolCalls(msg.tool_calls || msg.toolCalls);return {role:'assistant',content,tool_calls:calls,reasoning_content:'',_usage:data?.usage||null};
   }
   function openAIToolCall(c){return {id:c?.id,type:'function',function:{name:c?.function?.name||c?.name||'',arguments:typeof c?.function?.arguments==='string'?c.function.arguments:JSON.stringify(c?.function?.arguments||{})}};}
   function openAIChatMessages(messages){return messages.map(m=>{if(m.role==='tool')return {role:'tool',tool_call_id:m.tool_call_id||m.id,name:m.name,content:String(m.content||'')};return {role:m.role,content:String(m.content||''),...(Array.isArray(m.tool_calls)&&m.tool_calls.length?{tool_calls:m.tool_calls.map(openAIToolCall)}:{})};});}
@@ -146,18 +146,80 @@
     if(protocol==='openai-responses')return tools.map(t=>({type:'function',name:t.function?.name,description:t.function?.description,parameters:t.function?.parameters||{type:'object',properties:{}}}));
     return tools;
   }
-  function modelAuthKey(model,registry){if(model?.apiKey)return model.apiKey;if(aiRoot.isHuggingFaceEndpoint?.(model?.endpoint)){const userKey=registry?.getHuggingFaceApiKey?.()||'';if(userKey)return userKey;if(model.useSharedKeys!==false)return registry?.nextSharedHuggingFaceKey?.()||'';}return model?.anonymousAuth||'';}
+  function modelAuthKey(model,registry){if(model?.apiKey)return model.apiKey;if(root.isHuggingFaceEndpoint?.(model?.endpoint)){const userKey=registry?.getHuggingFaceApiKey?.()||'';if(userKey)return userKey;if(model.useSharedKeys!==false)return registry?.nextSharedHuggingFaceKey?.()||'';}return model?.anonymousAuth||'';}
+  function supportsOpenAIReasoningSummary(model){
+    const endpoint=String(model?.endpoint||'').toLowerCase();
+    return model?.protocol==='openai-responses' && /(?:^|\/\/)api\.openai\.com(?:\/|$)/i.test(endpoint);
+  }
+  function providerDefinition(model,registry){
+    const explicit=String(model?.provider||'').trim();
+    const inferred=registry?.providerForModel?.(explicit==='custom'?{...model,provider:''}:model) || '';
+    const id=explicit && explicit!=='custom' ? explicit : inferred;
+    return id ? (registry?.provider?.(id) || {}) : {};
+  }
+  function chatProviderOptions(model,registry){
+    const rules=providerDefinition(model,registry).chatOptions;
+    if(!Array.isArray(rules)) return {};
+    const id=String(model?.model||'');
+    const rule=rules.find(x=>{
+      const matcher=x?.match;
+      if(!matcher)return false;
+      try { if('lastIndex' in matcher) matcher.lastIndex=0; return typeof matcher.test==='function' ? !!matcher.test(id) : false; } catch(_) { return false; }
+    });
+    return rule?.body && typeof rule.body==='object' ? {...rule.body} : {};
+  }
+  function toolCallRecoveryDefinition(model,registry){
+    const value=providerDefinition(model,registry).toolCallRecovery;
+    return value && typeof value==='object' ? value : null;
+  }
+  async function detectToolCallParseFailure(response,model,registry){
+    const strategy=toolCallRecoveryDefinition(model,registry);
+    if(!strategy || response?.status!==Number(strategy.status||400)) return null;
+    try {
+      const data=await response.clone().json();
+      const code=String(data?.error?.code||'');
+      const message=String(data?.error?.message||'');
+      const codes=Array.isArray(strategy.errorCodes)?strategy.errorCodes.map(String):[];
+      if(!codes.includes(code) && !codes.some(x=>x && message.toLowerCase().includes(x.toLowerCase()))) return null;
+      return {strategy,data};
+    } catch(_) { return null; }
+  }
+  function nextRecoveryTemperature(current,strategy){
+    const value=Number.isFinite(Number(current)) ? Number(current) : .7;
+    const factor=Number.isFinite(Number(strategy?.factor)) ? Number(strategy.factor) : .5;
+    const min=Number.isFinite(Number(strategy?.minTemperature)) ? Number(strategy.minTemperature) : .2;
+    return Math.max(min,Math.min(1,value*factor));
+  }
   function authHeaders(model,extra={},registry){const headers={'Content-Type':'application/json',...extra};const key=modelAuthKey(model,registry);if(key){if(model.protocol==='google-gemini')headers['x-goog-api-key']=key;else if(model.protocol==='anthropic-messages')headers['x-api-key']=key;else headers.Authorization='Bearer '+key;}return headers;}
   function requestConfig(model,messages,options,stream,registry){
     const tools=model.supportsTools===false ? undefined : toolsFor(model,options.tools), maxTokens=Math.max(16, options.maxTokens ?? 2048), temperature=options.temperature ?? .7;
     switch(model.protocol){
-      case 'openai-chat':return {url:completionUrl(model),headers:authHeaders(model,{},registry),body:{model:model.model,messages:openAIChatMessages(messages),temperature,max_tokens:maxTokens,stream,...(tools?{tools,tool_choice:options.tool_choice||'auto'}:{})}};
-      case 'openai-responses':return {url:responseUrl(model),headers:authHeaders(model,{},registry),body:{model:model.model,input:responseInput(messages),stream,...(options.systemPrompt?{}:{}),...(tools?{tools,tool_choice:options.tool_choice||'auto'}:{})}};
+      case 'openai-chat':return {url:completionUrl(model),headers:authHeaders(model,{},registry),body:{model:model.model,messages:openAIChatMessages(messages),temperature,max_tokens:maxTokens,stream,...(stream?{stream_options:{include_usage:true}}:{}),...chatProviderOptions(model,registry),...(tools?{tools,tool_choice:options.tool_choice||'auto'}:{})}};
+      case 'openai-responses':return {url:responseUrl(model),headers:authHeaders(model,{},registry),body:{model:model.model,input:responseInput(messages),stream,...(supportsOpenAIReasoningSummary(model)?{reasoning:{summary:'auto'}}:{}),...(tools?{tools,tool_choice:options.tool_choice||'auto'}:{})}};
       case 'anthropic-messages':{const x=anthropicMessages(messages);return {url:anthropicUrl(model),headers:authHeaders(model,{'anthropic-version':'2023-06-01'},registry),body:{model:model.model,max_tokens:maxTokens,system:x.system,messages:x.messages,stream,temperature,...(tools?{tools,tool_choice:{type:'auto'}}:{})}};}
       case 'google-gemini':{const x=geminiMessages(messages);return {url:googleUrl(model,stream),headers:authHeaders(model,{},registry),body:{contents:x.contents,...(x.system?{systemInstruction:{parts:[{text:x.system}]} }:{}),...(tools?{tools}:{}),generationConfig:{maxOutputTokens:maxTokens}}};}
       case 'cohere-v2':return {url:cohereUrl(model),headers:authHeaders(model,{},registry),body:{model:model.model,messages:cohereMessages(messages),stream,temperature,max_tokens:maxTokens,...(tools?{tools}:{})}};
       default:throw new Error(`Unsupported AI API format "${model.protocol||model.kind||'unknown'}". Open Settings and choose a supported API format.`);
     }
+  }
+  async function responseErrorMessage(response,prefix='AI request failed'){
+    const status=Number(response?.status)||0;
+    let raw=''; try{raw=await response.text();}catch(_){}
+    let detail='';
+    try{const data=JSON.parse(raw);const err=data?.error||data;if(err?.message)detail=String(err.message);if(err?.code)detail+=(detail?' ':'')+`[${String(err.code)}]`;}catch(_){}
+    if(!detail)detail=raw.trim();
+    if(detail.length>8000)detail=detail.slice(0,8000)+'…';
+    return `${prefix} (${status}): ${detail || response?.statusText || 'Unknown error'}`;
+  }
+  function parseRateLimitReset(value){
+    const text=String(value||'').trim();
+    if(!text)return 0;
+    const m=text.match(/([0-9]+(?:\.[0-9]+)?)\s*(ms|s|m)?/i);
+    if(!m)return 0;
+    const n=Number(m[1]);
+    if(!Number.isFinite(n))return 0;
+    const unit=(m[2]||'s').toLowerCase();
+    return unit==='ms'?n/1000:unit==='m'?n*60:n;
   }
   class AIClient {
     constructor(registry,network){this.registry=registry;this.network=network || window.__sharedBrowserNetwork || null;this.abortController=null;}
@@ -167,10 +229,45 @@
       if(!this.network || typeof this.network.request!=='function') throw new Error('AI network is not initialized.');
       const model=this.model();
       const headers=new Headers(init.headers||{});
-      const request=new Request(url,{...init,headers});
-      const response=await this.network.request(request,'ai');
-      if(!response) throw new Error('AI network request failed: no endpoint returned a response.');
-      return response;
+      const requestInit={...init,headers};
+      const prefs=root.getAIPreferences?.() || {};
+      const maxRetries=Math.max(0,Math.min(10,Number(options.max429Retries ?? prefs.max429Retries ?? 5)));
+      const retryEnabled=options.retry429 !== false && prefs.retry429 !== false;
+      const maxTransportRetries=Math.max(0,Math.min(10,Number(options.maxTransportRetries ?? prefs.maxTransportRetries ?? 2)));
+      const retryTransport=options.retryTransport !== false && prefs.retryTransport !== false;
+      const transportDelay=Math.max(250,Math.min(30000,Number(options.transportRetryDelay ?? prefs.transportRetryDelay ?? 1000)));
+      let attempt=0,transportAttempt=0;
+      while(true){
+        if(options.signal?.aborted) throw new DOMException('Aborted','AbortError');
+        const request=new Request(url,requestInit);
+        let response=null, transportError=null;
+        try { response=await this.network.request(request,'ai'); } catch(e) { transportError=e; }
+        if(!response){
+          if(retryTransport && transportAttempt<maxTransportRetries){
+            transportAttempt++;
+            const waitMs=Math.min(30000,transportDelay*Math.pow(2,transportAttempt-1)+Math.floor(Math.random()*250));
+            root.recordAnalytics?.({model,transportRetry:1,request:1});
+            options.onRetry?.({kind:'transport_retry',attempt:transportAttempt,maxRetries:maxTransportRetries,waitMs,status:0,model,error:transportError?.message||'No endpoint returned a response.'});
+            await new Promise(resolve=>setTimeout(resolve,waitMs));
+            continue;
+          }
+          if(transportError) throw transportError;
+          throw new Error('AI network request failed: no endpoint returned a response.');
+        }
+        options.onResponse?.({status:response.status,ok:response.ok,url:response.url||url,attempt:transportAttempt+1,model});
+        if(response.status!==429 || !retryEnabled || attempt>=maxRetries) return response;
+        const retryAfter=Number(response.headers?.get?.('retry-after')||0);
+        const reset=String(response.headers?.get?.('x-ratelimit-reset-tokens')||'');
+        const resetSeconds=parseRateLimitReset(reset);
+        const base=Math.max(250,Number(options.baseRetryDelay ?? prefs.baseRetryDelay ?? 1500));
+        const exponential=Math.min(30000,base*Math.pow(2,attempt));
+        const waitMs=Math.max(250,Math.min(60000, (retryAfter>0?retryAfter*1000:resetSeconds>0?resetSeconds*1000:exponential) + Math.floor(Math.random()*350)));
+        attempt++;
+        root.recordAnalytics?.({model,retries429:1});
+        options.onRetry?.({attempt,maxRetries,waitMs,status:429,model});
+        try { await response.text(); } catch(_) {}
+        await new Promise(resolve=>setTimeout(resolve,waitMs));
+      }
     }
     cancel(){this.abortController?.abort();this.abortController=null;}
     async completeHorde(messages,options,model){
@@ -215,15 +312,32 @@
       const model=options.model||this.model();
       if(model.protocol==='gradio-space')return await this.completeGradio(messages,options,model);
       if(model.protocol==='ai-horde')return await this.completeHorde(messages,options,model);
-      const cfg=requestConfig(model,messages,options,false,this.registry);
-      const response=await this.request(cfg.url,{method:'POST',headers:cfg.headers,signal:options.signal,body:JSON.stringify(cfg.body)});
-      if(!response.ok)throw new Error(`AI request failed (${response.status}): ${await response.text()}`);
+      let temperature=options.temperature??.7;
+      let response=null;
+      const prefs=root.getAIPreferences?.()||{};
+      const recovery=toolCallRecoveryDefinition(model,this.registry);
+      const recoveryEnabled=options.toolRecovery!==false && prefs.toolRecovery!==false && !!recovery;
+      const recoveryRetries=Math.max(0,Math.min(10,Number(options.maxToolRecoveryRetries??prefs.maxToolRecoveryRetries??recovery?.maxRetries??0)));
+      for(let parseAttempt=0;parseAttempt<=recoveryRetries;parseAttempt++){
+        const requestOptions={...options,temperature};
+        const cfg=requestConfig(model,messages,requestOptions,false,this.registry);
+        response=await this.request(cfg.url,{method:'POST',headers:cfg.headers,signal:options.signal,body:JSON.stringify(cfg.body),onRetry:options.onRetry,onResponse:options.onResponse,max429Retries:options.max429Retries,baseRetryDelay:options.baseRetryDelay,retry429:options.retry429,retryTransport:options.retryTransport,maxTransportRetries:options.maxTransportRetries,transportRetryDelay:options.transportRetryDelay});
+        if(response.ok) break;
+        const parseFailure=recoveryEnabled ? await detectToolCallParseFailure(response,model,this.registry) : null;
+        if(!parseFailure || parseAttempt>=recoveryRetries || recovery?.strategy!=='lower-temperature') break;
+        temperature=nextRecoveryTemperature(temperature,recovery);
+        root.recordAnalytics?.({model,toolRecovery:1}); options.onRetry?.({kind:'tool_parse_recovery',attempt:parseAttempt+1,maxRetries:recoveryRetries,waitMs:0,status:response.status,model,text:`Tool-call parsing failed; retrying with temperature ${temperature.toFixed(2)} (attempt ${parseAttempt+2}/${recoveryRetries+1}).`});
+      }
+      if(!response?.ok)throw new Error(await responseErrorMessage(response));
       const data=await response.json();
-      if(model.protocol==='openai-responses')return normalizeResponsesData(data);
-      if(model.protocol==='anthropic-messages')return normalizeAnthropicData(data);
-      if(model.protocol==='google-gemini')return normalizeGeminiData(data);
-      if(model.protocol==='cohere-v2')return normalizeCohereData(data);
-      return normalizeChatData(data);
+      let result;
+      if(model.protocol==='openai-responses')result=normalizeResponsesData(data);
+      else if(model.protocol==='anthropic-messages')result=normalizeAnthropicData(data);
+      else if(model.protocol==='google-gemini')result=normalizeGeminiData(data);
+      else if(model.protocol==='cohere-v2')result=normalizeCohereData(data);
+      else result=normalizeChatData(data);
+      root.recordAnalytics?.({model,usage:result._usage,request:1});
+      return result;
     }
     async completeGradio(messages,options,model){const result={role:'assistant',content:'',reasoning_content:''};for await(const chunk of this.streamGradio(messages,options,model)){result.content=chunk.text||result.content;result.reasoning_content=chunk.reasoning||result.reasoning_content;}return result;}
     async *stream(messages,options={}){
@@ -237,16 +351,32 @@
       } finally {if(this.abortController===controller)this.abortController=null;}
     }
     async *streamNative(messages,options,model){
-      const cfg=requestConfig(model,messages,options,true,this.registry);const response=await this.request(cfg.url,{method:'POST',headers:cfg.headers,signal:options.signal,body:JSON.stringify(cfg.body)});
-      if(!response.ok)throw new Error(`AI request failed (${response.status}): ${await response.text()}`);
-      let full='',reasoning='',lastReasoning='';
+      let temperature=options.temperature??.7;
+      let response=null;
+      const prefs=root.getAIPreferences?.()||{};
+      const recovery=toolCallRecoveryDefinition(model,this.registry);
+      const recoveryEnabled=options.toolRecovery!==false && prefs.toolRecovery!==false && !!recovery;
+      const recoveryRetries=Math.max(0,Math.min(10,Number(options.maxToolRecoveryRetries??prefs.maxToolRecoveryRetries??recovery?.maxRetries??0)));
+      for(let parseAttempt=0;parseAttempt<=recoveryRetries;parseAttempt++){
+        const requestOptions={...options,temperature};
+        const cfg=requestConfig(model,messages,requestOptions,true,this.registry);
+        response=await this.request(cfg.url,{method:'POST',headers:cfg.headers,signal:options.signal,body:JSON.stringify(cfg.body),onRetry:options.onRetry,onResponse:options.onResponse,max429Retries:options.max429Retries,baseRetryDelay:options.baseRetryDelay,retry429:options.retry429,retryTransport:options.retryTransport,maxTransportRetries:options.maxTransportRetries,transportRetryDelay:options.transportRetryDelay});
+        if(response.ok) break;
+        const parseFailure=recoveryEnabled ? await detectToolCallParseFailure(response,model,this.registry) : null;
+        if(!parseFailure || parseAttempt>=recoveryRetries || recovery?.strategy!=='lower-temperature') break;
+        temperature=nextRecoveryTemperature(temperature,recovery);
+        root.recordAnalytics?.({model,toolRecovery:1}); options.onRetry?.({kind:'tool_parse_recovery',attempt:parseAttempt+1,maxRetries:recoveryRetries,waitMs:0,status:response.status,model,text:`Tool-call parsing failed; retrying with temperature ${temperature.toFixed(2)} (attempt ${parseAttempt+2}/${recoveryRetries+1}).`});
+      }
+      if(!response?.ok)throw new Error(await responseErrorMessage(response));
+      let full='',reasoning='',lastReasoning='',usage=null;
       for await(const block of streamResponse(response,options.signal)){
         let data=parseSSEBlock(block); if(data==null){try{data=JSON.parse(String(block).trim())}catch(_){continue;}}
+        usage=data?.usage||data?.usageMetadata||data?.response?.usage||usage;
         if(model.protocol==='openai-chat'){
           const delta=data?.choices?.[0]?.delta||{};const text=delta.content||'';const think=delta.reasoning_content||delta.reasoning||'';
-          if(text){full+=text;yield {text:full,delta:text,reasoning};} if(think){reasoning+=think;yield {text:full,delta:'',reasoning};}
+          if(text){full+=text;yield {text:full,delta:text,reasoning};} if(think){reasoning+=think;yield {text:full,delta:'',reasoning,reasoningKind:'reasoning'};}
         } else if(model.protocol==='openai-responses'){
-          const type=data?.type||'';if(type==='response.output_text.delta'){const text=data.delta||'';full+=text;yield {text:full,delta:text,reasoning};}
+          const type=data?.type||'';if(type==='response.output_text.delta'){const text=data.delta||'';full+=text;yield {text:full,delta:text,reasoning};} else if(type==='response.reasoning_summary_text.delta'){const delta=data.delta||'';if(delta){reasoning+=delta;yield {text:full,delta:'',reasoning,reasoningKind:'summary'};}} else if(type==='response.reasoning_summary_text.done'){const text=data.text||'';if(text){reasoning=text;yield {text:full,delta:'',reasoning,reasoningKind:'summary'};}}
         } else if(model.protocol==='anthropic-messages'){
           const type=data?.type||'';if(type==='content_block_delta'){const d=data.delta||{};if(d.type==='text_delta'&&d.text){full+=d.text;yield {text:full,delta:d.text,reasoning};}else if(d.type==='thinking_delta'&&d.thinking){reasoning+=d.thinking;yield {text:full,delta:'',reasoning};}}
         } else if(model.protocol==='google-gemini'){
@@ -254,13 +384,14 @@
         }
         if(reasoning!==lastReasoning){lastReasoning=reasoning;}
       }
+      if(usage){root.recordAnalytics?.({model,usage,request:1});yield {text:full,delta:'',reasoning,usage};}
     }
     async *streamGradio(messages,options,model){
       const endpoint=trimEndpoint(model.endpoint),history=[];
       for(const m of messages){if(m.role==='user')history.push([m.content,'']);else if(m.role==='assistant'){const last=history[history.length-1];if(last&&last[1]==='')last[1]=typeof m.content==='string'?m.content:'';else history.push(['',typeof m.content==='string'?m.content:'']);}}
       const lastUser=[...messages].reverse().find(x=>x.role==='user')?.content||'',cleanedHistory=history.slice(0,-1),thinkingMode=options.thinking===false?'⚡ Fast Mode  (direct answer)':'🧠 Thinking Mode  (chain-of-thought reasoning)';
       const payload={data:[typeof lastUser==='string'?lastUser:JSON.stringify(lastUser),cleanedHistory,model.remoteModel||model.model,thinkingMode,'',options.systemPrompt||'',options.maxTokens||2048,options.temperature??.7,options.topP??.9]};let submit=null,usedPath='';
-      for(const path of ['/gradio/gradio_api/call/chat','/gradio_api/call/chat']){const response=await this.request(endpoint+path,{method:'POST',headers:authHeaders(model,{},registry),body:JSON.stringify(payload),signal:options.signal});if(response.status===404)continue;if(!response.ok)throw new Error(`Public model request failed (${response.status}): ${await response.text()}`);submit=await response.json();usedPath=path;break;}
+      for(const path of ['/gradio/gradio_api/call/chat','/gradio_api/call/chat']){const response=await this.request(endpoint+path,{method:'POST',headers:authHeaders(model,{},this.registry),body:JSON.stringify(payload),signal:options.signal});if(response.status===404)continue;if(!response.ok)throw new Error(`Public model request failed (${response.status}): ${await response.text()}`);submit=await response.json();usedPath=path;break;}
       if(!submit?.event_id)throw new Error('Public model did not return a Gradio event ID.');
       const eventResponse=await this.request(endpoint+usedPath+'/'+encodeURIComponent(submit.event_id),{signal:options.signal,headers:model.apiKey?{'Authorization':'Bearer '+model.apiKey}:{}});if(!eventResponse.ok)throw new Error(`Public model stream failed (${eventResponse.status}): ${await eventResponse.text()}`);
       let previous='',reasoning='';

@@ -6,6 +6,7 @@
     const runDebug = root.RunDebug(options);
     const settings = root.Settings(options);
     const placeholders = root.Placeholders(options);
+    const extensions = root.Extensions(options);
     const search = root.Search(options);
     const sourceControl = root.SourceControl(options);
     const profile = root.Profile(options);
@@ -32,7 +33,7 @@
       activitySearch: {kind: 'Search', show: () => search.show()},
       activitySource: {kind: 'Source Control', show: () => sourceControl.show()},
       activityRun: {kind: 'Run and Debug', show: () => runDebug.show()},
-      activityExtensions: {kind: 'Extensions', show: () => placeholders.show('Extensions')},
+      activityExtensions: {kind: 'Extensions', show: () => extensions.show()},
       activitySettings: {kind: 'settings', show: () => settings.show()},
       activityExplorer: {kind: 'explorer', show: () => explorer.show()},
       activityProfile: {kind: 'Profile', show: () => profile.show()},
@@ -121,10 +122,10 @@
     setWidth(MIN_WIDTH);
     state.sidebar = 'explorer';
     return {
-      explorer, runDebug, settings, search, sourceControl, profile, show,
+      explorer, runDebug, settings, extensions, search, sourceControl, profile, show, dispose() { extensions.dispose?.(); githubUnsubscribe?.(); },
       setActiveActivity(id) { document.querySelectorAll('.activity-button').forEach(x => x.classList.toggle('active', x.id === id)); },
       restoreCollapsed: paths => explorer.restoreCollapsed(paths),
-      setWidth, collapse, expand, getWidth: () => width, dispose: () => githubUnsubscribe?.()
+      setWidth, collapse, expand, getWidth: () => width
     };
   };
 })();

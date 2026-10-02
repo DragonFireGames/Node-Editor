@@ -145,25 +145,33 @@ class Network extends EventHandler {
   async searchEndpoints(callback, type) {
     await wait(1);
     const endpoints = this.endpoints;
+    var responseError = null;
+    var lastResponse = null;
+    var lastError = null;
     for (var i = 0; i < endpoints.length; i++) {
       var endp = endpoints[i];
-      if (endp?.enabled === false) continue;
+      if (endp?.enabled == false) continue;
       try {
         var response = await callback.call(this, endp);
-        if (!response || !response.ok) continue;
-        return response;
+        if (!response) continue;
+        if (response.ok) return response;
+        if (endp.defaultError) responseError = response;
+        lastResponse = response;
       } catch (e) {
         console.log('[networkRequest] Endpoint error:', e && e.message || e);
+        lastError = e;
       }
     }
-    return;
+    if (responseError || lastResponse) return responseError || lastResponse;
+    if (lastError) throw lastError;
   }
 }
 
 class NetworkEndpoint extends EventHandler {
-  constructor(enabled = true) {
+  constructor(enabled = true, defaultError = false) {
     super();
     this.enabled = enabled;
+    this.defaultError = defaultError;
   }
   async handleRequest(request,type) {
     return await originalFetch(request);
@@ -197,7 +205,7 @@ class ProxyNetworkEndpoint extends NetworkEndpoint {
     try {
       const proxyRequest = new Request(targetProxyUrl, request);
       let response = await originalFetch(proxyRequest);
-      if (!response.ok) throw new Error(`HTTP Error ${response.status}`);
+      //if (!response.ok) throw new Error(`HTTP Error ${response.status}`);
       if (response.url === targetProxyUrl) Object.defineProperty(response, 'url', {get:()=>targetProxyUrl});
       return response;
     } catch (err) {
