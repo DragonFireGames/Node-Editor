@@ -17,7 +17,7 @@
   class AIAgent {
     constructor(options) { Object.assign(this,options); this.maxSteps=options.maxSteps||24; this.running=false; }
     async permission(tool,args,resultPreview) {
-      const name=tool.permission || 'ask'; const manager=this.permissions;
+      const name=tool.permission || 'ask'; if(name==='none')return true; const manager=this.permissions;
       const policy=manager?.get(name) || 'ask';
       if(policy==='always')return true;
       if(policy==='never')throw new Error(`Permission denied: ${tool.name}`);
@@ -73,7 +73,7 @@
             const calls=Array.isArray(msg.tool_calls)?msg.tool_calls.map((x,i)=>({id:x.id||x._geminiCallId||`tool-${Date.now()}-${i}`,name:x.function?.name,arguments:x.function?.arguments||'{}',_geminiCallId:x._geminiCallId||null})).filter(x=>x.name):[];
             if(!calls.length){ finalText=String(msg.content||''); working.push({role:'assistant',content:finalText}); this.emit?.({type:'final',text:finalText,reasoning}); return {text:finalText,reasoning}; }
             working.push({role:'assistant',content:msg.content||'',tool_calls:msg.tool_calls,_geminiContent:msg._geminiContent||null});
-            for(const call of calls){ const result=await this.executeTool(call); working.push({role:'tool',tool_call_id:call.id,_geminiCallId:call._geminiCallId,name:call.name,content:stringifyResult(result)}); }
+            for(const call of calls){ const result=await this.executeTool(call); if(result?.exitEarly===true){ finalText=String(result.message||''); this.emit?.({type:'final',text:finalText,reasoning,exitedEarly:true}); return {text:finalText,reasoning,exitedEarly:true}; } working.push({role:'tool',tool_call_id:call.id,_geminiCallId:call._geminiCallId,name:call.name,content:stringifyResult(result)}); }
           } else {
             let text=''; let lastReasoning='';
             this.emit?.({type:'request_start',model:model.model||model.id||'model',protocol:model.protocol||model.kind||'unknown',step:step+1,maxSteps:this.maxSteps});
@@ -82,7 +82,7 @@
             const calls=parseToolProtocol(text);
             if(!calls.length){finalText=stripToolProtocol(text);this.emit?.({type:'final',text:finalText,reasoning});return {text:finalText,reasoning};}
             const clean=stripToolProtocol(text);working.push({role:'assistant',content:clean});
-            for(const call of calls){const result=await this.executeTool(call);working.push({role:'user',content:`Tool result for ${call.name}:\n${stringifyResult(result)}`});}
+            for(const call of calls){const result=await this.executeTool(call);if(result?.exitEarly===true){finalText=String(result.message||'');this.emit?.({type:'final',text:finalText,reasoning,exitedEarly:true});return {text:finalText,reasoning,exitedEarly:true};}working.push({role:'user',content:`Tool result for ${call.name}:\n${stringifyResult(result)}`});}
           }
         }
         throw new Error('The agent reached its tool-step limit.');

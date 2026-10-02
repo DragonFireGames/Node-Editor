@@ -1013,6 +1013,34 @@ window.__editorInitPromise = (async function () {
     saveEditorSettings();
   }
 
+  const welcomeBuiltins = new Map();
+
+  function addWelcomeBuiltin(kind, label) {
+    const key = String(kind || '').trim();
+    if (!key) throw new Error('Welcome builtin kind is required.');
+    welcomeBuiltins.set(key, String(label || key));
+    try {
+      for (const g of state.workbench?.groups?.values?.() || []) {
+        const active = g.tabs.find(t => t.id === g.active);
+        if (active?.kind === 'builtin' && active.builtin === 'welcome') state.workbench.activateTab(g, active.id);
+      }
+    } catch (_) {}
+    return true;
+  }
+
+  function removeWelcomeBuiltin(kind) {
+    const removed = welcomeBuiltins.delete(String(kind));
+    if (removed) {
+      try {
+        for (const g of state.workbench?.groups?.values?.() || []) {
+          const active = g.tabs.find(t => t.id === g.active);
+          if (active?.kind === 'builtin' && active.builtin === 'welcome') state.workbench.activateTab(g, active.id);
+        }
+      } catch (_) {}
+    }
+    return removed;
+  }
+
   function renderWelcome(g) {
     const div = document.createElement('div');
     div.className = 'builtin-welcome';
@@ -1047,10 +1075,11 @@ window.__editorInitPromise = (async function () {
       b.onclick = () => openBuiltin(kind, g);
       actions.appendChild(b);
     }
-    for (const ext of extensionAPI.list()) {
+    for (const [kind, label] of welcomeBuiltins) {
+      if (!window.EditorBuiltinFactories?.[kind]) continue;
       const b = document.createElement('button');
-      b.textContent = ext.name || ext.id;
-      b.onclick = () => extensionAPI.open(ext.id);
+      b.textContent = label;
+      b.onclick = () => openBuiltin(kind, g);
       actions.appendChild(b);
     }
     card.appendChild(actions);
@@ -2207,6 +2236,8 @@ window.__editorInitPromise = (async function () {
     start,
     openFile,
     openBuiltin,
+    addWelcomeBuiltin,
+    removeWelcomeBuiltin,
     runConfigured,
     saveProjectNow,
     exportProject,
