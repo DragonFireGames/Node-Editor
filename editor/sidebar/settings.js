@@ -95,8 +95,8 @@
       d.onchange = () => { state.behavior.confirmBeforeDelete = d.checked; saveBehaviorSettings(); };
       h.onchange = () => {
         state.behavior.showHiddenFolders = h.checked;
+        state.sidebarController?.focus?.('explorer');
         state.fileManager?.setShowHiddenFolders(h.checked);
-        state.fileManager?.refresh();
         saveBehaviorSettings();
       };
       piskelAutoSave.onchange = () => {
