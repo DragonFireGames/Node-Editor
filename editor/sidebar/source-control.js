@@ -350,7 +350,7 @@
             state.markDirty?.(entry.path);
           }
           state.runDebugRefresh?.();
-          state.refreshExplorer?.();
+          state.fileManager?.refresh?.();
           close();
           await refreshStatus();
           showStatus(`Workspace restored to ${commitSha.slice(0, 7)}. Review the changes and commit them to create a new revert point.`);
