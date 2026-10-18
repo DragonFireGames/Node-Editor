@@ -190,8 +190,12 @@
         const isModule = element && element.getAttribute('type') === 'module';
 
         if (isModule) {
-          element.removeAttribute('type');
-          text = `window.__executeCodeModule(${JSON.stringify(text)}, ${JSON.stringify(ourl)});`;
+          // Keep native module scheduling semantics (deferred by default, ordered
+          // unless async is present) and await the transformed module so
+          // DOMContentLoaded cannot fire before its imports finish.
+          // Pass the absolute script URL explicitly: document.currentScript is
+          // null inside native module scripts.
+          text = `await window.__executeCodeModule(${JSON.stringify(text)}, ${JSON.stringify(url)}, window.__windowProxy, undefined, ${JSON.stringify(url)});`;
         } else {
           // Standard synchronous execution
           text = `window.__executeCode(${JSON.stringify(text)}, ${JSON.stringify(ourl)});`;
@@ -295,12 +299,16 @@
         const rawScript = script.textContent;
         script.setAttribute('data-raw-script', rawScript);
         const isModule = script.getAttribute('type') === 'module';
-
-        if (isModule) script.removeAttribute('type');
-
         const execFn = isModule ? '__executeCodeModule' : '__executeCode';
 
-        script.textContent = `window.${execFn}(${JSON.stringify(rawScript)}, ${JSON.stringify(pageUrl)}, this);\n`;
+        if (isModule) {
+          // Inline module scripts are deferred by the browser as well. Retain
+          // type="module" and await execution, using the document URL as the
+          // base for static and dynamic imports.
+          script.textContent = `await window.${execFn}(${JSON.stringify(rawScript)}, ${JSON.stringify(pageUrl)}, window.__windowProxy, undefined, ${JSON.stringify(pageUrl)});\n`;
+        } else {
+          script.textContent = `window.${execFn}(${JSON.stringify(rawScript)}, ${JSON.stringify(pageUrl)}, this);\n`;
+        }
       }
     });
 
@@ -1271,10 +1279,10 @@
           
           var __currentModuleExports = {};
           
-          try {
-            __currentModuleExports = await window.__executeCodeModule(sourceCode, resolvedUrl, window.__windowProxy, undefined, resolvedUrl);
-          } catch(e) {}
-          
+          // Do not turn a failed import into an empty module: propagate the
+          // actual fetch/parse/evaluation error to the importing module.
+          __currentModuleExports = await window.__executeCodeModule(sourceCode, resolvedUrl, window.__windowProxy, undefined, resolvedUrl);
+
           const finalizedExports = { ...__currentModuleExports };
           window.__moduleRegistry.set(resolvedUrl, finalizedExports);
           
