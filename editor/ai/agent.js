@@ -7,6 +7,12 @@
     return out;
   }
   function stripToolProtocol(text) { return String(text||'').replace(/<tool_call>[\s\S]*?<\/tool_call>/g,'').trim(); }
+  function visibleToolProtocolText(text) {
+    const value=String(text||'');
+    const start=value.indexOf('<tool_call>');
+    if(start>=0) return value.slice(0,start).trimEnd();
+    return value;
+  }
   function stringifyResult(value, maxChars=120000) {
     let text;
     try { text=JSON.stringify(value); } catch(_) { text=String(value); }
@@ -16,6 +22,14 @@
   }
   class AIAgent {
     constructor(options) { Object.assign(this,options); this.maxSteps=options.maxSteps||24; this.running=false; }
+    async runExtensionHook(name,payload) {
+      try {
+        return await this.extensionAPI?.runAIHook?.(name,payload) || payload;
+      } catch (e) {
+        this.emit?.({type:'extension_hook_error',name,error:e?.message||String(e)});
+        return payload;
+      }
+    }
     async permission(tool,args,resultPreview) {
       const name=tool.permission || 'ask'; if(name==='none')return true; const manager=this.permissions;
       const policy=manager?.get(name) || 'ask';
@@ -35,9 +49,13 @@
         if(!tool) throw new Error(`Unknown tool: ${call?.name || 'unnamed tool'}`);
         args=typeof call.arguments==='string' ? JSON.parse(call.arguments||'{}') : (call.arguments||{});
         if(!args || typeof args!=='object' || Array.isArray(args)) throw new Error('Tool arguments must be a JSON object.');
+        const before=await this.runExtensionHook?.('ai.beforeTool',{tool,args}) || {args};
+        args=before?.args && typeof before.args==='object' ? before.args : args;
         this.emit?.({type:'tool_call',name:tool.name,args});
         await this.permission(tool,args,call.preview || args);
-        const result=await tool.execute(args);
+        let result=await tool.execute(args);
+        const after=await this.runExtensionHook?.('ai.afterTool',{tool,args,result}) || {result};
+        if(after && Object.prototype.hasOwnProperty.call(after,'result')) result=after.result;
         const durationMs=Math.max(0,Math.round((performance.now?.() ?? Date.now())-started));
         this.emit?.({type:'tool_result',name:tool.name,args,result,ok:true,durationMs});
         return result;
@@ -72,20 +90,54 @@
             const think=msg.reasoning_content||msg.reasoning||''; if(think){reasoning+=think;this.emit?.({type:msg.reasoning_kind==='summary'?'reasoning_summary':'reasoning',text:think});}
             const calls=Array.isArray(msg.tool_calls)?msg.tool_calls.map((x,i)=>({id:x.id||x._geminiCallId||`tool-${Date.now()}-${i}`,name:x.function?.name,arguments:x.function?.arguments||'{}',_geminiCallId:x._geminiCallId||null})).filter(x=>x.name):[];
             if(!calls.length){ finalText=String(msg.content||''); working.push({role:'assistant',content:finalText}); this.emit?.({type:'final',text:finalText,reasoning}); return {text:finalText,reasoning}; }
+             const narration=String(msg.content||'').trim();if(narration)this.emit?.({type:'assistant_activity',text:narration});
             working.push({role:'assistant',content:msg.content||'',tool_calls:msg.tool_calls,_geminiContent:msg._geminiContent||null});
             for(const call of calls){ const result=await this.executeTool(call); if(result?.exitEarly===true){ finalText=String(result.message||''); this.emit?.({type:'final',text:finalText,reasoning,exitedEarly:true}); return {text:finalText,reasoning,exitedEarly:true}; } working.push({role:'tool',tool_call_id:call.id,_geminiCallId:call._geminiCallId,name:call.name,content:stringifyResult(result)}); }
           } else {
             let text=''; let lastReasoning='';
             this.emit?.({type:'request_start',model:model.model||model.id||'model',protocol:model.protocol||model.kind||'unknown',step:step+1,maxSteps:this.maxSteps});
             const streamOptions={model,systemPrompt:options.systemPrompt,thinking:true,maxTokens:options.maxTokens,onRetry:options.onRetry,max429Retries:options.max429Retries,baseRetryDelay:options.baseRetryDelay,retry429:options.retry429};
-            for await(const chunk of this.client.stream(working,streamOptions)){text=chunk.text||text; if(chunk.reasoning&&chunk.reasoning!==lastReasoning){const delta=chunk.reasoning.slice(lastReasoning.length);if(delta){reasoning+=delta;this.emit?.({type:chunk.reasoningKind==='summary'?'reasoning_summary':'reasoning',text:delta});}lastReasoning=chunk.reasoning;} this.emit?.({type:'assistant',text});}
+            for await(const chunk of this.client.stream(working,streamOptions)){text=chunk.text||text; if(chunk.reasoning&&chunk.reasoning!==lastReasoning){const delta=chunk.reasoning.slice(lastReasoning.length);if(delta){reasoning+=delta;this.emit?.({type:chunk.reasoningKind==='summary'?'reasoning_summary':'reasoning',text:delta});}lastReasoning=chunk.reasoning;}}
             const calls=parseToolProtocol(text);
-            if(!calls.length){finalText=stripToolProtocol(text);this.emit?.({type:'final',text:finalText,reasoning});return {text:finalText,reasoning};}
-            const clean=stripToolProtocol(text);working.push({role:'assistant',content:clean});
+            if(!calls.length){finalText=stripToolProtocol(text);this.emit?.({type:'assistant',text:finalText});this.emit?.({type:'final',text:finalText,reasoning});return {text:finalText,reasoning};}
+            const clean=stripToolProtocol(text);if(clean)this.emit?.({type:'assistant_activity',text:clean});working.push({role:'assistant',content:clean});
             for(const call of calls){const result=await this.executeTool(call);if(result?.exitEarly===true){finalText=String(result.message||'');this.emit?.({type:'final',text:finalText,reasoning,exitedEarly:true});return {text:finalText,reasoning,exitedEarly:true};}working.push({role:'user',content:`Tool result for ${call.name}:\n${stringifyResult(result)}`});}
           }
         }
-        throw new Error('The agent reached its tool-step limit.');
+        // Tool steps are limited, but the agent still gets a final response pass
+        // using the results it already collected. This pass has no tools, so it
+        // cannot consume another tool step.
+        this.emit?.({
+          type:'request_start',
+          model:model.model||model.id||'model',
+          protocol:model.protocol||model.kind||'unknown',
+          final:true
+        });
+        const finalMsg=await this.client.complete(working,{
+          model,
+          systemPrompt:(options.systemPrompt||'') + '\n\nYou have reached the tool-step limit. Do not call tools. Give the user the best final answer using the tool results already collected.',
+          thinking:true,
+          maxTokens:options.maxTokens,
+          onRetry:options.onRetry,
+          max429Retries:options.max429Retries,
+          baseRetryDelay:options.baseRetryDelay,
+          retry429:options.retry429,
+          retryTransport:options.retryTransport,
+          maxTransportRetries:options.maxTransportRetries,
+          transportRetryDelay:options.transportRetryDelay,
+          onResponse:info=>this.emit?.({type:'request_response',...info})
+        });
+        const finalThink=finalMsg.reasoning_content||finalMsg.reasoning||'';
+        if(finalThink){
+          reasoning+=finalThink;
+          this.emit?.({
+            type:finalMsg.reasoning_kind==='summary'?'reasoning_summary':'reasoning',
+            text:finalThink
+          });
+        }
+        finalText=stripToolProtocol(String(finalMsg.content||''));
+        this.emit?.({type:'final',text:finalText,reasoning,stepLimitReached:true});
+        return {text:finalText,reasoning,stepLimitReached:true};
       } finally { this.running=false; }
     }
   }

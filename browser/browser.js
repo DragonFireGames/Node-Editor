@@ -578,7 +578,7 @@ async function openUploadPicker(input, openDownloads=true) {
   info.textContent = accept ? `Accepted: ${accept}` : (input.multiple ? 'Multiple files accepted.' : 'Choose one file.');
   const drop = document.createElement('div');
   drop.className = 'border border-dashed border-gray-600 rounded-lg p-6 text-center bg-[#202124] hover:border-indigo-500 transition-colors';
-  drop.innerHTML = '<i class="fa-solid fa-cloud-arrow-up text-2xl text-gray-500"></i><div class="mt-2 text-sm text-gray-200">Drop a downloaded file here</div><div class="mt-1 text-[11px] text-gray-500">or choose a file from this device</div>';
+  drop.innerHTML = '<i class="fa-solid fa-cloud-arrow-up text-2xl text-gray-500"></i><div class="mt-2 text-sm text-gray-200">Drop a downloaded file or a file from the editor here</div><div class="mt-1 text-[11px] text-gray-500">or choose a file from this device</div>';
   const picker = document.createElement('input');
   picker.type = 'file';
   picker.className = 'mt-4 block w-full text-xs text-gray-300';
@@ -601,6 +601,36 @@ async function openUploadPicker(input, openDownloads=true) {
   drop.addEventListener('drop',async e => {
     e.preventDefault();
     drop.classList.remove('border-indigo-500');
+
+    // Files dragged from the editor's Explorer use a separate transfer type,
+    // so ordinary moves within the Explorer remain unaffected.
+    const editorToken = e.dataTransfer.getData('application/x-wk-editor-files');
+    if (editorToken) {
+      try {
+        const bridge = window.parent && window.parent !== window
+          ? window.parent.__editorFileDropBridge
+          : null;
+        const payload = await bridge?.take?.(editorToken);
+        const draggedFiles = (Array.isArray(payload) ? payload : [payload]).filter(file =>
+          file && typeof file.name === 'string' && typeof file.arrayBuffer === 'function'
+        );
+        if (!draggedFiles.length) {
+          throw new Error('The editor file is no longer available. Try dragging it again.');
+        }
+        const accepted = draggedFiles.filter(file => uploadAcceptsFile(input,file));
+        if (accepted.length !== draggedFiles.length) {
+          showToast('One or more editor files do not match the upload type.','error');
+          return;
+        }
+        if (uploadInputFiles(input,input.multiple ? accepted : accepted.slice(0,1))) {
+          closeUploadPicker();
+        }
+      } catch (err) {
+        showToast(err?.message || 'Unable to use the editor file.','error');
+      }
+      return;
+    }
+
     const rawId = e.dataTransfer.getData('application/x-proxy-download-id');
     const id = Number(rawId);
     if (!Number.isInteger(id) || id <= 0) return;
@@ -1277,9 +1307,29 @@ function createNewPage(iframe,parentPage=null) {
   });
   page.interceptEvent('navigate', function(url, ...args) {
     const resolved = new URL(url, page.location.url).href;
-    if (page.tab.subframe) renderTabContent(page.tab, resolved);
-    else navigateToInTab(page.tab, resolved, ...args);
-   return page.tab;
+    const isHistoryStateChange = args.length >= 2 && args[0] === true && (args[1] === false || args[1] === true);
+    const replaceHistory = isHistoryStateChange && args[1] === true;
+
+    if (page.tab.subframe) {
+      if (isHistoryStateChange) {
+        page.tab.url = resolved;
+        page.tab.page.history = page.tab.page.history || [];
+        if (replaceHistory && page.tab.page.historyIndex >= 0 && page.tab.page.history[page.tab.page.historyIndex]) {
+          page.tab.page.history[page.tab.page.historyIndex] = resolved;
+        } else {
+          page.tab.page.history = page.tab.page.history.slice(0, page.tab.page.historyIndex + 1);
+          page.tab.page.history.push(resolved);
+          page.tab.page.historyIndex = page.tab.page.history.length - 1;
+        }
+        return page.tab;
+      }
+      renderTabContent(page.tab, resolved);
+    } else if (isHistoryStateChange) {
+      navigateToInTab(page.tab, resolved, true, false, false, replaceHistory);
+    } else {
+      navigateToInTab(page.tab, resolved, ...args);
+    }
+    return page.tab;
   });
   page.interceptEvent('open', function(resolved, activateTab) {
     return window.createNewTab(resolved, activateTab).page;
@@ -1555,24 +1605,35 @@ async function navigateTo(rawUrl, isNewNavigation = true) {
   await navigateToInTab(activeTab, rawUrl, isNewNavigation);
 }
 
-async function navigateToInTab(tab, rawUrl, isNewNavigation = true, reloadCurrentTab = true, isReload = false) {
+async function navigateToInTab(tab, rawUrl, isNewNavigation = true, reloadCurrentTab = true, isReload = false, replaceHistory = false) {
   const startTime = performance.now();
   const hasLoadedDocument = !!tab._hasLoadedDocument;
   let absoluteUrl = rawUrl.trim();
   if (!absoluteUrl.startsWith('http') && !absoluteUrl.startsWith('data:')  && !absoluteUrl.startsWith('blob:')) {
     absoluteUrl = absoluteUrl.includes('.') && !absoluteUrl.includes(' ') ? 'https://' + absoluteUrl : appSettings.searchEngine + encodeURIComponent(absoluteUrl);
   }
-  
+
   tab.url = absoluteUrl;
-  window.dispatchEvent(new CustomEvent('browser-before-reload',{detail:{tab,page:tab.page,isReload:!!isReload,isNavigation:hasLoadedDocument,clearDevTools:hasLoadedDocument && appSettings.clearDevToolsOnReload!==false}}));
-  window.dispatchEvent(new CustomEvent('browser-navigation-start',{detail:{tab,page:tab.page,url:absoluteUrl}}));
+
+  const isHistoryStateChange = isNewNavigation && !reloadCurrentTab && !isReload;
+  if (!isHistoryStateChange) {
+    window.dispatchEvent(new CustomEvent('browser-before-reload',{detail:{tab,page:tab.page,isReload:!!isReload,isNavigation:hasLoadedDocument,clearDevTools:hasLoadedDocument && appSettings.clearDevToolsOnReload!==false}}));
+    window.dispatchEvent(new CustomEvent('browser-navigation-start',{detail:{tab,page:tab.page,url:absoluteUrl}}));
+  }
 
   if (isNewNavigation) {
-    tab.page.history = tab.page.history.slice(0, tab.page.historyIndex + 1);
-    tab.page.history.push(absoluteUrl);
-    tab.page.historyIndex = tab.page.history.length - 1;
-    
-    historyLog.unshift({ url: absoluteUrl, time: new Date().toLocaleTimeString() });
+    tab.page.history = tab.page.history || [];
+    if (replaceHistory && tab.page.historyIndex >= 0 && tab.page.history[tab.page.historyIndex]) {
+      tab.page.history[tab.page.historyIndex] = absoluteUrl;
+    } else {
+      tab.page.history = tab.page.history.slice(0, tab.page.historyIndex + 1);
+      tab.page.history.push(absoluteUrl);
+      tab.page.historyIndex = tab.page.history.length - 1;
+    }
+
+    if (!isHistoryStateChange || !replaceHistory) {
+      historyLog.unshift({ url: absoluteUrl, time: new Date().toLocaleTimeString() });
+    }
   }
 
   if (reloadCurrentTab) {
@@ -1582,7 +1643,6 @@ async function navigateToInTab(tab, rawUrl, isNewNavigation = true, reloadCurren
     tab.loadTimeMS = Math.floor(performance.now() - startTime);
     updateLoadingProgress(100);
   }
-
 
   if (tab.id === activeTabId) {
     updateToolbarUI();

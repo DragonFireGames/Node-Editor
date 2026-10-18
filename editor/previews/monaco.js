@@ -79,6 +79,7 @@
           const editor = monaco.editor.create(host, {
             model,
             theme: window.EditorTheme?.id || 'vs-dark',
+            'semanticHighlighting.enabled': true,
             automaticLayout: true,
             minimap: { enabled: false },
             fontSize: 13,

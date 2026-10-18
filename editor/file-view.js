@@ -1,4 +1,3 @@
-(function () {
   class EditorFileView {
     constructor(options = {}) {
       this.state = options.state;
@@ -105,7 +104,8 @@
         if (this.current !== 'Edit' || this.fileNode?.path !== path) return;
         if (!this.state.editor) {
           this.state.editor = monaco.editor.create(this.state.monacoHost, {
-            theme: 'vs-dark',
+            theme: window.EditorTheme?.id || 'vs-dark',
+            'semanticHighlighting.enabled': true,
             automaticLayout: true,
             minimap: {
               enabled: false

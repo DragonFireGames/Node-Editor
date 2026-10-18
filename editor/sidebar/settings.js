@@ -31,6 +31,10 @@
             <label class="setting-check"><input id="setting-show-hidden" type="checkbox"><span>Show hidden folders</span></label>
           </div>
           <div class="editor-settings-section">
+            <h3>Git</h3>
+            <label class="setting-check"><input id="setting-ignore-node-modules" type="checkbox"><span>Exclude node_modules from Source Control</span></label>
+          </div>
+          <div class="editor-settings-section">
             <h3>Image Editing</h3>
             <label class="setting-check"><input id="setting-piskel-auto-save" type="checkbox"><span>Auto-save Piskel edits</span></label>
             <p class="editor-settings-note">Automatically saves Piskel changes to the image and its <code>.piskel</code> sidecar.</p>
@@ -59,6 +63,7 @@
       const r = $('setting-confirm-replace');
       const d = $('setting-confirm-delete');
       const h = $('setting-show-hidden');
+      const ignoreNodeModules = $('setting-ignore-node-modules');
       const piskelAutoSave = $('setting-piskel-auto-save');
       const b = $('setting-hide-browser-bar');
       const defaultTab = $('setting-browser-default-tab');
@@ -69,6 +74,12 @@
       const obscureURL = $('setting-browser-obscure-url');
       const clearDevTools = $('setting-browser-clear-devtools');
       const autoDownload = $('setting-browser-autodownload');
+
+      ignoreNodeModules.checked = state.behavior.ignoreNodeModules !== false;
+      ignoreNodeModules.onchange = () => {
+        state.behavior.ignoreNodeModules = ignoreNodeModules.checked;
+        saveBehaviorSettings();
+      };
 
       a.checked = !!state.behavior.autoSaveOnRun;
       c.checked = !!state.behavior.autoClearTerminal;

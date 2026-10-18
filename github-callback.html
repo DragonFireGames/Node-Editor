@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>GitHub Sign-In</title>
+  <style>html,body{margin:0;width:100%;height:100%;background:#111;color:#eee;font:14px system-ui,sans-serif;display:grid;place-items:center}main{text-align:center;opacity:.8}</style>
+</head>
+<body>
+<main>Completing GitHub sign-in…</main>
+<script>
+(function(){
+  const params = new URLSearchParams(location.search);
+  const payload = {
+    type: 'github-oauth-callback',
+    code: params.get('code'),
+    state: params.get('state'),
+    error: params.get('error'),
+    errorDescription: params.get('error_description') || ''
+  };
+
+  if (window.opener && window.opener !== window) {
+    try {
+      window.opener.postMessage(payload, location.origin);
+    } catch (_) {}
+    setTimeout(() => window.close(), 100);
+    return;
+  }
+
+  // Popup blockers can force the original window to navigate through OAuth.
+  // Return to the editor URL recorded by github.js and preserve the callback.
+  let returnUri = '';
+  try {
+    const pending = JSON.parse(localStorage.getItem('editor.github.oauth.pending') || 'null');
+    returnUri = String(pending?.returnUri || '');
+  } catch (_) {}
+
+  try {
+    const target = new URL(returnUri || location.href);
+    if (target.origin !== location.origin) throw new Error('invalid callback target');
+    target.search = '';
+    target.hash = '';
+    for (const key of ['code','state','error','error_description']) {
+      const value = params.get(key);
+      if (value) target.searchParams.set(key, value);
+    }
+    location.replace(target.href);
+  } catch (_) {
+    document.querySelector('main').textContent = 'GitHub sign-in completed. Return to the editor to continue.';
+  }
+})();
+</script>
+</body>
+</html>

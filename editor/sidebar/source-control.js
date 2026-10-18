@@ -9,6 +9,9 @@
     let selected = loadConfig();
     let refreshToken = 0;
     let branchLoadToken = 0;
+    let statusToken = 0;
+    let historyToken = 0;
+    let commitBusy = false;
     let selectionProjectId = null;
     function esc(value) { return String(value ?? '').replace(/[&<>\"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\\':'&#39;'}[ch])); }
     function loadConfig() {
@@ -61,7 +64,7 @@
       const localProject = isLocalProject();
       tree.innerHTML = `<div class="source-control-sidebar">
         <div class="source-control-head"><div class="activity-sidebar-title">Source Control</div><button data-refresh title="Refresh">↻</button></div>
-        ${localProject ? `<section class="source-control-section"><div class="source-control-section-title">GitHub repository</div><div class="source-control-local-hint">This project is local. Connect it to a new GitHub repository to start tracking and pushing changes.</div><button data-create-local-repo class="source-control-create-repo">Create GitHub Repository</button><div class="source-control-create-panel" data-create-panel hidden><label>Repository name<input data-create-name type="text" placeholder="my-game" spellcheck="false"></label><label>Description<input data-create-description type="text" placeholder="Optional"></label><label class="source-control-private"><input data-create-private type="checkbox"> Private repository</label><div class="source-control-create-actions"><button data-create-cancel>Cancel</button><button data-create-confirm class="primary">Create Repository</button></div></div></section>` : ''}
+        ${!selected.repo ? `<section class="source-control-section"><div class="source-control-section-title">GitHub repository</div><div class="source-control-local-hint">No repository is selected. Connect this workspace to a new GitHub repository to start tracking and pushing changes.</div><button data-create-local-repo class="source-control-create-repo">Create GitHub Repository</button><div class="source-control-create-panel" data-create-panel hidden><label>Repository name<input data-create-name type="text" placeholder="my-game" spellcheck="false"></label><label>Description<input data-create-description type="text" placeholder="Optional"></label><label class="source-control-private"><input data-create-private type="checkbox"> Private repository</label><div class="source-control-create-actions"><button data-create-cancel>Cancel</button><button data-create-confirm class="primary">Create Repository</button></div></div></section>` : ''}
         <section class="source-control-section">
           <div class="source-control-label">Repository</div>
           <div class="source-control-select-row"><select data-repo ${repos.length ? '' : 'disabled'}><option value="">${repos.length ? 'Select repository…' : 'Loading repositories…'}</option>${repos.map(r => `<option value="${esc(r.fullName)}" ${r.fullName === `${selected.owner}/${selected.repo}` ? 'selected' : ''}>${esc(r.fullName)}${r.private ? ' · private' : ''}</option>`).join('')}</select><button data-repo-refresh title="Refresh repositories">↻</button></div>
@@ -87,14 +90,51 @@
           const repo = created?.name || name;
           const branch = created?.default_branch || 'main';
           if (!owner || !repo) throw new Error('GitHub did not return the new repository details.');
+          // Bind the workspace to the newly-created repository immediately.
+          // Do not make the user select the repo/branch again.
           setLocalGitRemote(owner, repo, branch);
           state.runDebugRefresh?.();
-          repos = []; branches = [];
-          await loadRepositories(true);
           selected = {owner:String(owner), repo:String(repo), branch:String(branch)};
-          saveConfig();
-          renderShell();
           branches = [String(branch)];
+          // The repository was created after the repository list was loaded.
+          // Add it to the in-memory list immediately so the UI stays selected
+          // on the new repo instead of falling back to "Select repository…".
+          const fullName = String(owner) + '/' + String(repo);
+          if (!repos.some(item => item.fullName === fullName)) {
+            repos = [...repos, {
+              id: created?.id,
+              name: String(repo),
+              fullName,
+              owner: String(owner),
+              private: !!created?.private,
+              defaultBranch: String(branch),
+              permissions: {push:true}
+            }];
+          }
+          saveConfig();
+
+          // GitHub may take a moment to provision the Git database after the
+          // repository itself has been created. commitAndPush waits through
+          // that transient 409 state before creating the initial commit.
+          button.textContent = 'Initializing…';
+          showStatus('Waiting for GitHub to initialize the repository…');
+          const initialCommit = await github.commitAndPush({
+            owner:String(owner),
+            repo:String(repo),
+            branch:String(branch),
+            message:'Initialized Repository',
+            fs:state.fs
+          });
+          if (!initialCommit.changed) {
+            throw new Error('The new GitHub repository could not be initialized because the workspace has no files.');
+          }
+
+          // The repository is already selected. Refresh only the state that
+          // changed instead of rebuilding the entire sidebar and racing
+          // several independent repository/branch requests.
+          selected = {owner:String(owner), repo:String(repo), branch:String(branch)};
+          branches = [String(branch)];
+          saveConfig();
           renderShell();
           await refreshStatus();
           await loadHistory();
@@ -178,6 +218,7 @@
       } catch (e) { if (token === refreshToken) showStatus(e.message || String(e), true); }
     }
     async function refreshStatus() {
+      const token = ++statusToken;
       const changesEl = tree.querySelector('[data-changes]');
       if (!changesEl || !selected.repo || !state.fs) return;
       changesEl.innerHTML = '<div class="source-control-loading">Checking working tree…</div>';
@@ -185,7 +226,16 @@
         const repoInfo = repos.find(r => r.fullName === `${selected.owner}/${selected.repo}`);
         const canPush = repoInfo ? repoInfo.permissions?.push !== false : true;
         const remote = await github.getRemoteState(selected.owner, selected.repo, selected.branch || 'main');
+        if (token !== statusToken) return;
+        if (remote.unavailable) {
+          changesEl.innerHTML = '<div class="source-control-loading">GitHub is still initializing this repository…</div>';
+          const button = tree.querySelector('[data-commit]');
+          if (button) button.disabled = true;
+          showStatus('GitHub is still initializing this repository…');
+          return;
+        }
         const changes = await github.compareWorkingTree(state.fs, remote.tree);
+        if (token !== statusToken) return;
         const showHidden = !!state.behavior?.showHiddenFolders;
         const visibleChanges = [];
         let settingsChanged = false;
@@ -203,44 +253,152 @@
         }).join('') : '<div class="source-control-clean">No changes</div>';
         changesEl.dataset.count = String(changes.length);
         const button = tree.querySelector('[data-commit]');
+        const isInitialCommit = !!remote.empty || !remote.commitSha;
         if (button) {
-          button.disabled = !changes.length || !canPush;
-          button.title = canPush ? '' : 'You do not have push permission for this repository.';
+          button.disabled = commitBusy || !changes.length || !canPush;
+          button.textContent = isInitialCommit ? 'Initial Commit & Push' : 'Commit & Push';
+          button.title = canPush ? (isInitialCommit ? 'Create the first commit on this empty GitHub repository.' : '') : 'You do not have push permission for this repository.';
         }
         if (!canPush) showStatus('This repository is read-only for your GitHub account.', true);
         else if (remote.truncated) showStatus('GitHub truncated the remote tree; large repositories may need a more focused sync later.', true);
+        else if (isInitialCommit && changes.length) showStatus('This GitHub repository has no commits yet. Your next commit will become its initial commit.');
         else clearStatus();
       } catch (e) {
+        if (token !== statusToken) return;
         changesEl.innerHTML = `<div class="source-control-error">${esc(e.message || String(e))}</div>`;
-        const button = tree.querySelector('[data-commit]'); if (button) button.disabled = true;
+        const button = tree.querySelector('[data-commit]');
+        if (button) button.disabled = true;
       }
     }
+
     async function loadHistory() {
+      const token = ++historyToken;
       const historyEl = tree.querySelector('[data-history]');
       if (!historyEl || !selected.repo) return;
       historyEl.innerHTML = '<div class="source-control-loading">Loading commits…</div>';
       try {
         const commits = await github.listCommits(selected.owner, selected.repo, selected.branch || 'main', 20);
-        historyEl.innerHTML = commits.length ? commits.map(commit => `<a class="source-control-commit-row" href="${esc(commit.url)}" target="_blank" rel="noopener"><div><strong>${esc(commit.message || '(no message)')}</strong><span>${esc(commit.author)} · ${commit.date ? new Date(commit.date).toLocaleString() : ''}</span></div><code>${esc(commit.sha.slice(0, 7))}</code></a>`).join('') : '<div class="source-control-empty-inline">No commits on this branch.</div>';
-      } catch (e) { historyEl.innerHTML = `<div class="source-control-error">${esc(e.message || String(e))}</div>`; }
+        if (token !== historyToken) return;
+        historyEl.innerHTML = commits.length ? commits.map(commit => `<button type="button" class="source-control-commit-row" data-commit-sha="${esc(commit.sha)}"><div><strong>${esc(commit.message || '(no message)')}</strong><span>${esc(commit.author)} · ${commit.date ? new Date(commit.date).toLocaleString() : ''}</span></div><code>${esc(commit.sha.slice(0, 7))}</code></button>`).join('') : '<div class="source-control-empty-inline">No commits on this branch.</div>';
+        historyEl.querySelectorAll('[data-commit-sha]').forEach(row => row.addEventListener('click', () => openCommitRestore(row.dataset.commitSha)));
+      } catch (e) {
+        if (token === historyToken) historyEl.innerHTML = `<div class="source-control-error">${esc(e.message || String(e))}</div>`;
+      }
     }
+
+    async function openCommitRestore(commitSha) {
+      if (!selected.repo || !commitSha) return;
+      let commit = null;
+      try {
+        const commits = await github.listCommits(selected.owner, selected.repo, selected.branch || 'main', 100);
+        commit = commits.find(item => item.sha === commitSha) || {sha:commitSha, message:'Selected commit', author:'Unknown', date:''};
+      } catch (_) {
+        commit = {sha:commitSha, message:'Selected commit', author:'Unknown', date:''};
+      }
+
+      const existing = document.querySelector('.source-control-restore-modal');
+      existing?.remove();
+      const modal = document.createElement('div');
+      modal.className = 'source-control-restore-modal';
+      modal.innerHTML = `<div class="source-control-restore-dialog" role="dialog" aria-modal="true">
+        <div class="source-control-restore-title">Return workspace to this commit?</div>
+        <div class="source-control-restore-info"><strong>${esc(commit.message || '(no message)')}</strong><span>${esc(commit.author || 'Unknown')} · ${commit.date ? new Date(commit.date).toLocaleString() : ''}</span><code>${esc(commit.sha.slice(0, 7))}</code></div>
+        <p>This changes the local workspace to exactly match this commit. Nothing is pushed yet. You can review the changes and make a new commit to create an undo/revert commit on the branch.</p>
+        <div class="source-control-restore-actions"><button data-restore-cancel>Cancel</button><button data-restore-confirm class="primary">Restore Workspace</button></div>
+        <div data-restore-status class="source-control-restore-status"></div>
+      </div>`;
+      document.body.appendChild(modal);
+      const close = () => modal.remove();
+      modal.querySelector('[data-restore-cancel]').onclick = close;
+      modal.addEventListener('click', e => { if (e.target === modal) close(); });
+      const confirmButton = modal.querySelector('[data-restore-confirm]');
+      const status = modal.querySelector('[data-restore-status]');
+      confirmButton.onclick = async () => {
+        confirmButton.disabled = true;
+        confirmButton.textContent = 'Restoring…';
+        status.textContent = '';
+        try {
+          const snapshot = await github.getCommitState(selected.owner, selected.repo, commitSha);
+          if (snapshot.truncated) throw new Error('GitHub truncated this commit tree, so the workspace cannot be restored safely.');
+
+          const target = new Map();
+          for (const entry of snapshot.tree) {
+            target.set(entry.path, entry);
+          }
+
+          // Restoring a commit is a full filesystem replacement. Clear every
+          // existing file and directory first so files that are absent from the
+          // target commit cannot survive the restore.
+          const localPaths = state.fs.listFilesSync().map(path => String(path).replace(/^\/+/, '')).filter(Boolean);
+          for (const path of localPaths) {
+            state.fs.deleteFileSync(path);
+            state.markDirty?.(path);
+          }
+          const localDirs = typeof state.fs.listDirectoriesSync === 'function'
+            ? state.fs.listDirectoriesSync().map(path => String(path).replace(/^\/+/, '')).filter(Boolean)
+            : [];
+          for (const dir of localDirs.sort((a,b) => b.split('/').length - a.split('/').length)) {
+            state.fs.deleteDirectorySync?.(dir);
+          }
+
+
+          let index = 0;
+          for (const entry of snapshot.tree) {
+            status.textContent = `Restoring ${++index}/${snapshot.tree.length}…`;
+            const bytes = await github.readBlob(selected.owner, selected.repo, entry.sha);
+            state.fs.writeFileSync(entry.path, bytes);
+            state.markDirty?.(entry.path);
+          }
+          state.runDebugRefresh?.();
+          state.refreshExplorer?.();
+          close();
+          await refreshStatus();
+          showStatus(`Workspace restored to ${commitSha.slice(0, 7)}. Review the changes and commit them to create a new revert point.`);
+        } catch (e) {
+          status.textContent = e.message || String(e);
+          confirmButton.disabled = false;
+          confirmButton.textContent = 'Restore Workspace';
+        }
+      };
+    }
+
     async function commit() {
       const button = tree.querySelector('[data-commit]');
       const message = tree.querySelector('[data-commit-message]')?.value || '';
-      if (!button || button.disabled) return;
-      button.disabled = true; button.textContent = 'Pushing…'; clearStatus();
+      if (!button || button.disabled || commitBusy) return;
+      commitBusy = true;
+      button.disabled = true;
+      button.textContent = 'Pushing…';
+      clearStatus();
       try {
         const result = await github.commitAndPush({owner:selected.owner, repo:selected.repo, branch:selected.branch || 'main', message, fs:state.fs});
-        if (!result.changed) { showStatus('Nothing to commit.'); return; }
+        if (!result.changed) {
+          showStatus('Nothing to commit.');
+          return;
+        }
         tree.querySelector('[data-commit-message]').value = '';
         showStatus(`Committed ${result.commitSha.slice(0, 7)} and pushed to ${selected.branch || 'main'}.`);
+        // GitHub can briefly lag when the branch ref is read immediately after
+        // a push. Wait for the new head before repainting the sidebar so the
+        // changes/history view does not require leaving and reopening it.
+        for (let attempt = 0; attempt < 8; attempt++) {
+          const remote = await github.getRemoteState(selected.owner, selected.repo, selected.branch || 'main').catch(() => null);
+          if (remote?.commitSha === result.commitSha) break;
+          await new Promise(resolve => setTimeout(resolve, 250 * (attempt + 1)));
+        }
         await refreshStatus();
         await loadHistory();
       } catch (e) {
         showStatus(e.message || String(e), true);
         await refreshStatus();
-      } finally { button.textContent = 'Commit & Push'; }
+      } finally {
+        commitBusy = false;
+        const currentButton = tree.querySelector('[data-commit]');
+        if (currentButton) currentButton.textContent = 'Commit & Push';
+        await refreshStatus();
+      }
     }
+
     function showStatus(message, error = false) {
       const el = tree.querySelector('[data-status]');
       if (!el) return;

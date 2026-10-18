@@ -1,7 +1,7 @@
 (function() {
   const root = window.EditorSidebar = window.EditorSidebar || {};
   root.Profile = function(options) {
-    const {tree} = options;
+    const {tree, state} = options;
     const github = window.GitHubService;
     let unsubscribe = null;
     let installation = null;
@@ -22,7 +22,7 @@
         <div class="activity-sidebar-title">Profile</div>
         <section class="github-profile-section">
           <div class="github-profile-heading">GitHub</div>
-          ${user ? `<div class="github-user-card">${user.avatar_url ? `<img src="${esc(user.avatar_url)}" alt="">` : '<div class="github-avatar-fallback">GH</div>'}<div class="github-user-main"><strong>${esc(user.name || user.login)}</strong><span>@${esc(user.login)}</span></div></div><div class="github-profile-actions"><button data-github-profile>Open GitHub Profile</button><button data-github-signout>Sign out</button></div>${installation === false ? `<div class="github-profile-hint">Node Editor is not installed on this GitHub account. Install it to grant repository access.</div><button class="github-primary-button" data-github-install>Install Node Editor GitHub App</button>` : installation === null ? `<div class="github-profile-hint">Checking GitHub App installation…</div>` : ''}` : `<div class="github-profile-empty">Not signed in</div><button class="github-primary-button" data-github-install>Install Node Editor GitHub App</button><button data-github-signin>Sign in with GitHub</button>`}
+          ${user ? `<div class="github-user-card">${user.avatar_url ? `<img src="${esc(user.avatar_url)}" alt="">` : '<div class="github-avatar-fallback">GH</div>'}<div class="github-user-main"><strong>${esc(user.name || user.login)}</strong><span>@${esc(user.login)}</span></div></div><div class="github-profile-actions"><button data-github-profile>Open GitHub Profile</button><button data-github-signout>Sign out</button></div>${state.gitEnabled === false ? `<div class="github-profile-hint">This project was opened without Git access because you are not its owner. Connect one of your own GitHub repositories to make changes publishable.</div><button class="github-primary-button" data-github-connect>Connect GitHub repository</button>` : ''}${installation === false ? `<div class="github-profile-hint">Node Editor is not installed on this GitHub account. Install it to grant repository access.</div><button class="github-primary-button" data-github-install>Install Node Editor GitHub App</button>` : installation === null ? `<div class="github-profile-hint">Checking GitHub App installation…</div>` : ''}` : `<div class="github-profile-empty">Not signed in</div><button class="github-primary-button" data-github-install>Install Node Editor GitHub App</button><button data-github-signin>Sign in with GitHub</button>`}
         </section>
         <section class="github-profile-section">
           <div class="github-profile-heading">Authentication Worker</div>
@@ -53,6 +53,11 @@
         try { await github.startLogin(); } catch (e) { signIn.disabled = false; signIn.textContent = 'Sign in with GitHub'; alert(e.message || String(e)); }
       });
       tree.querySelector('[data-github-signout]')?.addEventListener('click', () => github.signOut());
+      tree.querySelector('[data-github-connect]')?.addEventListener('click', () => {
+        state.gitEnabled = true;
+        state.sidebarController?.syncSourceControlActivity?.();
+        state.sidebarController?.show?.('Source Control');
+      });
       tree.querySelector('[data-github-profile]')?.addEventListener('click', () => {
         const login = encodeURIComponent(user?.login || '');
         if (login) window.open(`https://github.com/${login}`, '_blank', 'noopener');

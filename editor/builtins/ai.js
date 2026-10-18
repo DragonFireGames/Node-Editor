@@ -2,10 +2,10 @@
   const factories = window.EditorBuiltinFactories = window.EditorBuiltinFactories || {};
   const aiRoot = window.EditorAI = window.EditorAI || {};
   const CHAT_PREFIX = 'editor.aiChat.';
-  const SYSTEM = 'You are the AI coding assistant inside a browser-based code editor. Be practical, precise, and concise. Use Markdown for explanations and fenced code blocks for code. When working on the project, inspect existing files before changing them, preserve the project\'s existing style, and verify changes by running relevant commands when available. The run_command tool uses the editor\'s virtual Node runtime, not a real operating-system shell: never prefix commands with $ and do not assume arbitrary shell features such as pipes or shell redirection are available; simple commands such as echo are supported. For project filesystem work, use the dedicated file tools.';
+  const SYSTEM = 'You are the AI coding assistant inside a browser-based code editor. Be practical, precise, and concise. Use Markdown for explanations and fenced code blocks for code. Use the minimum number of tool calls necessary to complete the user\'s request. Decide after each tool result whether another tool call is actually needed; do not inspect files or run commands merely to be thorough. Once you have enough information to answer, give the final answer instead of taking another tool step. For read-only requests such as summarizing or explaining a file, stop after you have gathered the relevant information. For modification tasks, make the requested changes, perform a targeted verification when appropriate, and then stop once the task is complete. If you have already completed all necessary tool work and need to finish the agent immediately, use the exit_early tool and put the complete final answer in its message. Do not claim a change was made unless the tool succeeded. When working on the project, inspect existing files before changing them, preserve the project\'s existing style, and verify changes by running relevant commands when available. The run_command tool uses the editor\'s virtual Node runtime, not a real operating-system shell: never prefix commands with $ and do not assume arbitrary shell features such as pipes or shell redirection are available; simple commands such as echo are supported. For project filesystem work, use the dedicated file tools.';
   const TOOL_PERMISSION_LABELS = {
     readFiles:'Read project files', searchFiles:'Search project', createFiles:'Create files', modifyFiles:'Modify files', deleteFiles:'Delete files',
-    runCommands:'Run commands', runScripts:'Run scripts', runProject:'Run project', readOutput:'Read runtime output', readEditor:'Read editor state', modifyEditor:'Modify editor', browser:'Access browser', network:'Network requests'
+    runCommands:'Run commands', runScripts:'Run scripts', runProject:'Run project', readOutput:'Read runtime output', readEditor:'Read editor state', modifyEditor:'Modify editor', browser:'Access browser', network:'Network requests', githubRead:'Read GitHub', githubWrite:'Write to GitHub', extensionActions:'Extension actions'
   };
   function escapeHtml(value) { return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
   function markdown(text) {
@@ -169,12 +169,16 @@
     }
     return {ensureLoaded,list,get,create,rename,touch,remove};
   }
-  function makeModelLabel(model, registry) {
-    if (aiRoot.isHuggingFaceEndpoint?.(model?.endpoint)) {
-      const source=registry?.getHuggingFaceKeySource?.(model)||'none';
-      return `${model.name} · ${source==='model'?'model key':source==='user'?'your key':source==='shared'?'shared fallback':'no key'}`;
+  function makeModelLabel(model, registry, localManager) {
+    if(model?.local || model?.protocol==='local-transformers'){
+      const loaded=!!localManager?.isLoaded?.(model.id);
+      return model.name+' · local'+(loaded?' · loaded':' · not loaded');
     }
-    return model.public ? `${model.name} · no key` : `${model.name}${model.apiKey ? ' · key set' : ''}`;
+    if(aiRoot.isHuggingFaceEndpoint?.(model?.endpoint)){
+      const source=registry?.getHuggingFaceKeySource?.(model)||'none';
+      return model.name+' · '+(source==='model'?'model key':source==='user'?'your key':source==='shared'?'shared fallback':'no key');
+    }
+    return model.public ? model.name+' · no key' : model.name+(model.apiKey ? ' · key set' : '');
   }
 
   function permissionPrompt(request) {
@@ -189,12 +193,22 @@
       modal.querySelector('.editor-modal-close').onclick=()=>done('deny'); modal.onclick=e=>{if(e.target===modal)done('deny');};
     });
   }
-  function settingsModal(registry, permissions, onChange, network) {
+  function settingsModal(registry, permissions, onChange, network, localManager, useModel) {
     const modal=document.createElement('div'); modal.className='editor-modal ai-settings-modal';
     let editingId='';
     const render=()=>{
       const models=registry.settings.models, providers=registry.providers();
-      modal.innerHTML=`<div class="editor-modal-content ai-settings-content"><button class="editor-modal-close" aria-label="Close">×</button><h2>AI Settings</h2><p>Configure models, the extra instructions you give them, and usage behavior.</p><div class="ai-settings-tabs"><button data-settings-tab="models" class="active">Models</button><button data-settings-tab="context">Context</button><button data-settings-tab="analytics">Analytics</button></div><div data-settings-panel="models"><div class="ai-settings-columns"><section><div class="ai-section-title ai-settings-section-heading"><span>Models</span><span class="ai-settings-transfer"><button type="button" data-export-ai>Export JSON</button><button type="button" data-import-ai>Import JSON</button><input data-import-ai-file type="file" accept="application/json,.json" hidden></span></div><label class="ai-check ai-export-keys"><input data-preserve-ai-keys type="checkbox" checked> Preserve API keys in export</label><div class="ai-export-warning">API keys are written to the JSON file in plain text when enabled. Only share the exported file if you are comfortable sharing those keys.</div><div class="ai-model-list">${models.map(m=>`<div class="ai-model-row ${m.id===registry.settings.activeModelId?'active':''}"><div class="ai-model-main"><strong>${escapeHtml(m.name)}</strong><span>${escapeHtml(registry.protocolLabel(m.protocol))} · ${m.supportsTools?'tool calling':'prompt tools'} · ${m.supportsReasoning?'reasoning':'no reasoning'}</span></div><button data-use="${escapeHtml(m.id)}">${m.id===registry.settings.activeModelId?'Active':'Use'}</button>${m.id===aiRoot.DEFAULT_PUBLIC_AI_MODEL.id?'':`<button data-edit="${escapeHtml(m.id)}">Edit</button><button data-remove="${escapeHtml(m.id)}">×</button>`}</div>`).join('')}</div><button class="ai-settings-add" data-add>+ Add model</button><div class="ai-add-model" hidden><label>Provider<select data-provider>${Object.entries(providers).map(([id,p])=>`<option value="${escapeHtml(id)}">${escapeHtml(p.label)}</option>`).join('')}</select></label><label>API format<select data-format>${Object.entries(aiRoot.AI_PROTOCOLS||{}).map(([id,p])=>`<option value="${escapeHtml(id)}">${escapeHtml(p.label)}</option>`).join('')}</select></label><label>Name<input data-name placeholder="My model"></label><label>Endpoint<input data-endpoint placeholder="https://api.example.com/v1"></label><label>Model ID <div class="ai-model-input-row"><input data-model placeholder="model-name"><button type="button" data-browse-models>Browse models</button></div></label><label>API key <input data-key type="password" placeholder="Enter your provider key"></label><label class="ai-check"><input data-remember type="checkbox"> Remember API key on this device</label><label class="ai-check"><input data-tools type="checkbox" checked> Supports native tool calling</label><label class="ai-check"><input data-thinking type="checkbox" checked> Supports reasoning</label><div class="ai-add-hint" data-protocol-hint>Select a provider to fill in its API format and endpoint. You can override the endpoint for compatible services.</div><div class="ai-add-actions"><button data-cancel-model>Cancel</button><button data-save-model>Save model</button></div></div><div class="ai-hf-account"><div class="ai-section-title">Hugging Face</div><label>Your API key<input data-hf-global-key type="password" placeholder="hf_..."></label><label class="ai-check"><input data-hf-global-remember type="checkbox"> Remember your key on this device</label><div class="ai-add-hint">Used for Hugging Face models that do not have their own key. Add a key here or on an individual model.</div></div></section><section><div class="ai-section-title">Permissions</div><div class="ai-permission-list">${Object.entries(permissions.all()).map(([k,v])=>`<label><span>${escapeHtml(TOOL_PERMISSION_LABELS[k]||k)}</span><select data-permission="${k}"><option value="always" ${v==='always'?'selected':''}>Always allow</option><option value="ask" ${v==='ask'?'selected':''}>Ask each time</option><option value="never" ${v==='never'?'selected':''}>Never allow</option></select></label>`).join('')}</div><button data-reset-permissions class="ai-settings-reset">Reset permissions</button></section></div><div class="ai-settings-note">Providers can fill in the API format and default endpoint automatically. Providers may expose either a live model list or a fixed set of known models.</div></div><div data-settings-panel="context" hidden><div class="ai-context-panel"><h3 class="ai-section-title">Model context &amp; instructions</h3><p class="ai-settings-note-inline">These are added to the built-in coding-assistant instructions. They persist on this device and apply to your AI chats.</p><label>Additional instructions<textarea data-custom-instructions placeholder="Example: Prefer small, focused changes. Explain tradeoffs briefly."></textarea></label><label>Agent-only instructions<textarea data-agent-instructions placeholder="Example: Before editing, inspect related files and run a targeted verification after each major change."></textarea></label><label class="ai-check"><input data-show-activity type="checkbox"> Show agent activity in chat</label><h3 class="ai-section-title">Request recovery</h3><label class="ai-check"><input data-retry-429 type="checkbox"> Automatically retry HTTP 429 rate limits</label><div class="ai-retry-grid"><label>Max 429 retries<input data-max-retries type="number" min="0" max="10"></label><label>Base delay (ms)<input data-base-delay type="number" min="250" max="30000" step="250"></label></div><label class="ai-check"><input data-retry-transport type="checkbox"> Retry transport/CORS failures</label><div class="ai-retry-grid"><label>Max transport retries<input data-max-transport-retries type="number" min="0" max="10"></label><label>Transport delay (ms)<input data-transport-delay type="number" min="250" max="30000" step="250"></label></div><p class="ai-settings-note-inline">HTTP responses such as 429 are handled separately from transport failures such as CORS or connection errors.</p><h3 class="ai-section-title">Tool-call recovery</h3><label class="ai-check"><input data-tool-recovery type="checkbox"> Retry supported tool-call parse failures</label><div class="ai-retry-grid"><label>Max recovery retries<input data-tool-recovery-retries type="number" min="0" max="10"></label><span></span></div><p class="ai-settings-note-inline">Providers can opt into a recovery strategy through their API adapter. The agent itself does not special-case providers.</p></div></div><div data-settings-panel="analytics" hidden><div class="ai-analytics-panel"><div class="ai-analytics-cards" data-analytics-cards></div><h3 class="ai-section-title">By model</h3><div data-analytics-models class="ai-analytics-models"></div><button data-reset-analytics class="ai-settings-reset">Reset analytics</button></div></div></div>`;
+      modal.innerHTML=`<div class="editor-modal-content ai-settings-content"><button class="editor-modal-close" aria-label="Close">×</button><h2>AI Settings</h2><p>Configure models, the extra instructions you give them, and usage behavior.</p><div class="ai-settings-tabs"><button data-settings-tab="models" class="active">Models</button><button data-settings-tab="context">Context</button><button data-settings-tab="analytics">Analytics</button></div><div data-settings-panel="models"><div class="ai-settings-columns"><section><div class="ai-section-title ai-settings-section-heading"><span>Models</span><span class="ai-settings-transfer"><button type="button" data-export-ai>Export JSON</button><button type="button" data-import-ai>Import JSON</button><button type="button" data-reset-models>Reset defaults</button><input data-import-ai-file type="file" accept="application/json,.json" hidden></span></div><label class="ai-check ai-export-keys"><input data-preserve-ai-keys type="checkbox" checked> Preserve API keys in export</label><div class="ai-export-warning">API keys are written to the JSON file in plain text when enabled. Only share the exported file if you are comfortable sharing those keys.</div><div class="ai-model-list">${models.map(m=>{
+  const local=!!m.local||m.protocol==='local-transformers';
+  const active=m.id===registry.settings.activeModelId;
+  const loaded=local&&!!localManager?.isLoaded?.(m.id);
+  const action=active&&(!local||loaded)?'Active':local?'Load':'Use';
+  const details=(local?'Local model':'Remote · '+registry.protocolLabel(m.protocol))+' · '+m.model;
+  const edit=local?'<button data-local-edit="'+escapeHtml(m.id)+'">Edit</button>':'<button data-edit="'+escapeHtml(m.id)+'">Edit</button>';
+  return '<div class="ai-model-row '+(active?'active ':'')+(local?'local':'remote')+'"><div class="ai-model-main"><strong>'+escapeHtml(m.name)+'</strong><span title="'+escapeHtml(details)+'">'+escapeHtml(details)+'</span></div><button data-use="'+escapeHtml(m.id)+'" '+(active&&(!local||loaded)?'disabled':'')+'>'+action+'</button>'+edit+'<button data-remove="'+escapeHtml(m.id)+'" '+(models.length<=1?'disabled title="At least one model must remain"':'')+'>×</button></div>';
+}).join('')}</div>
+<div class="ai-model-actions"><button class="ai-settings-add" data-add>+ Add remote model</button><button class="ai-settings-add" data-add-local>+ Add local model</button></div><div class="ai-model-editor-slot"><div class="ai-local-model-editor" data-local-editor hidden><h3 data-local-editor-title>Add local model</h3><label>Name<input data-local-name placeholder="Qwen3 4B Instruct · Local"></label><label>Model ID<div class="ai-model-input-row"><input data-local-model placeholder="onnx-community/owner-model-ONNX"><button type="button" data-browse-local-models>Browse</button></div></label><div class="ai-local-editor-status" data-local-editor-status></div><div class="ai-add-actions"><button type="button" data-cancel-local>Cancel</button><button type="button" data-save-local>Save model</button></div></div>
+<div class="ai-add-model" hidden><label>Provider<select data-provider>${Object.entries(providers).filter(([id])=>id!=='local').map(([id,p])=>`<option value="${escapeHtml(id)}">${escapeHtml(p.label)}</option>`).join('')}</select></label><label>API format<select data-format>${Object.entries(aiRoot.AI_PROTOCOLS||{}).map(([id,p])=>`<option value="${escapeHtml(id)}">${escapeHtml(p.label)}</option>`).join('')}</select></label><label>Name<input data-name placeholder="My model"></label><label>Endpoint<input data-endpoint placeholder="https://api.example.com/v1"></label><label>Model ID <div class="ai-model-input-row"><input data-model placeholder="model-name"><button type="button" data-browse-models>Browse models</button></div></label><label>API key <input data-key type="password" placeholder="Enter your provider key"></label><label class="ai-check"><input data-remember type="checkbox"> Remember API key on this device</label><label class="ai-check"><input data-tools type="checkbox" checked> Supports native tool calling</label><label class="ai-check"><input data-thinking type="checkbox" checked> Supports reasoning</label><div class="ai-add-hint" data-protocol-hint>Select a provider to fill in its API format and endpoint. You can override the endpoint for compatible services.</div><div class="ai-add-actions"><button data-cancel-model>Cancel</button><button data-save-model>Save model</button></div></div></div><div class="ai-local-load-status" data-local-settings-status hidden><div data-local-settings-text></div><div class="ai-local-progress"><span data-local-settings-progress></span></div></div><div class="ai-hf-account"><div class="ai-section-title">Hugging Face</div><label>Your API key<input data-hf-global-key type="password" placeholder="hf_..."></label><label class="ai-check"><input data-hf-global-remember type="checkbox"> Remember your key on this device</label><div class="ai-add-hint">Used for Hugging Face models that do not have their own key. Add a key here or on an individual model.</div></div></section><section><div class="ai-section-title">Permissions</div><div class="ai-permission-list">${Object.entries(permissions.all()).map(([k,v])=>`<label><span>${escapeHtml(TOOL_PERMISSION_LABELS[k]||k)}</span><select data-permission="${k}"><option value="always" ${v==='always'?'selected':''}>Always allow</option><option value="ask" ${v==='ask'?'selected':''}>Ask each time</option><option value="never" ${v==='never'?'selected':''}>Never allow</option></select></label>`).join('')}</div><button data-reset-permissions class="ai-settings-reset">Reset permissions</button></section></div><div class="ai-settings-note">Providers can fill in the API format and default endpoint automatically. Providers may expose either a live model list or a fixed set of known models.</div></div><div data-settings-panel="context" hidden><div class="ai-context-panel"><h3 class="ai-section-title">Model context &amp; instructions</h3><p class="ai-settings-note-inline">These are added to the built-in coding-assistant instructions. They persist on this device and apply to your AI chats.</p><label>Additional instructions<textarea data-custom-instructions placeholder="Example: Prefer small, focused changes. Explain tradeoffs briefly."></textarea></label><label>Agent-only instructions<textarea data-agent-instructions placeholder="Example: Before editing, inspect related files and run a targeted verification after each major change."></textarea></label><label class="ai-check"><input data-show-activity type="checkbox"> Show agent activity in chat</label><h3 class="ai-section-title">Request recovery</h3><label class="ai-check"><input data-retry-429 type="checkbox"> Automatically retry HTTP 429 rate limits</label><div class="ai-retry-grid"><label>Max 429 retries<input data-max-retries type="number" min="0" max="10"></label><label>Base delay (ms)<input data-base-delay type="number" min="250" max="30000" step="250"></label></div><label class="ai-check"><input data-retry-transport type="checkbox"> Retry transport/CORS failures</label><div class="ai-retry-grid"><label>Max transport retries<input data-max-transport-retries type="number" min="0" max="10"></label><label>Transport delay (ms)<input data-transport-delay type="number" min="250" max="30000" step="250"></label></div><p class="ai-settings-note-inline">HTTP responses such as 429 are handled separately from transport failures such as CORS or connection errors.</p><h3 class="ai-section-title">Tool-call recovery</h3><label class="ai-check"><input data-tool-recovery type="checkbox"> Retry supported tool-call parse failures</label><div class="ai-retry-grid"><label>Max recovery retries<input data-tool-recovery-retries type="number" min="0" max="10"></label><span></span></div><p class="ai-settings-note-inline">Providers can opt into a recovery strategy through their API adapter. The agent itself does not special-case providers.</p></div></div><div data-settings-panel="analytics" hidden><div class="ai-analytics-panel"><div class="ai-analytics-cards" data-analytics-cards></div><h3 class="ai-section-title">By model</h3><div data-analytics-models class="ai-analytics-models"></div><button data-reset-analytics class="ai-settings-reset">Reset analytics</button></div></div></div>`;
       modal.querySelector('.editor-modal-close').onclick=()=>modal.remove(); modal.onclick=e=>{if(e.target===modal)modal.remove();};
       const prefs=aiRoot.getAIPreferences?.()||{};
       const tabButtons=[...modal.querySelectorAll('[data-settings-tab]')], panels=[...modal.querySelectorAll('[data-settings-panel]')];
@@ -216,6 +230,20 @@
         if(preserveKeys) alert('AI settings exported. API keys are included in plain text in this JSON file. Do not share the exported file unless you intend to share those keys.');
       };
       const importInput=modal.querySelector('[data-import-ai-file]');
+      modal.querySelector('[data-reset-models]').onclick=async()=>{
+        const message='Restore the default AI model list? This will remove custom models and restore built-in models to their original names and model IDs. Your Hugging Face key, AI preferences, and permissions will be kept.';
+        if(!confirm(message))return;
+        try{
+          if(localManager?.isLoaded?.())await localManager.unload();
+          registry.resetDefaults();
+          editingId='';
+          editingLocalId='';
+          localEditor.hidden=true;
+          form.hidden=true;
+          render();
+          onChange?.();
+        }catch(e){alert('Could not reset AI models: '+(e?.message||String(e)));}
+      };
       modal.querySelector('[data-import-ai]').onclick=()=>importInput.click();
       importInput.onchange=async()=>{
         const file=importInput.files?.[0]; if(!file)return;
@@ -230,8 +258,117 @@
         }catch(err){alert(`Could not import AI settings: ${err?.message||err}`);}
         finally{importInput.value='';}
       };
-      modal.querySelectorAll('[data-use]').forEach(x=>x.onclick=()=>{registry.setActive(x.dataset.use);editingId='';render();onChange?.();});
-      modal.querySelectorAll('[data-remove]').forEach(x=>x.onclick=()=>{registry.remove(x.dataset.remove);editingId='';render();onChange?.();});
+      modal.querySelectorAll('[data-use]').forEach(button=>button.onclick=async()=>{
+        const model=registry.settings.models.find(m=>m.id===button.dataset.use);
+        if(!model)return;
+        if(model.local||model.protocol==='local-transformers'){
+          if(model.id===registry.settings.activeModelId&&localManager?.isLoaded?.(model.id))return;
+          modal.remove();
+          try{await useModel?.(model.id);}catch(e){alert(e?.message||String(e));}
+        }else{
+          registry.setActive(model.id);editingId='';render();onChange?.();
+        }
+      });
+      modal.querySelectorAll('[data-remove]').forEach(button=>button.onclick=async()=>{
+        const id=button.dataset.remove;
+        if(registry.settings.models.length<=1)return;
+        const model=registry.settings.models.find(x=>x.id===id);
+        if(!model)return;
+        if(!confirm('Remove model "'+model.name+'" from AI Settings?'))return;
+        try{
+          if(localManager?.isLoaded?.(id))await localManager.unload();
+          const removed=registry.remove(id);
+          if(!removed){alert('At least one AI model must remain.');return;}
+          if(editingId===id)editingId='';
+          editingLocalId=editingLocalId===id?'':editingLocalId;
+          localEditor.hidden=true;
+          render();onChange?.();
+        }catch(e){alert(e?.message||String(e));}
+      });
+      const localEditor=modal.querySelector('[data-local-editor]');
+      const localNameInput=modal.querySelector('[data-local-name]');
+      const localModelInput=modal.querySelector('[data-local-model]');
+      const localEditorStatus=modal.querySelector('[data-local-editor-status]');
+      let editingLocalId='';
+      function openLocalModelEditor(model=null){
+        form.hidden=true;
+        editingId='';
+        editingLocalId=model?.id||'';
+        localEditor.querySelector('[data-local-editor-title]').textContent=editingLocalId?'Edit local model':'Add local model';
+        localNameInput.value=model?.name||'';
+        localModelInput.value=model?.model||'';
+        localEditorStatus.textContent='';
+        localEditor.hidden=false;
+        localEditor.querySelector('[data-save-local]').textContent=editingLocalId?'Save changes':'Save model';
+        localEditor.scrollIntoView({block:'nearest',behavior:'smooth'});
+        if(!editingLocalId)localNameInput.focus();
+      }
+      function openLocalModelBrowser(onSelect){
+        const browser=document.createElement('div');
+        browser.className='editor-modal ai-hf-browser-modal';
+        browser.innerHTML='<div class="editor-modal-content ai-hf-browser-content"><button class="editor-modal-close" aria-label="Close">×</button><h2>Browse local models</h2><p>Choose a Hugging Face model supported by Transformers.js, or use a model ID directly.</p><div class="ai-hf-browser-toolbar"><input data-local-search placeholder="Search model IDs…"><button data-local-search-button>Search</button><button data-local-search-refresh>Refresh</button></div><div class="ai-local-add-row"><input data-local-model-id placeholder="Hugging Face model ID"><button data-local-use-id>Use ID</button></div><div class="ai-hf-browser-status" data-local-status>Loading models…</div><div class="ai-hf-browser-list" data-local-list></div></div>';
+        document.body.appendChild(browser);requestAnimationFrame(()=>browser.classList.add('show'));
+        const search=browser.querySelector('[data-local-search]'),status=browser.querySelector('[data-local-status]'),list=browser.querySelector('[data-local-list]'),idInput=browser.querySelector('[data-local-model-id]');
+        let all=[];
+        browser.querySelector('.editor-modal-close').onclick=()=>browser.remove();browser.onclick=e=>{if(e.target===browser)browser.remove();};
+        const choose=id=>{const modelId=String(id||'').trim();if(!modelId){status.textContent='Enter a Hugging Face model ID first.';return;}onSelect?.(modelId);browser.remove();};
+        async function load(){
+          status.textContent='Searching Hugging Face…';list.innerHTML='';
+          try{
+            if(!network?.request)throw new Error('Network API is unavailable.');
+            const q=search.value.trim();
+            const params=new URLSearchParams({pipeline_tag:'text-generation',library:'transformers.js',sort:'downloads',direction:'-1',limit:'50'});
+            if(q)params.set('search',q);
+            const response=await network.request(new Request('https://huggingface.co/api/models?'+params.toString()),'ai');
+            if(!response)throw new Error('Hugging Face returned no response.');
+            if(!response.ok)throw new Error('Hugging Face returned '+response.status+': '+await response.text());
+            all=await response.json();if(!Array.isArray(all))all=[];renderList();
+          }catch(e){status.textContent=e?.message||String(e);}
+        }
+        function renderList(){
+          const q=search.value.trim().toLowerCase();
+          const rows=all.filter(m=>{const id=String(m?.id||'');return id&&(!q||id.toLowerCase().includes(q));}).slice(0,200);
+          status.textContent=rows.length+' compatible model'+(rows.length===1?'':'s')+' found';
+          list.innerHTML=rows.map(m=>'<div class="ai-hf-model-row"><div class="ai-model-main"><strong>'+escapeHtml(m.id)+'</strong><span>'+Number(m.downloads||0).toLocaleString()+' downloads · '+Number(m.likes||0).toLocaleString()+' likes</span></div><button data-local-select="'+escapeHtml(m.id)+'">Select</button></div>').join('');
+          list.querySelectorAll('[data-local-select]').forEach(b=>b.onclick=()=>choose(b.dataset.localSelect));
+        }
+        browser.querySelector('[data-local-search-button]').onclick=load;browser.querySelector('[data-local-search-refresh]').onclick=load;search.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();load();}};
+        browser.querySelector('[data-local-use-id]').onclick=()=>choose(idInput.value);
+        idInput.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();choose(idInput.value);}};
+        load();
+      }
+      modal.querySelector('[data-add-local]').onclick=()=>openLocalModelEditor();
+      modal.querySelector('[data-cancel-local]').onclick=()=>{editingLocalId='';localEditor.hidden=true;};
+      modal.querySelector('[data-browse-local-models]').onclick=()=>openLocalModelBrowser(id=>{
+        localModelInput.value=id;
+        if(!localNameInput.value.trim())localNameInput.value=id.split('/').pop()+' · Local';
+        localEditorStatus.textContent='';
+      });
+      modal.querySelector('[data-save-local]').onclick=async()=>{
+        const name=localNameInput.value.trim(),modelId=localModelInput.value.trim();
+        if(!name||!modelId){localEditorStatus.textContent='Enter both a name and a model ID.';return;}
+        const isLocal=m=>m.local||m.protocol==='local-transformers';
+        const existing=registry.settings.models.find(m=>m.id===editingLocalId);
+        if(!editingLocalId&&registry.settings.models.some(m=>isLocal(m)&&m.model===modelId)){
+          localEditorStatus.textContent='That model is already in the list. Edit its existing entry instead.';return;
+        }
+        let id=editingLocalId;
+        if(!id){
+          const slug=modelId.replace(/[^a-z0-9]+/gi,'-').replace(/^-|-$/g,'').toLowerCase()||'model';
+          id='local-'+slug;
+          if(registry.settings.models.some(m=>m.id===id))id+='-'+Math.random().toString(36).slice(2,7);
+        }
+        try{
+          if(existing&&existing.model!==modelId&&localManager?.isLoaded?.(id))await localManager.unload();
+          registry.add({...existing,id,name,model:modelId,remoteModel:modelId,protocol:'local-transformers',kind:'local-transformers',endpoint:'',provider:'local',local:true,requiresKey:false,supportsTools:false,supportsAgentTools:true,supportsReasoning:false,supportsStreaming:true,builtInLocal:!!existing?.builtInLocal});
+          registry.save();
+          editingLocalId='';localEditor.hidden=true;render();onChange?.();
+        }catch(e){localEditorStatus.textContent=e?.message||String(e);}
+      };
+      modal.querySelectorAll('[data-local-edit]').forEach(button=>button.onclick=()=>{
+        const model=registry.settings.models.find(m=>m.id===button.dataset.localEdit);
+        if(model)openLocalModelEditor(model);
+      });
       const form=modal.querySelector('.ai-add-model'),add=modal.querySelector('[data-add]'),providerInput=form.querySelector('[data-provider]'),formatInput=form.querySelector('[data-format]'),endpointInput=form.querySelector('[data-endpoint]'),nameInput=form.querySelector('[data-name]'),modelInput=form.querySelector('[data-model]'),keyInput=form.querySelector('[data-key]'),hint=form.querySelector('[data-protocol-hint]');
       const hfGlobalKey=modal.querySelector('[data-hf-global-key]'),hfGlobalRemember=modal.querySelector('[data-hf-global-remember]');
       hfGlobalKey.value=registry.getHuggingFaceApiKey?.()||''; hfGlobalRemember.checked=!!registry.settings.huggingFaceRememberKey;
@@ -310,8 +447,20 @@
       form.querySelector('[data-browse-models]').onclick=()=>openModelBrowser(providerInput.value);
       providerInput.onchange=()=>updateProviderFields(true);
       endpointInput.oninput=()=>{if(providerInput.value==='custom')hint.textContent='Custom provider. The endpoint and API format will be used as entered.';};
-      function fill(model){editingId=model?.id||'';form.hidden=false;const providerId=registry.providerForModel(model);providerInput.value=providerId;formatInput.value=model?.protocol||registry.provider(providerId)?.protocol||'openai-chat';formatInput.disabled=providerId!=='custom';nameInput.value=model?.name||'';endpointInput.value=model?.endpoint||'';modelInput.value=model?.model||'';keyInput.value=model?.apiKey||'';form.querySelector('[data-remember]').checked=!!model?.rememberKey;form.querySelector('[data-tools]').checked=model?.supportsTools!==false;form.querySelector('[data-thinking]').checked=model?.supportsReasoning!==false;form.querySelector('[data-save-model]').textContent=editingId?'Save changes':'Save model';updateProviderFields(false);}
-      add.onclick=()=>{form.hidden=!form.hidden;if(!form.hidden&&!editingId){providerInput.value='custom';formatInput.value='openai-chat';formatInput.disabled=false;nameInput.value='';endpointInput.value='';modelInput.value='';keyInput.value='';form.querySelector('[data-tools]').checked=true;form.querySelector('[data-thinking]').checked=true;hint.textContent='Select a provider to fill in its API format and endpoint.';}};
+      function fill(model){editingLocalId='';localEditor.hidden=true;editingId=model?.id||'';form.hidden=false;const providerId=registry.providerForModel(model);providerInput.value=providerId;formatInput.value=model?.protocol||registry.provider(providerId)?.protocol||'openai-chat';formatInput.disabled=providerId!=='custom';nameInput.value=model?.name||'';endpointInput.value=model?.endpoint||'';modelInput.value=model?.model||'';keyInput.value=model?.apiKey||'';form.querySelector('[data-remember]').checked=!!model?.rememberKey;form.querySelector('[data-tools]').checked=model?.supportsTools!==false;form.querySelector('[data-thinking]').checked=model?.supportsReasoning!==false;form.querySelector('[data-save-model]').textContent=editingId?'Save changes':'Save model';updateProviderFields(false);}
+      add.onclick=()=>{
+        const wasOpen=!form.hidden&&!editingId;
+        editingLocalId='';
+        localEditor.hidden=true;
+        if(wasOpen){form.hidden=true;return;}
+        editingId='';
+        providerInput.value='custom';formatInput.value='openai-chat';formatInput.disabled=false;
+        nameInput.value='';endpointInput.value='';modelInput.value='';keyInput.value='';
+        form.querySelector('[data-remember]').checked=false;
+        form.querySelector('[data-tools]').checked=true;form.querySelector('[data-thinking]').checked=true;
+        hint.textContent='Select a provider to fill in its API format and endpoint.';
+        form.hidden=false;
+      };
       modal.querySelectorAll('[data-edit]').forEach(x=>x.onclick=()=>{const model=registry.settings.models.find(m=>m.id===x.dataset.edit);if(model)fill(model);});
       modal.querySelector('[data-cancel-model]').onclick=()=>{editingId='';form.hidden=true;};
       modal.querySelector('[data-save-model]').onclick=()=>{const provider=providerInput.value.trim()||'custom',preset=registry.provider(provider)||registry.provider('custom'),name=nameInput.value.trim(),endpoint=endpointInput.value.trim(),modelId=modelInput.value.trim(),apiKey=keyInput.value,remember=form.querySelector('[data-remember]').checked,tools=form.querySelector('[data-tools]').checked,thinking=form.querySelector('[data-thinking]').checked,protocol=provider==='custom'?formatInput.value:preset.protocol;if(!name||!endpoint||!modelId){alert('Name, endpoint, and model ID are required.');return;}registry.setHuggingFaceApiKey(hfGlobalKey.value,hfGlobalRemember.checked);registry.save();const id=editingId||'model-'+Math.random().toString(36).slice(2);try{const clean=registry.add({id,provider,name,endpoint,model:modelId,apiKey,rememberKey:remember,supportsTools:tools,supportsReasoning:thinking,requiresKey:!!apiKey,protocol});registry.setActive(clean.id);editingId='';render();onChange?.();}catch(e){alert(e?.message||String(e));}};
@@ -323,11 +472,14 @@
     document.body.appendChild(modal);render();requestAnimationFrame(()=>modal.classList.add('show'));
   }
 
+  async function editorExtensionHooks(name, payload) { try { return await window.EditorExtensionAPI?.runAIHook?.(name, payload) || payload; } catch (e) { console.warn('Editor AI extension hook failed:', name, e); return payload; } }
+
   factories.ai = function(ctx) {
     const {state, onOpen, runConfigured}=ctx;
     const updateStatus = state.updateStatus;
     let currentGroup = null, currentTab = null;
     const registry=new aiRoot.ProviderRegistry();
+    const localManager=new aiRoot.LocalModelManager();
     const permissions=new aiRoot.PermissionManager();
     const chatStore=makeChatStore(state);
     let currentChatId='';
@@ -335,7 +487,45 @@
     let loadedProjectId=null;
     let agentMode=false, busy=false, controller=null, editingIndex=-1;
     const toolset=aiRoot.makeAITools({state,openFile:onOpen,onRefresh:()=>{state.fileManager?.refresh?.();updateStatus?.();},runConfigured,ensureNodeRuntime:()=>state.ensureNodeRuntime?.()});
-    const agent=new aiRoot.AIAgent({client:new aiRoot.AIClient(registry,state.browserNetwork||window.__sharedBrowserNetwork),tools:toolset,permissions,requestPermission:permissionPrompt,emit:()=>{}});
+    const agent=new aiRoot.AIAgent({client:new aiRoot.AIClient(registry,state.browserNetwork||window.__sharedBrowserNetwork,localManager),tools:toolset,permissions,requestPermission:permissionPrompt,extensionAPI:window.EditorExtensionAPI,emit:()=>{}});
+    async function activateModel(id){
+      const target=registry.settings.models.find(x=>x.id===id);
+      if(!target)throw new Error('AI model not found.');
+      const previous=registry.active();
+      registry.setActive(target.id);
+      render(currentGroup,currentTab);
+      try{
+        if(target.local||target.protocol==='local-transformers'){
+          if(!localManager.isLoaded(target.id))await localManager.load(target);
+        }else if(localManager.isLoaded()){
+          await localManager.unload();
+        }
+      }catch(e){
+        if(previous?.id&&previous.id!==target.id){
+          try{registry.setActive(previous.id);}catch(_){}
+          render(currentGroup,currentTab);
+        }
+        throw e;
+      }
+      render(currentGroup,currentTab);
+      return target;
+    }
+    function updateLocalStatusUI(info){
+      const tree=currentTab?._viewElement;
+      if(!tree)return;
+      const model=registry.active(),local=!!model?.local||model?.protocol==='local-transformers';
+      const label=tree.querySelector('.ai-model-label');if(label)label.textContent=makeModelLabel(model,registry,localManager);
+      const loaded=local&&localManager.isLoaded(model.id);
+      const status=tree.querySelector('[data-local-status]'),text=tree.querySelector('[data-local-status-text]'),bar=tree.querySelector('[data-local-status-progress]'),button=tree.querySelector('[data-local-load]'),input=tree.querySelector('[data-input]'),send=tree.querySelector('[data-send]');
+      if(status){status.hidden=!local||(!info?.loading&&!loaded);}
+      if(text)text.textContent=info?.loading?(info.text||'Loading local model…'):(loaded?(info?.text||'Local model ready.'):'Local model is not loaded.');
+      if(bar)bar.style.width=(info?.loading?Math.max(0,Math.min(100,Number(info.progress)||0)):loaded?100:0)+'%';
+      if(button){button.disabled=!!info?.loading;button.textContent=info?.loading?'Loading…':loaded?'Loaded':'Load model';}
+      const needsLoad=local&&!loaded;
+      if(input){input.disabled=needsLoad||busy;input.placeholder=needsLoad?'Load the local model first…':'Ask anything about your project…';}
+      if(send)send.disabled=needsLoad||busy||!input?.value?.trim();
+    }
+    localManager.subscribe(updateLocalStatusUI);
     function syncChats() {
       const pid=state.projectId || 'global';
       if (loadedProjectId===pid && currentChatId) return;
@@ -433,7 +623,6 @@
       const title=prompt('Chat name:',chat.title);
       if(title!=null){chatStore.rename(chat.id,title);render(view.g,view.t);}
     }
-    function formatWait(seconds){const n=Math.max(0,Math.ceil(Number(seconds)||0));if(n<60)return `${n}s`;const m=Math.floor(n/60),s=n%60;return s?`${m}m ${s}s`:`${m}m`;}
     function render(g, t) {
       currentGroup = g || currentGroup || state.workbench?.getFirstLeaf?.();
       currentTab = t || currentTab || currentGroup?.tabs?.find(x => x.builtin === 'ai');
@@ -447,23 +636,28 @@
         currentGroup.viewBody.appendChild(tree);
       }
       tree.style.display = '';
-      const model=registry.active(); const chats=chatStore.list(true); const current=currentChat();
-      if(!model.supportsTools) agentMode=false;
-      tree.innerHTML=`<div class="ai-panel-inner"><div class="ai-header"><div class="ai-header-left"><strong>AI Chat</strong><span class="ai-model-label">${escapeHtml(makeModelLabel(model,registry))}</span></div><div class="ai-header-right"><select class="ai-chat-select" data-chat-select ${busy?'disabled':''} title="Recent chats">${chats.map(c=>`<option value="${escapeHtml(c.id)}" ${c.id===currentChatId?'selected':''}>${escapeHtml(c.title)}</option>`).join('')}${!chats.length?'<option>No chats</option>':''}</select><div class="ai-head-actions"><button data-chat-manage ${busy?'disabled':''} title="Manage chats" aria-label="Manage chats">☰</button><button data-new ${busy?'disabled':''} title="New chat" aria-label="New chat">＋</button><button data-settings title="AI Settings" aria-label="AI Settings">⚙</button></div></div></div><div class="ai-chat" data-chat></div><div class="ai-horde-status" data-status ${busy?'':'hidden'}>${busy?'Working…':''}</div><div class="ai-compose"><textarea data-input placeholder="Ask anything about your project…" rows="3"></textarea><div class="ai-compose-bar"><label class="ai-agent-toggle"><input data-agent type="checkbox" ${agentMode?'checked':''} ${model.supportsTools?'':'disabled'}> Agent mode${model.supportsTools?'':' (not supported by this model)'}</label><label class="ai-agent-steps">Steps <input data-agent-steps type="number" min="1" max="100" step="1" value="${Math.max(1,Math.min(100,Number(agent.maxSteps)||24))}" ${model.supportsTools?'':'disabled'}></label><button data-stop ${busy?'':'disabled'}>Stop</button><button class="primary" data-send ${busy?'disabled':''}>Send</button></div></div></div>`;
+      const model=registry.active(); const localModel=!!model?.local||model?.protocol==='local-transformers'; const localLoaded=!localModel||localManager.isLoaded(model.id); const chats=chatStore.list(true); const current=currentChat();
+      if(!model.supportsTools && !model.supportsAgentTools) agentMode=false;
+      tree.innerHTML=`<div class="ai-panel-inner"><div class="ai-header"><div class="ai-header-left"><strong>AI Chat</strong><span class="ai-model-label">${escapeHtml(makeModelLabel(model,registry,localManager))}</span></div><div class="ai-header-right"><select class="ai-chat-select" data-chat-select ${busy?'disabled':''} title="Recent chats">${chats.map(c=>`<option value="${escapeHtml(c.id)}" ${c.id===currentChatId?'selected':''}>${escapeHtml(c.title)}</option>`).join('')}${!chats.length?'<option>No chats</option>':''}</select><div class="ai-head-actions"><button data-chat-manage ${busy?'disabled':''} title="Manage chats" aria-label="Manage chats">☰</button><button data-new ${busy?'disabled':''} title="New chat" aria-label="New chat">＋</button><button data-settings title="AI Settings" aria-label="AI Settings">⚙</button></div><div class="ai-local-head-action">${localModel&&!localLoaded?'<button data-local-load>Load model</button>':''}</div></div></div><div class="ai-chat" data-chat>${chatMessages.length ? '' : '<div class="ai-chat-disclaimer">Chats are saved inside this project. If this project is published or pushed to Git, saved chats may be visible to others.</div>'}</div><div class="ai-request-status" data-status ${busy?'':'hidden'}>${busy?'Working…':''}</div><div class="ai-local-status" data-local-status hidden><div data-local-status-text></div><div class="ai-local-progress"><span data-local-status-progress></span></div></div><div class="ai-compose"><textarea data-input placeholder="Ask anything about your project…" rows="3"></textarea><div class="ai-compose-bar"><label class="ai-agent-toggle"><input data-agent type="checkbox" ${agentMode?'checked':''} ${model.supportsTools||model.supportsAgentTools?'':'disabled'}> Agent mode${model.supportsTools||model.supportsAgentTools?'':' (not supported by this model)'}</label><label class="ai-agent-steps">Steps <input data-agent-steps type="number" min="1" max="100" step="1" value="${Math.max(1,Math.min(100,Number(agent.maxSteps)||24))}" ${model.supportsTools||model.supportsAgentTools?'':'disabled'}></label><button data-stop ${busy?'':'disabled'}>Stop</button><button class="primary" data-send ${busy?'disabled':''}>Send</button></div></div></div>`;
       const chat=tree.querySelector('[data-chat]');
       for(let i=0;i<chatMessages.length;i++){const m=chatMessages[i];addMessage(chat,m.role,m.content,i,m);}
       tree.querySelector('[data-agent]').onchange=e=>{agentMode=e.target.checked;};
       const stepsInput=tree.querySelector('[data-agent-steps]');
       stepsInput.onchange=()=>{const n=Math.max(1,Math.min(100,Math.floor(Number(stepsInput.value)||24)));agent.maxSteps=n;stepsInput.value=n;};
-      tree.querySelector('[data-settings]').onclick=()=>settingsModal(registry,permissions,()=>{persist();render(g,t);},state.browserNetwork||window.__sharedBrowserNetwork);
+      tree.querySelector('[data-settings]').onclick=()=>settingsModal(registry,permissions,()=>{persist();render(g,t);},state.browserNetwork||window.__sharedBrowserNetwork,localManager,activateModel);
       tree.querySelector('[data-chat-select]').onchange=e=>switchChat(e.target.value);
       tree.querySelector('[data-chat-manage]').onclick=()=>chatManageModal();
+      tree.querySelector('[data-local-load]')?.addEventListener('click',async()=>{try{await activateModel(model.id);render(g,t);}catch(e){alert(e?.message||String(e));updateLocalStatusUI(localManager.status());}});
+      updateLocalStatusUI(localManager.status());
       tree.querySelector('[data-new]').onclick=()=>newChat();
       tree.querySelector('[data-stop]').onclick=()=>{controller?.abort();agent.client.cancel();busy=false;render(g,t);};
       const input=tree.querySelector('[data-input]'); const send=tree.querySelector('[data-send]');
       const submit=async()=>{const text=input.value.trim();if(!text||busy)return;if(editingIndex>=0){const index=editingIndex;input.value='';resendMessage(index,text,g,t,tree);}else{input.value='';await sendMessage(text,g,t,tree);}};
       send.textContent=editingIndex>=0?'Resend':'Send';
+      const updateSendState=()=>{const active=registry.active();send.disabled=!input.value.trim()||busy||!!((active?.local||active?.protocol==='local-transformers')&&!localManager.isLoaded(active.id));};
+      input.addEventListener('input',updateSendState);
       send.onclick=submit; input.addEventListener('keydown',e=>{if(e.key==='Enter' && !e.shiftKey){e.preventDefault();submit();}});
+      updateSendState();
       if(editingIndex>=0){const cancel=document.createElement('button');cancel.type='button';cancel.textContent='Cancel';cancel.title='Cancel prompt editing';cancel.onclick=()=>{cancelEdit();render(g,t);};send.parentNode.insertBefore(cancel,send);}
       if(chatMessages.length)chat.scrollTop=chat.scrollHeight;
     }
@@ -486,6 +680,7 @@
         if(agentMode){
           agent.emit=event=>{
             if(event.type==='assistant'){partial=event.text||partial;renderMessage(bubble,partial,code=>insertCode(code));chat.scrollTop=chat.scrollHeight;}
+            else if(event.type==='assistant_activity'){appendActivity(liveActivity,{kind:'assistant',text:event.text});}
             else if(event.type==='tool_call'){appendActivity(liveActivity,{kind:'tool_call',name:event.name,args:event.args});}
             else if(event.type==='tool_result'){appendActivity(liveActivity,{kind:'tool_result',name:event.name,args:event.args,result:event.result,ok:event.ok});}
             else if(event.type==='step'){appendActivity(liveActivity,{kind:'step',text:`Step ${event.step}/${event.maxSteps}`});tree.querySelector('[data-status]')?.replaceChildren(document.createTextNode(`Step ${event.step}/${event.maxSteps}`));}
@@ -494,26 +689,11 @@
             else if(event.type==='request_start'){appendActivity(liveActivity,{kind:'request_start',text:`Requesting ${event.model} (${event.protocol})…`});}
             else if(event.type==='reasoning_summary'){appendActivity(liveActivity,{kind:'reasoning_summary',text:event.text});} else if(event.type==='reasoning'){appendActivity(liveActivity,{kind:'reasoning',text:event.text||'Model reasoning is active.'});}
           };
-          const messages=activeMessages(); const prompt=systemPrompt(true); const result=await agent.run([{role:'system',content:prompt},...messages],{systemPrompt:prompt,maxTokens:2048,retryTransport:prefs.retryTransport,maxTransportRetries:prefs.maxTransportRetries,transportRetryDelay:prefs.transportRetryDelay,onRetry:info=>agent.emit?.({type:info?.kind==='tool_parse_recovery'?'provider_retry':info?.kind==='transport_retry'?'transport_retry':'retry',...info})}); partial=result.text||partial; renderMessage(bubble,partial,code=>insertCode(code)); const activityData=liveActivity?.items||[]; chatMessages.push({role:'assistant',content:partial,activity:activityData}); if(liveActivity)liveActivity.details.open=false;
+          const messages=activeMessages(); const prompt=systemPrompt(true); const hookInput={messages:[...messages],agentMode:true,projectId:state.projectId||null,projectName:state.projectName||'Workspace'}; const prepared=await editorExtensionHooks('ai.beforeRun',hookInput); const result=await agent.run([{role:'system',content:prompt},...(prepared?.messages||messages)],{systemPrompt:prompt,maxTokens:2048,retryTransport:prefs.retryTransport,maxTransportRetries:prefs.maxTransportRetries,transportRetryDelay:prefs.transportRetryDelay,onRetry:info=>agent.emit?.({type:info?.kind==='tool_parse_recovery'?'provider_retry':info?.kind==='transport_retry'?'transport_retry':'retry',...info})}); await editorExtensionHooks('ai.afterRun',{...hookInput,result}); partial=result.text||partial; renderMessage(bubble,partial,code=>insertCode(code)); const activityData=liveActivity?.items||[]; chatMessages.push({role:'assistant',content:partial,activity:activityData}); if(liveActivity)liveActivity.details.open=false;
         } else {
           const messages=[{role:'system',content:systemPrompt(false)},...activeMessages()];
           const model=agent.client.model();
-          const queueStatus=info=>{
-            if(model.protocol!=='ai-horde') return;
-            const wait=Number(info?.waitTime);
-            const position=Number(info?.queuePosition);
-            if(info?.done){setStatus('');return;}
-            if(info?.waiting){
-              const pos=Number.isFinite(position)?Math.max(1,Math.floor(position)+1):null;
-              const waitText=Number.isFinite(wait)&&wait>0?` • ~${formatWait(wait)}`:'';
-              setStatus(pos?`Queue: #${pos}${waitText}`:`Queued${waitText}`);
-            } else if(info?.processing){
-              setStatus(Number.isFinite(wait)&&wait>0?`Processing • ~${formatWait(wait)}`:'Processing…');
-            } else {
-              setStatus('Waiting for Horde…');
-            }
-          };
-          for await(const chunk of agent.client.stream(messages,{thinking:true,maxTokens:2048,temperature:.7,topP:.9,signal:controller.signal,systemPrompt:systemPrompt(false),onQueueStatus:queueStatus,onRetry:info=>setStatus(info?.kind==='tool_parse_recovery' ? (info.text||'Retrying tool-call generation…') : info?.kind==='transport_retry' ? `Network retry in ${Math.ceil((info.waitMs||0)/1000)}s (attempt ${info.attempt}/${info.maxRetries})` : `Rate limited — retrying in ${Math.ceil(info.waitMs/1000)}s (attempt ${info.attempt}/${info.maxRetries})`)})){partial=chunk.text||partial;renderMessage(bubble,partial,code=>insertCode(code));chat.scrollTop=chat.scrollHeight;}
+          for await(const chunk of agent.client.stream(messages,{thinking:true,maxTokens:2048,temperature:.7,topP:.9,signal:controller.signal,systemPrompt:systemPrompt(false),onRetry:info=>setStatus(info?.kind==='tool_parse_recovery' ? (info.text||'Retrying tool-call generation…') : info?.kind==='transport_retry' ? `Network retry in ${Math.ceil((info.waitMs||0)/1000)}s (attempt ${info.attempt}/${info.maxRetries})` : `Rate limited — retrying in ${Math.ceil(info.waitMs/1000)}s (attempt ${info.attempt}/${info.maxRetries})`)})){partial=chunk.text||partial;renderMessage(bubble,partial,code=>insertCode(code));chat.scrollTop=chat.scrollHeight;}
           chatMessages.push({role:'assistant',content:partial});
         }
         persist();
@@ -527,18 +707,19 @@
       const details=document.createElement('details'); details.className='ai-activity'; details.open=!!open;
       const summary=document.createElement('summary'); summary.textContent=activitySummary(items); details.appendChild(summary);
       const body=document.createElement('div'); body.className='ai-activity-body'; details.appendChild(body);
-      const activity={body,items:items||[],details}; for(const item of (items||[])) appendActivity(activity,item); summary.textContent=activitySummary(activity.items);
+      const activity={body,items:items||[],details}; for(const item of [...(items||[])]) appendActivity(activity,item,false); summary.textContent=activitySummary(activity.items);
       return details;
     }
     function beginActivity(chat,open){
       const details=renderActivity(chat,[],open); const body=details.querySelector('.ai-activity-body');
       chat.appendChild(details); return {details,body,host:details,items:[]};
     }
-    function appendActivity(activity,item){
+    function appendActivity(activity,item,record=true){
       if(!activity?.body)return;
-      if(activity.items)activity.items.push(item);
+      if(record && activity.items)activity.items.push(item);
       const row=document.createElement('div'); row.className='ai-activity-row';
       if(typeof item==='string'){row.textContent=item;}
+      else if(item.kind==='assistant'){row.innerHTML=`<strong>Assistant</strong><div class="ai-activity-assistant">${sanitizeHtml(markdown(item.text||''))}</div>`;}
       else if(item.kind==='tool_call'){row.innerHTML=`<strong>Tool call: ${escapeHtml(item.name)}</strong><pre>${escapeHtml(activityValue(item.args||{}))}</pre>`;}
       else if(item.kind==='tool_result'){const suffix=Number.isFinite(Number(item.durationMs))?` · ${Math.max(0,Math.round(item.durationMs))} ms`:'';row.innerHTML=`<strong>${item.ok?'Tool result':'Tool error'}: ${escapeHtml(item.name)}${suffix}</strong><pre>${escapeHtml(activityValue(item.result))}</pre>`;}
       else if(item.kind==='step'){row.innerHTML=`<strong>Agent step</strong><span>${escapeHtml(String(item.text||''))}</span>`;}

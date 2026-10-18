@@ -171,13 +171,44 @@
     }
     throw new Error('Browser load API is not ready.');
   }
+    function dispose(t) {
+      const info = t?.id ? state.browserTabs.get(t.id) : null;
+      const frame = info?.frame || t?._viewElement?.querySelector?.('iframe');
+      if (!frame) return;
+      try {
+        const win = frame.contentWindow;
+        const stopMedia = doc => {
+          try {
+            doc?.querySelectorAll?.('audio,video').forEach(media => {
+              try { media.pause(); } catch (_) {}
+              try { media.removeAttribute('src'); media.load(); } catch (_) {}
+              try { media.querySelectorAll?.('source').forEach(source => source.removeAttribute('src')); } catch (_) {}
+            });
+          } catch (_) {}
+        };
+        stopMedia(win?.document);
+        for (const browserTab of win?.tabs || []) {
+          try { stopMedia(browserTab?.iframe?.contentDocument || browserTab?.iframe?.contentWindow?.document); } catch (_) {}
+          try { browserTab?.iframe?.removeAttribute('src'); } catch (_) {}
+        }
+      } catch (_) {}
+      try { frame.removeAttribute('src'); } catch (_) {}
+      try { frame.remove(); } catch (_) {}
+      if (t?.id) state.browserTabs.delete(t.id);
+      if (state.browserFrame === frame) {
+        state.browserFrame = null;
+        state.browserNetwork = null;
+      }
+    }
+
     return {
       title: 'Browser',
       icon: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="4" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M3 8h18M7 12h10M7 16h6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
       render: renderBrowser,
       isReady: isBrowserFrameReady,
       ensure: ensureBrowser,
-      navigatePreview
+      navigatePreview,
+      dispose
     };
   };
 })();

@@ -2,7 +2,7 @@
   const root = window.GitHubService = window.GitHubService || {};
   const API = 'https://api.github.com';
   const API_VERSION = '2026-03-10';
-  const GITHUB_APP_SLUG = 'node-editor';
+  const GITHUB_APP_SLUG = 'watermelonkatana-editor';
   const TOKEN_SESSION_KEY = 'editor.github.token.session';
   const TOKEN_LOCAL_KEY = 'editor.github.token';
   const USER_SESSION_KEY = 'editor.github.user.session';
@@ -128,14 +128,17 @@
     const verifier = randomString(48);
     const state = randomString(24);
     const challenge = await sha256Base64Url(verifier);
-    const pending = {state, verifier, createdAt: Date.now()};
-    localStorage.setItem(PENDING_KEY, JSON.stringify(pending));
     const redirect = new URL(location.href);
     redirect.search = '';
     redirect.hash = '';
+    const callback = new URL('github-callback.html', location.href);
+    callback.search = '';
+    callback.hash = '';
+    const pending = {state, verifier, createdAt: Date.now(), returnUri: redirect.href};
+    localStorage.setItem(PENDING_KEY, JSON.stringify(pending));
     const url = new URL(worker + '/login');
     url.searchParams.set('state', state);
-    url.searchParams.set('redirect_uri', redirect.href);
+    url.searchParams.set('redirect_uri', callback.href);
     url.searchParams.set('code_challenge', challenge);
     url.searchParams.set('code_challenge_method', 'S256');
     const popup = window.open(url.href, 'github-auth', 'popup,width=520,height=720,resizable=yes,scrollbars=yes');
@@ -216,11 +219,15 @@
     headers.set('Authorization', `Bearer ${token}`);
     if (options.body !== undefined && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
     const init = {...options, headers, credentials:'omit'};
+    // GitHub's GET responses can be cached for up to a minute. Source Control
+    // needs the branch/tree/history state immediately after a push, so never
+    // let browser/network caching return the pre-commit state.
+    if (!init.method || String(init.method).toUpperCase() === 'GET' || String(init.method).toUpperCase() === 'HEAD') init.cache = 'no-store';
     delete init.token;
     const network = window.__sharedBrowserNetwork || window.EditorAppState?.browserNetwork;
     let response;
     if (network?.request) {
-      response = await network.request(new Request(API + path, init), 'github-api');
+      response = await network.request(new Request(API + path, init), 'github-api', () => true);
       if (!response) throw new Error('GitHub API request failed: no Network endpoint returned a response.');
     } else {
       response = await fetch(API + path, init);
@@ -270,14 +277,14 @@
       body:JSON.stringify({name, description:String(description || '').trim(), private:!!privateRepo, auto_init:!!autoInit, has_issues:true, has_projects:false, has_wiki:false})
     });
   }
-  async function downloadArchive(owner, repo, ref = '') {
+  async function downloadArchive(owner, repo, ref = '', options = {}) {
     const token = getToken();
     if (!token) throw new Error('Not signed in to GitHub.');
     const path = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/zipball/${branchPath(ref || 'main')}`;
     const headers = new Headers({Accept:'application/vnd.github+json','X-GitHub-Api-Version':API_VERSION,Authorization:`Bearer ${token}`});
     const network = window.__sharedBrowserNetwork || window.EditorAppState?.browserNetwork;
     const request = new Request(API + path, {headers, credentials:'omit'});
-    const response = network?.request ? await network.request(request, 'github-archive') : await fetch(request);
+    const response = network?.request ? await network.request(request, 'github-archive', () => true) : await fetch(request);
     if (!response) throw new Error('GitHub archive download failed: no Network endpoint returned a response.');
     if (response.status === 401) { clearStoredAuth(); notify(); throw new Error('GitHub authentication expired. Sign in again from Profile.'); }
     if (!response.ok) {
@@ -286,7 +293,26 @@
       error.status = response.status; error.data = data;
       throw error;
     }
-    return response.blob();
+    const total = Number(response.headers?.get?.('content-length')) || 0;
+    if (!response.body?.getReader) {
+      const blob = await response.blob();
+      options.onProgress?.(blob.size, total || blob.size);
+      return blob;
+    }
+    const reader = response.body.getReader();
+    const chunks = [];
+    let received = 0;
+    options.onProgress?.(0, total || 0);
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      if (value) {
+        chunks.push(value);
+        received += value.byteLength || value.length || 0;
+      }
+      options.onProgress?.(received, total || 0);
+    }
+    return new Blob(chunks, {type: response.headers?.get?.('content-type') || 'application/zip'});
   }
   function branchPath(branch) { return String(branch || 'main').split('/').filter(Boolean).map(encodeURIComponent).join('/'); }
   async function listBranches(owner, repo) {
@@ -305,20 +331,59 @@
       const tree = await request(`${repoPath}/git/trees/${encodeURIComponent(treeSha)}?recursive=1`);
       return {commitSha, treeSha, tree:Array.isArray(tree?.tree) ? tree.tree : [], truncated:!!tree?.truncated};
     } catch (e) {
-      if (e?.status === 404) return {commitSha:null, treeSha:null, tree:[], empty:true};
+      // An empty repository has no refs yet. GitHub reports the missing
+      // branch as 409 ("Git Repository is empty"), so that is a normal empty
+      // state, not an initialization failure. Git-data writes below will
+      // create the first tree, root commit, and branch ref.
+      if (e?.status === 409 || e?.status === 404) {
+        return {commitSha:null, treeSha:null, tree:[], empty:true};
+      }
       throw e;
     }
   }
   async function listCommits(owner, repo, branch, count = 20) {
-    const items = await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits?sha=${encodeURIComponent(branch || 'main')}&per_page=${Math.min(100, Math.max(1, count))}`);
-    return Array.isArray(items) ? items.map(item => ({
+    try {
+      const items = await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits?sha=${encodeURIComponent(branch || 'main')}&per_page=${Math.min(100, Math.max(1, count))}`);
+      return Array.isArray(items) ? items.map(item => ({
       sha: item.sha,
       message: String(item.commit?.message || '').split(/\r?\n/, 1)[0],
       author: item.author?.login || item.commit?.author?.name || 'Unknown',
       date: item.commit?.author?.date || item.commit?.committer?.date || '',
       url: item.html_url || ''
-    })) : [];
+      })) : [];
+    } catch (e) {
+      // An empty GitHub repository has no commit history yet; GitHub reports this as 409.
+      if (e?.status === 404 || e?.status === 409) return [];
+      throw e;
+    }
   }
+  async function getCommitState(owner, repo, commitSha) {
+    const repoPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+    const commit = await request(`${repoPath}/git/commits/${encodeURIComponent(commitSha)}`);
+    const treeSha = commit?.tree?.sha;
+    if (!treeSha) throw new Error('GitHub did not return the selected commit tree.');
+    const tree = await request(`${repoPath}/git/trees/${encodeURIComponent(treeSha)}?recursive=1`);
+    const entries = Array.isArray(tree?.tree) ? tree.tree.filter(entry => entry?.type === 'blob' && entry.path && !ignoredPath(entry.path)) : [];
+    return {commitSha:String(commitSha), treeSha, tree:entries, truncated:!!tree?.truncated};
+  }
+  async function readBlob(owner, repo, sha) {
+    const data = await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/blobs/${encodeURIComponent(sha)}`);
+    if (data?.encoding !== 'base64' || typeof data.content !== 'string') throw new Error('GitHub returned an unsupported blob encoding.');
+    const binary = atob(data.content.replace(/\s/g, ''));
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+  function bytesToBase64(data) {
+    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data || []);
+    let binary = '';
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + chunk, bytes.length)));
+    }
+    return btoa(binary);
+  }
+
   async function gitBlobSha(data) {
     const bytes = data instanceof Uint8Array ? data : new Uint8Array(data || []);
     const header = new TextEncoder().encode(`blob ${bytes.length}\0`);
@@ -329,19 +394,121 @@
   }
   function ignoredPath(path) {
     const p = String(path || '').replace(/^\/+/, '');
-    return p === '.git' || p.startsWith('.git/') || p === 'node_modules' || p.startsWith('node_modules/');
+    return p === '.git' || p.startsWith('.git/');
   }
+
+  function gitIgnoreRegex(pattern) {
+    let p = String(pattern || '').trim();
+    if (!p || p.startsWith('#')) return null;
+    if (p.endsWith('\\')) p = p.slice(0, -1);
+    if (!p) return null;
+    const negated = p.startsWith('!');
+    if (negated) p = p.slice(1);
+    const anchored = p.startsWith('/');
+    if (anchored) p = p.slice(1);
+    const directoryOnly = p.endsWith('/');
+    if (directoryOnly) p = p.replace(/\/+$/, '');
+    if (!p) return null;
+
+    const escape = value => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const glob = value => {
+      let out = '';
+      for (let i = 0; i < value.length; i++) {
+        const ch = value[i];
+        if (ch === '*') {
+          if (value[i + 1] === '*') {
+            while (value[i + 1] === '*') i++;
+            if (value[i + 1] === '/') { i++; out += '(?:.*/)?'; }
+            else out += '.*';
+          } else out += '[^/]*';
+        } else if (ch === '?') out += '[^/]';
+        else if (ch === '[') {
+          const end = value.indexOf(']', i + 1);
+          if (end > i + 1) {
+            const body = value.slice(i + 1, end);
+            out += '[' + (body[0] === '!' ? '^' + body.slice(1) : body) + ']';
+            i = end;
+          } else out += '\\[';
+        } else out += escape(ch);
+      }
+      return out;
+    };
+
+    const body = glob(p);
+    let source;
+    if (p.includes('/')) source = (anchored ? '^' : '^(?:.*/)?') + body;
+    else source = '^(?:.*/)?' + body;
+    source += directoryOnly ? '(?:/.*)?$' : '$';
+    try { return {negated, regex:new RegExp(source)}; } catch (_) { return null; }
+  }
+
+  function readGitIgnore(fs) {
+    const entries = [];
+    try {
+      if (!fs?.existsSync?.('.gitignore')) return entries;
+      const text = fs.readFileSync('.gitignore', 'utf8');
+      for (const raw of String(text || '').split(/\r?\n/)) {
+        const entry = gitIgnoreRegex(raw);
+        if (entry) entries.push(entry);
+      }
+    } catch (_) {}
+    return entries;
+  }
+
+  function gitIgnoreDecision(path, rules) {
+    const p = String(path || '').replace(/^\/+/, '');
+    if (!p || ignoredPath(p)) return true;
+    let matched = null;
+    for (const rule of rules || []) {
+      if (rule.regex.test(p)) matched = !rule.negated;
+    }
+    return matched;
+  }
+
+  function isGitIgnored(path, rules) {
+    return gitIgnoreDecision(path, rules) === true;
+  }
+
+  function isNodeModulesPath(path) {
+    return String(path || '').replace(/^\/+/, '').split('/').includes('node_modules');
+  }
+
+  function isNodeModulesIgnoredBySetting(fs) {
+    try {
+      if (!fs?.existsSync?.('.editor/settings.json')) return true;
+      const raw = fs.readFileSync('.editor/settings.json', 'utf8');
+      const settings = JSON.parse(String(raw || '{}'));
+      return settings?.ignoreNodeModules !== false;
+    } catch (_) {
+      return true;
+    }
+  }
+
   async function compareWorkingTree(fs, remoteTree) {
     if (!fs) throw new Error('No workspace filesystem is open.');
-    const localPaths = fs.listFilesSync().map(path => String(path).replace(/^\/+/, '')).filter(path => path && !ignoredPath(path));
+    const rules = readGitIgnore(fs);
+    const ignoreNodeModules = isNodeModulesIgnoredBySetting(fs);
+    const localPaths = fs.listFilesSync()
+      .map(path => String(path).replace(/^\/+/, ''))
+      .filter(path => path && !ignoredPath(path) && !(ignoreNodeModules && isNodeModulesPath(path)));
     const remoteFiles = new Map();
-    for (const entry of remoteTree || []) if (entry?.type === 'blob' && entry.path && !ignoredPath(entry.path)) remoteFiles.set(entry.path, entry);
+    for (const entry of remoteTree || []) {
+      if (entry?.type === 'blob' && entry.path && !ignoredPath(entry.path) && !(ignoreNodeModules && isNodeModulesPath(entry.path))) remoteFiles.set(entry.path, entry);
+    }
+
     const changes = [];
     for (const path of localPaths) {
       const data = fs.readFileSync(path, 'binary');
       const bytes = data instanceof Uint8Array ? data : new Uint8Array(data || []);
       const sha = await gitBlobSha(bytes);
       const remote = remoteFiles.get(path);
+
+      // The node_modules workspace setting is handled above. .gitignore remains
+      // independent and only suppresses untracked local additions; a file already
+      // tracked by Git remains comparable even if it later becomes ignored.
+      const ignoreDecision = gitIgnoreDecision(path, rules);
+      if (!remote && ignoreDecision === true) continue;
+
       if (!remote) changes.push({path, type:'added', sha, data:bytes});
       else if (remote.sha !== sha) changes.push({path, type:'modified', sha, data:bytes, mode:remote.mode || '100644'});
       remoteFiles.delete(path);
@@ -351,16 +518,68 @@
     changes.sort((a,b) => (order[a.type] - order[b.type]) || a.path.localeCompare(b.path));
     return changes;
   }
+
   async function createBlob(owner, repo, data) {
     const bytes = data instanceof Uint8Array ? data : new Uint8Array(data || []);
     if (bytes.byteLength > 95 * 1024 * 1024) throw new Error(`File is too large for the GitHub API: ${bytes.byteLength.toLocaleString()} bytes.`);
-    let binary = '';
-    const chunk = 0x8000;
-    for (let i = 0; i < bytes.length; i += chunk) binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + chunk, bytes.length)));
     return request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/blobs`, {
       method:'POST',
-      body:JSON.stringify({content:btoa(binary), encoding:'base64'})
+      body:JSON.stringify({content:bytesToBase64(bytes), encoding:'base64'})
     });
+  }
+  async function initializeEmptyRepository(owner, repo, branch, attempt = 0) {
+    const placeholder = 'initialize.txt';
+    try {
+      const response = await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${placeholder}`, {
+        method:'PUT',
+        body:JSON.stringify({
+          message:'Initialize Git repository',
+          content:bytesToBase64(new TextEncoder().encode('')),
+          branch:String(branch || 'main')
+        })
+      });
+      return response?.commit?.sha || null;
+    } catch (e) {
+      if ((e?.status === 404 || e?.status === 409) && attempt < 8) {
+        await new Promise(resolve => setTimeout(resolve, Math.min(1000 + attempt * 1000, 5000)));
+        return initializeEmptyRepository(owner, repo, branch, attempt + 1);
+      }
+      throw e;
+    }
+  }
+
+  async function createInitializedRepositoryCommit(owner, repo, branch, message, changes, attempt = 0) {
+    try {
+      const files = (changes || []).filter(change => change.type !== 'deleted');
+      const blobs = await withConcurrency(files, 4, async change => ({
+        path:change.path,
+        mode:change.mode || '100644',
+        type:'blob',
+        sha:(await createBlob(owner, repo, change.data)).sha
+      }));
+      if (!blobs.length) throw new Error('The workspace has no files to initialize the GitHub repository with.');
+
+      const tree = await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees`, {
+        method:'POST',
+        body:JSON.stringify({tree:blobs})
+      });
+      const commit = await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/commits`, {
+        method:'POST',
+        body:JSON.stringify({message, tree:tree.sha})
+      });
+      const refPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/refs/heads/${branchPath(branch)}`;
+      await request(refPath, {
+        method:'PATCH',
+        body:JSON.stringify({sha:commit.sha, force:true})
+      });
+      return commit.sha;
+    } catch (e) {
+      if ((e?.status === 404 || e?.status === 409) && attempt < 8) {
+        await new Promise(resolve => setTimeout(resolve, Math.min(1000 + attempt * 1000, 5000)));
+        return createInitializedRepositoryCommit(owner, repo, branch, message, changes, attempt + 1);
+      }
+      throw e;
+    }
   }
   async function withConcurrency(items, limit, worker) {
     const out = new Array(items.length);
@@ -408,7 +627,7 @@
     const headers = new Headers({'Accept':'application/json','Content-Type':'application/json','X-GitHub-Api-Version':API_VERSION,'Authorization':`Bearer ${token}`});
     const init = {method:'POST',headers,body:JSON.stringify({query,variables}),credentials:'omit'};
     const network = window.__sharedBrowserNetwork || window.EditorAppState?.browserNetwork;
-    let response = network?.request ? await network.request(new Request('https://api.github.com/graphql', init), 'github-graphql') : await fetch('https://api.github.com/graphql', init);
+    let response = network?.request ? await network.request(new Request('https://api.github.com/graphql', init), 'github-graphql', () => true) : await fetch('https://api.github.com/graphql', init);
     if (!response) throw new Error('GitHub GraphQL request failed: no Network endpoint returned a response.');
     const data = await response.json().catch(() => null);
     if (!response.ok) {
@@ -419,26 +638,69 @@
     }
     return data;
   }
-  async function commitAndPush({owner, repo, branch, message, fs}) {
+  async function commitAndPush({owner, repo, branch, message, fs, _attempt = 0}) {
     message = String(message || '').trim();
     if (!message) throw new Error('Enter a commit message.');
-    const remote = await getRemoteState(owner, repo, branch);
-    const changes = await compareWorkingTree(fs, remote.tree);
+    let remote = null;
+    for (let attempt = 0; attempt < 12; attempt++) {
+      remote = await getRemoteState(owner, repo, branch);
+      if (!remote.unavailable) break;
+      await new Promise(resolve => setTimeout(resolve, 500 + attempt * 500));
+    }
+    if (remote?.unavailable) throw new Error('GitHub is still initializing this repository. Please try again in a moment.');
+    let changes = await compareWorkingTree(fs, remote.tree);
     if (!changes.length) return {changed:false, changes:[], commitSha:remote.commitSha};
+    if (remote.empty) {
+      // GitHub requires an empty repository to be bootstrapped through the
+      // Contents API before its Git-data API can be used. The bootstrap commit
+      // is temporary: replace the branch with one root commit containing the
+      // complete workspace so the visible history starts at "Initialized Repository".
+      await initializeEmptyRepository(owner, repo, branch);
+      const commitSha = await createInitializedRepositoryCommit(
+        owner,
+        repo,
+        branch,
+        message,
+        changes
+      );
+      return {changed:true, changes, commitSha, initialized:true};
+    }
     try {
       const blobs = await withConcurrency(changes.filter(x => x.type !== 'deleted'), 4, async change => ({path:change.path, mode:change.mode || '100644', type:'blob', sha:(await createBlob(owner, repo, change.data)).sha}));
       const treeEntries = [...blobs, ...changes.filter(x => x.type === 'deleted').map(change => ({path:change.path, mode:change.mode || '100644', type:'blob', sha:null}))];
       const treeBody = {tree:treeEntries};
       if (remote.treeSha) treeBody.base_tree = remote.treeSha;
-      const tree = await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees`, {method:'POST', body:JSON.stringify(treeBody)});
+      const tree = await request('/repos/' + encodeURIComponent(owner) + '/' + encodeURIComponent(repo) + '/git/trees', {method:'POST', body:JSON.stringify(treeBody)});
       const commitBody = {message, tree:tree.sha};
       if (remote.commitSha) commitBody.parents = [remote.commitSha];
-      const commit = await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/commits`, {method:'POST', body:JSON.stringify(commitBody)});
-      const refPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/refs/heads/${branchPath(branch)}`;
-      if (remote.commitSha) await request(refPath, {method:'PATCH', body:JSON.stringify({sha:commit.sha, force:false})});
-      else await request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/refs`, {method:'POST', body:JSON.stringify({ref:`refs/heads/${branch}`, sha:commit.sha})});
+      const commit = await request('/repos/' + encodeURIComponent(owner) + '/' + encodeURIComponent(repo) + '/git/commits', {method:'POST', body:JSON.stringify(commitBody)});
+      const refPath = '/repos/' + encodeURIComponent(owner) + '/' + encodeURIComponent(repo) + '/git/refs/heads/' + branchPath(branch);
+      try {
+        if (remote.commitSha) {
+          await request(refPath, {method:'PATCH', body:JSON.stringify({sha:commit.sha, force:false})});
+        } else {
+          await request('/repos/' + encodeURIComponent(owner) + '/' + encodeURIComponent(repo) + '/git/refs', {method:'POST', body:JSON.stringify({ref:'refs/heads/' + branch, sha:commit.sha})});
+        }
+      } catch (e) {
+        // A 422 here normally means the branch moved after we read its
+        // remote SHA. Rebuild the commit once from the latest branch state;
+        // never force-push over the intervening commit.
+        if (e?.status === 422 && _attempt < 8) {
+          await new Promise(resolve => setTimeout(resolve, 500 + _attempt * 500));
+          return await commitAndPush({owner, repo, branch, message, fs, _attempt:_attempt + 1});
+        }
+        throw e;
+      }
       return {changed:true, changes, commitSha:commit.sha};
     } catch (e) {
+      // A freshly-created repository may still be provisioning its Git
+      // database. GitHub can briefly return 404/409 for Git-data writes even
+      // after the repository itself exists, so retry the complete transaction
+      // with a bounded backoff before surfacing the error.
+      if ((e?.status === 404 || e?.status === 409) && _attempt < 8) {
+        await new Promise(resolve => setTimeout(resolve, Math.min(1000 + _attempt * 1000, 5000)));
+        return await commitAndPush({owner, repo, branch, message, fs, _attempt:_attempt + 1});
+      }
       if (e?.status !== 403) throw e;
       const commitSha = await createGraphQLCommit(owner, repo, branch, message, changes, remote.commitSha);
       return {changed:true, changes, commitSha};
@@ -467,6 +729,8 @@
   root.downloadArchive = downloadArchive;
   root.listBranches = listBranches;
   root.getRemoteState = getRemoteState;
+  root.getCommitState = getCommitState;
+  root.readBlob = readBlob;
   root.listCommits = listCommits;
   root.compareWorkingTree = compareWorkingTree;
   root.commitAndPush = commitAndPush;

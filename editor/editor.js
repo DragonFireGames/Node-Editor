@@ -1,3 +1,48 @@
+// Short-lived bridge for transferring actual files between the editor and its embedded browser.
+// Tokens travel through DataTransfer; the bytes stay in memory and are only read when a drop target accepts them.
+if (!window.__editorFileDropBridge) {
+  const pendingEditorDropFiles = new Map();
+  let editorDropTokenId = 0;
+  const editorDropLifetime = 5 * 60 * 1000;
+  const isTransferableFile = file => !!file && typeof file.name === 'string' && typeof file.arrayBuffer === 'function';
+  const registerPayload = payload => {
+    if (typeof payload !== 'function') {
+      const files = Array.isArray(payload) ? payload : [payload];
+      if (!files.length || !files.every(isTransferableFile)) return '';
+    }
+    const token = 'wk-file-' + Date.now().toString(36) + '-' + (++editorDropTokenId) + '-' + Math.random().toString(36).slice(2);
+    const timer = setTimeout(() => pendingEditorDropFiles.delete(token), editorDropLifetime);
+    pendingEditorDropFiles.set(token, {payload, timer});
+    return token;
+  };
+  window.__editorFileDropBridge = {
+    register(file) {
+      return registerPayload(file);
+    },
+    registerFiles(files) {
+      return registerPayload(Array.isArray(files) ? files.slice() : []);
+    },
+    registerProvider(provider) {
+      return typeof provider === 'function' ? registerPayload(provider) : '';
+    },
+    take(token) {
+      token = String(token || '');
+      const entry = pendingEditorDropFiles.get(token);
+      if (!entry) return null;
+      pendingEditorDropFiles.delete(token);
+      clearTimeout(entry.timer);
+      return typeof entry.payload === 'function' ? entry.payload() : entry.payload;
+    },
+    release(token) {
+      token = String(token || '');
+      const entry = pendingEditorDropFiles.get(token);
+      if (!entry) return;
+      pendingEditorDropFiles.delete(token);
+      clearTimeout(entry.timer);
+    }
+  };
+}
+
 window.__editorInitPromise = (async function () {
   const workers = await (window.__workersConfigReady || Promise.resolve(window.WorkerConfig || {}));
   // One Network owned by the editor/workbench and shared by every Browser iframe.
@@ -12,7 +57,6 @@ window.__editorInitPromise = (async function () {
         const fallbackProxy = new ProxyNetworkEndpoint(configuredFallbackProxy, true, !!configuredFallbackProxy);
         const defaultFallback = new NetworkEndpoint();
         defaultFallback.__browserDefaultFallback = true;
-        defaultFallback.__networkRole = 'native';
         sharedNetwork.appendEndpoint(defaultFallback);
         sharedNetwork.appendEndpoint(primaryProxy);
         sharedNetwork.appendEndpoint(fallbackProxy);
@@ -36,6 +80,8 @@ window.__editorInitPromise = (async function () {
     projectName: 'Workspace',
     projectKey: 'workspace',
     projectId: null,
+    projectOwner: true,
+    gitEnabled: true,
     gitRemote: null,
     projectTemplate: false,
     lastSavedAt: 0,
@@ -57,7 +103,7 @@ window.__editorInitPromise = (async function () {
     peerServers: new Map(),
     peerRuntimeEndpoint: null,
     peerSettings: {layer: '', pagePath: '/'},
-    deploymentSettings: {url: '', usePeerServer: false, branch: '', commit: ''},
+    deploymentSettings: {thirdParty: false, externalUrl: '', branch: '', commit: 'latest', path: '/'},
     ai: null,
     environment: {},
     browserSettings: {
@@ -76,6 +122,7 @@ window.__editorInitPromise = (async function () {
       confirmBeforeReplace: true,
       confirmBeforeDelete: true,
       showHiddenFolders: false,
+      ignoreNodeModules: true,
       hideBrowserBar: true
     }
   };
@@ -111,6 +158,8 @@ window.__editorInitPromise = (async function () {
     monaco: {
       base: 'vs-dark',
       inherit: true,
+      semanticHighlighting: true,
+      semanticTokenColors: {},
       colors: {},
       rules: []
     }
@@ -154,14 +203,27 @@ window.__editorInitPromise = (async function () {
 
   function applyThemeMonaco(theme, monaco = window.monaco) {
     if (!monaco?.editor) return false;
-    const name = String(theme.id || 'node-editor');
+    const name = String(theme.id || theme.monaco?.name || 'node-editor');
+    const semanticTokenColors = {...(theme.monaco?.semanticTokenColors || {})};
+    const rules = [...(theme.monaco?.rules || [])];
+    // Keep both semantic token colors and token-theme rules populated. Older
+    // bundled Monaco builds use the latter while newer builds prefer semantic
+    // token colors for language-service classifications such as functions.
     monaco.editor.defineTheme(name, {
       base: theme.monaco?.base || 'vs-dark',
       inherit: theme.monaco?.inherit !== false,
+      semanticHighlighting: theme.monaco?.semanticHighlighting !== false,
+      semanticTokenColors,
       colors: {...(theme.monaco?.colors || {})},
-      rules: [...(theme.monaco?.rules || [])]
+      rules
     });
     monaco.editor.setTheme(name);
+    if (typeof monaco.editor.getEditors === 'function') {
+      const enabled = theme.monaco?.semanticHighlighting !== false;
+      for (const instance of monaco.editor.getEditors()) {
+        try { instance.updateOptions({'semanticHighlighting.enabled': enabled, theme: name}); } catch (_) {}
+      }
+    }
     return true;
   }
 
@@ -200,7 +262,38 @@ window.__editorInitPromise = (async function () {
     themeObject.set({monaco: {rules}});
   };
   themeObject.apply = applyTheme;
-  window.EditorTheme = themeObject;
+
+  // Keep EditorTheme as a stable API object. Embedding pages historically
+  // assigned a complete theme object (for example, from an extension) instead
+  // of calling EditorTheme.set(). Intercept that assignment so those themes
+  // are merged into the live theme object rather than replacing its methods.
+  // This preserves EditorTheme.apply()/set*() and lets Monaco receive the
+  // assigned theme through the normal applyThemeMonaco() path.
+  Object.defineProperty(window, 'EditorTheme', {
+    configurable: true,
+    enumerable: true,
+    get: () => themeObject,
+    set: value => {
+      if (!value || typeof value !== 'object' || value === themeObject) {
+        if (value === themeObject) applyTheme();
+        return;
+      }
+      const merge = (target, source) => {
+        for (const [key, entry] of Object.entries(source)) {
+          if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+            if (!target[key] || typeof target[key] !== 'object' || Array.isArray(target[key])) {
+              target[key] = {};
+            }
+            merge(target[key], entry);
+          } else {
+            target[key] = entry;
+          }
+        }
+      };
+      merge(themeObject, value);
+      applyTheme();
+    }
+  });
   applyThemeCSS(window.EditorTheme);
 
   // ---------------------------------------------------------------------------
@@ -433,12 +526,53 @@ window.__editorInitPromise = (async function () {
     }
     return Array.from({length: 6}, () => chars[Math.floor(Math.random() * chars.length)]).join('');
   }
+  function normalizeDeploymentPath(value) {
+    let raw = String(value ?? '').trim();
+    if (!raw) return '/';
+    try {
+      const base = String(state.runConfig?.config?.domain || 'http://localhost:3000/');
+      const url = new URL(raw, base);
+      let path = url.pathname || '/';
+      if (!path.startsWith('/')) path = '/' + path;
+      const suffix = (url.search || '') + (url.hash || '');
+      return (path === '/' ? '/' : path.replace(/\/+$/, '')) + suffix;
+    } catch (_) {
+      if (!raw.startsWith('/')) raw = '/' + raw;
+      return raw === '/' ? '/' : raw.replace(/\/+$/, '');
+    }
+  }
   function normalizePeerPagePath(value) {
     let path = String(value ?? '').trim();
     if (!path) return '/';
     if (!path.startsWith('/')) path = '/' + path;
     return path;
   }
+  function hydrateGitRemoteFromSavedSelection() {
+    if (state.gitRemote?.provider === 'github' && state.gitRemote.owner && state.gitRemote.repo) return true;
+    const projectId = String(state.projectId || '').trim();
+    if (!projectId) return false;
+
+    try {
+      const saved = JSON.parse(localStorage.getItem('editor.github.project.' + encodeURIComponent(projectId)) || 'null');
+      if (saved?.owner && saved?.repo) {
+        state.gitRemote = {
+          provider: 'github',
+          owner: String(saved.owner),
+          repo: String(saved.repo),
+          branch: String(saved.branch || 'main')
+        };
+        return true;
+      }
+    } catch (_) {}
+
+    const match = projectId.match(/^github:([^/]+)\/([^@]+)@(.+)$/);
+    if (match) {
+      state.gitRemote = {provider:'github', owner:String(match[1]), repo:String(match[2]), branch:String(match[3] || 'main')};
+      return true;
+    }
+    return false;
+  }
+
   function loadProjectMetadata() {
     const meta = readEditorJson(EDITOR_PROJECT_PATH);
     if (meta?.id && String(meta.id).trim()) state.projectId = String(meta.id).trim();
@@ -449,17 +583,33 @@ window.__editorInitPromise = (async function () {
       state.projectName = String(meta.name).trim();
       state.projectKey = state.projectName;
     }
+    const legacyDeployment = meta?.deployment || {};
+    const legacyPeerLayer = String(meta?.peerLayer || '').trim();
+    const legacyUsePeerServer = legacyDeployment.usePeerServer === true;
+    const legacySaveEnvironmentVariables = legacyDeployment.saveEnvironmentVariables === true;
+    if (!String(state.runConfig?.config?.peerLayer || '').trim() && legacyPeerLayer) {
+      state.runConfig.config.peerLayer = legacyPeerLayer;
+    }
+    if (!Object.prototype.hasOwnProperty.call(state.runConfig?.config || {}, 'usePeerServer')) {
+      state.runConfig.config.usePeerServer = legacyUsePeerServer;
+    }
+    if (!Object.prototype.hasOwnProperty.call(state.runConfig?.config || {}, 'saveEnvironmentVariables')) {
+      state.runConfig.config.saveEnvironmentVariables = legacySaveEnvironmentVariables;
+    }
     state.peerSettings = {
-      layer: String(meta?.peerLayer || '').trim() || makePeerLayer(),
+      layer: String(state.runConfig?.config?.peerLayer || legacyPeerLayer).trim() || makePeerLayer(),
       pagePath: normalizePeerPagePath(meta?.pagePath)
     };
+    state.runConfig.config.peerLayer = state.peerSettings.layer;
     state.deploymentSettings = {
-      url: String(meta?.deployment?.url || '').trim(),
-      usePeerServer: !!meta?.deployment?.usePeerServer,
-      branch: String(meta?.deployment?.branch || state.gitRemote?.branch || '').trim(),
-      commit: String(meta?.deployment?.commit || '').trim()
+      thirdParty: legacyDeployment.thirdParty === true || String(legacyDeployment.mode || 'editor').trim() === 'third-party',
+      externalUrl: String(legacyDeployment.externalUrl || '').trim(),
+      branch: String(legacyDeployment.branch || state.gitRemote?.branch || '').trim(),
+      commit: String(legacyDeployment.commit || 'latest').trim() || 'latest',
+      path: normalizeDeploymentPath((legacyDeployment.path ?? legacyDeployment.url ?? state.runConfig?.config?.path) || '/')
     };
     if (!state.projectId) state.projectId = makeProjectId();
+    hydrateGitRemoteFromSavedSelection();
     return meta;
   }
   function saveProjectMetadata() {
@@ -469,17 +619,22 @@ window.__editorInitPromise = (async function () {
     state.peerSettings.layer = String(state.peerSettings.layer || makePeerLayer()).trim();
     state.peerSettings.pagePath = normalizePeerPagePath(state.peerSettings.pagePath);
     state.fs.mkdirSync?.(EDITOR_DIR);
+    if (state.runConfig?.config) {
+      state.runConfig.config.peerLayer = String(state.peerSettings?.layer || '').trim() || makePeerLayer();
+      state.runConfig.config.usePeerServer = state.runConfig.config.usePeerServer === true;
+      state.runConfig.config.saveEnvironmentVariables = state.runConfig.config.saveEnvironmentVariables === true;
+      state.runConfig.save?.();
+    }
     const deployment = {
-      url: String(state.deploymentSettings?.url || '').trim(),
-      usePeerServer: !!state.deploymentSettings?.usePeerServer,
+      thirdParty: state.deploymentSettings?.thirdParty === true || state.deploymentSettings?.mode === 'third-party',
+      externalUrl: String(state.deploymentSettings?.externalUrl || '').trim(),
       branch: String(state.deploymentSettings?.branch || '').trim(),
-      commit: String(state.deploymentSettings?.commit || '').trim(),
-      peerLayer: String(state.peerSettings?.layer || '').trim()
+      commit: String(state.deploymentSettings?.commit || 'latest').trim() || 'latest',
+      path: normalizeDeploymentPath(state.deploymentSettings?.path || state.deploymentSettings?.url || '/')
     };
     state.fs.writeFileSync(EDITOR_PROJECT_PATH, JSON.stringify({
       id: state.projectId,
       name: state.projectName,
-      peerLayer: state.peerSettings.layer,
       pagePath: state.peerSettings.pagePath,
       deployment,
       ...(state.gitRemote?.provider === 'github' && state.gitRemote.owner && state.gitRemote.repo ? {gitRemote: state.gitRemote} : {})
@@ -539,6 +694,7 @@ window.__editorInitPromise = (async function () {
   }
   function loadProcessEnv() {
     try {
+      if (state.runConfig?.config?.saveEnvironmentVariables !== true) return false;
       if (state.fs?.existsSync(EDITOR_ENV_PATH)) {
         applyEditorEnvironment(parseProcessEnv(state.fs.readFileSync(EDITOR_ENV_PATH, 'utf8')));
         return true;
@@ -549,13 +705,23 @@ window.__editorInitPromise = (async function () {
   function saveProcessEnv() {
     if (!state.fs) return;
     try {
-      state.fs.mkdirSync?.(EDITOR_DIR);
       const lines = Object.entries(state.environment || {}).map(([key, value]) => {
         const safe = String(value ?? '').replace(/\r?\n/g, '\\n');
         return `${key}=${safe}`;
       });
-      state.fs.writeFileSync(EDITOR_ENV_PATH, lines.length ? lines.join('\n') + '\n' : '');
-      if (!state.loading) state.markDirty?.('editor/process.env');
+      if (state.runConfig?.config?.saveEnvironmentVariables === true) {
+        state.fs.mkdirSync?.(EDITOR_DIR);
+        state.fs.writeFileSync(EDITOR_ENV_PATH, lines.length ? lines.join('\n') + '\n' : '');
+        if (!state.loading) state.markDirty?.('editor/process.env');
+      } else {
+        try {
+          localStorage.setItem('editor.environment.' + (state.projectKey || 'default'), JSON.stringify(state.environment || {}));
+        } catch (_) {}
+        if (state.fs.existsSync?.(EDITOR_ENV_PATH)) {
+          state.fs.deleteFileSync?.(EDITOR_ENV_PATH);
+          if (!state.loading) state.markDirty?.('editor/process.env');
+        }
+      }
     } catch (e) {
       console.error('Failed to save process.env:', e);
     }
@@ -578,6 +744,13 @@ window.__editorInitPromise = (async function () {
     if ($('statusRight')) $('statusRight').textContent = `CWD: ${state.nodeEmulator?.cwd || '/'}` + (state.dirty ? ' • Unsaved' : '');
     const projectEl = $('projectName');
     if (projectEl && projectEl.tagName !== 'INPUT') projectEl.textContent = state.projectName || 'Workspace';
+    const exportZip = $('saveZipBtn');
+    if (exportZip) {
+      const canExport = !!state.fs && (state.projectOwner === false || !state.projectId);
+      exportZip.hidden = !canExport;
+      exportZip.disabled = !canExport;
+      exportZip.title = canExport ? 'Export project as a ZIP (Ctrl+E)' : '';
+    }
     const save = $('saveProjectBtn');
     if (save) {
       const hasHandle = !!state.fs?.canSave?.();
@@ -615,7 +788,14 @@ window.__editorInitPromise = (async function () {
       lastOpenedAt: extra.lastOpenedAt ?? existing.lastOpenedAt ?? 0,
       lastSavedAt: extra.lastSavedAt ?? state.lastSavedAt ?? existing.lastSavedAt ?? 0,
       lastCachedAt: extra.lastCachedAt ?? existing.lastCachedAt ?? 0,
-      unsaved: extra.unsaved ?? state.dirty ?? false
+      unsaved: extra.unsaved ?? state.dirty ?? false,
+      gitConnected: extra.gitConnected ?? (state.gitRemote?.provider === 'github') ?? existing.gitConnected ?? false,
+      gitRemote: extra.gitRemote ?? (state.gitRemote?.provider === 'github' ? {
+        provider: 'github',
+        owner: String(state.gitRemote.owner || ''),
+        repo: String(state.gitRemote.repo || ''),
+        branch: String(state.gitRemote.branch || 'main')
+      } : existing.gitRemote ?? null)
     };
     if (index < 0) list.unshift(record);
     else {
@@ -633,6 +813,9 @@ window.__editorInitPromise = (async function () {
   }
   async function saveProjectCache(force = false) {
     if (!state.fs || !state.projectId || state.loading) return false;
+    // A new template with no user changes should stay ephemeral. Do not create
+    // a local cache/recent-project entry until it is edited or explicitly saved.
+    if (state.projectTemplate && !state.dirty && !state.lastSavedAt) return false;
     if (!force && !state.dirty) return false;
     if (!('caches' in window)) return false;
     const fs = state.fs;
@@ -654,7 +837,6 @@ window.__editorInitPromise = (async function () {
           fs.writeFileSync(EDITOR_PROJECT_PATH, JSON.stringify({
             id: projectId,
             name: projectName,
-            peerLayer: peerSettings.layer,
             pagePath: peerSettings.pagePath
           }, null, 2));
         } catch (_) {}
@@ -752,7 +934,7 @@ window.__editorInitPromise = (async function () {
     }
   }
   async function exportProject() {
-    if (!state.fs) return false;
+    if (!state.fs || state.projectOwner !== false) return false;
     try {
       const blob = await state.fs.exportZip();
       const a = document.createElement('a');
@@ -829,7 +1011,15 @@ window.__editorInitPromise = (async function () {
       window.MonacoEnvironment = window.MonacoEnvironment || {};
       window.MonacoEnvironment.getWorkerUrl = () => new URL('monaco-worker.js', monacoRoot).href;
       require.config({ paths: { vs: monacoVs } });
-      require(['vs/editor/editor.main'], () => resolve(window.monaco), reject);
+      require(['vs/editor/editor.main'], () => {
+        try {
+          // Monaco is loaded lazily. The global theme may have been configured
+          // before Monaco existed, so define/apply it now as well as on later
+          // theme changes.
+          applyThemeMonaco(window.EditorTheme, window.monaco);
+        } catch (_) {}
+        resolve(window.monaco);
+      }, reject);
     }).catch(e => {
       state.monacoPromise = null;
       throw e;
@@ -873,6 +1063,7 @@ window.__editorInitPromise = (async function () {
       runConfigured,
       logError,
       openBuiltin,
+      openRemoteProject: options => openRemoteImportModal(options),
       setupRuntime,
       getBuiltin,
       theme: window.EditorTheme,
@@ -893,7 +1084,7 @@ window.__editorInitPromise = (async function () {
   }
   function makeBuiltinTab(kind, options = {}) {
     const builtin = getBuiltin(kind);
-    const titles = { welcome: 'Welcome', browser: 'Browser', peer: 'Peer Server', terminal: 'Terminal', run: 'Run Configuration', environment: 'Environment Variables', ai: 'AI', group: 'Group' };
+    const titles = { welcome: 'Welcome', browser: 'Browser', peer: 'Peer Server', terminal: 'Terminal', run: 'Run Configuration', environment: 'Environment Variables', ai: 'AI', 'github-repository': 'GitHub Repository', group: 'Group' };
     const welcomeIcon = '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M4 5h16v14H4z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M7 9h10M7 13h7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
     const groupIcon = '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="3.5" y="4" width="7" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="13.5" y="4" width="7" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="8.5" y="13" width="7" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>';
     const groupName = kind === 'group' ? String(options.groupName ?? options.name ?? '').trim() || 'Group' : '';
@@ -909,12 +1100,31 @@ window.__editorInitPromise = (async function () {
   }
   function clearView(g) {
     g.viewBar.innerHTML = '';
-    const previous = g.__renderedTab;
-    if (previous?.kind === 'builtin' && previous._viewElement?.parentNode === g.viewBody) {
-      previous._viewElement.style.display = 'none';
-      return;
+
+    // Keep live tab views attached to the document. Removing an iframe from
+    // the DOM unloads its browsing context, which resets stateful previews
+    // such as Piskel and browser-based tools every time the user switches tabs.
+    // Persistent tab surfaces are hidden instead; temporary render elements
+    // are still removed.
+    const persistent = new Set();
+    for (const tab of g.tabs || []) {
+      if (tab._previewHost) persistent.add(tab._previewHost);
+      if (tab._viewElement) persistent.add(tab._viewElement);
+      // Preserve every live preview surface, not only the currently active
+      // one. Switching from Piskel to another preview must not remove the
+      // Piskel iframe from the DOM, or its browsing context will reset.
+      for (const instance of tab._previewInstances?.values?.() || []) {
+        if (instance?.host) persistent.add(instance.host);
+      }
     }
-    g.viewBody.innerHTML = '';
+
+    for (const child of [...g.viewBody.children]) {
+      if (persistent.has(child)) {
+        child.style.display = 'none';
+      } else {
+        child.remove();
+      }
+    }
   }
   function renderViewBar(g, t) {
     g.viewBar.innerHTML = '';
@@ -975,6 +1185,9 @@ window.__editorInitPromise = (async function () {
     if (!t || !g) return;
     if (t?.builtin === 'peer') void getBuiltin('peer')?.stop(t);
     if (t?.builtin === 'group') t._groupWorkbench?.dispose?.();
+    if (t?.kind === 'builtin') {
+      try { getBuiltin(t.builtin)?.dispose?.(t); } catch (_) {}
+    }
     state.previews?.dispose(t);
     t.model?.dispose?.();
     t.editor?.dispose?.();
@@ -1037,9 +1250,9 @@ window.__editorInitPromise = (async function () {
       return;
     }
 
-    if (t.kind === 'file' && t._previewViewId && t._previewViewId !== t.view) {
-      state.previews?.dispose(t);
-    }
+    // Preview instances are persistent per tab/view. Switching tabs, moving
+    // a tab between groups, or changing between Piskel and another view must
+    // not dispose the embedded editor.
     disposeTabView(t);
     clearView(g);
     if (t.kind === 'file') {
@@ -1100,7 +1313,14 @@ window.__editorInitPromise = (async function () {
     if (state.previews?.getView(file, t.view)) {
       const renderResult = state.previews.render(file, t.view, g.viewBody, g);
       if (renderResult && typeof renderResult.then === 'function') await renderResult;
-      finish('viewRender', g.viewBody.lastElementChild, { path:t.path, view:t.view });
+
+      // Reattach a preserved preview surface without rebuilding the embedded
+      // document. The surface was hidden by clearView while another tab was
+      // active.
+      const previewElement = t._previewHost || g.viewBody.lastElementChild;
+      if (previewElement) previewElement.style.display = '';
+
+      finish('viewRender', previewElement, { path:t.path, view:t.view });
       return;
     }
     const fallback = document.createElement('div');
@@ -1139,7 +1359,46 @@ window.__editorInitPromise = (async function () {
   function installExtensionAPI() {
     if (window.EditorExtensionAPI?.__nodeEditorAPI) return window.EditorExtensionAPI;
     const extensions = new Map();
+    const aiTools = new Map();
+    const aiHooks = new Map();
     const listeners = new Set();
+    const normalizeTool = (tool, extensionId) => {
+      if (!tool || typeof tool !== 'object') throw new TypeError('AI tool must be an object.');
+      const name = String(tool.name || '').trim();
+      if (!name) throw new Error('AI tool name is required.');
+      if (typeof tool.execute !== 'function') throw new Error(`AI tool ${name} must define execute(args).`);
+      return {
+        name,
+        description: String(tool.description || `AI tool provided by ${extensionId}`),
+        parameters: tool.parameters || {type:'object',properties:{}},
+        permission: String(tool.permission || 'extensionActions'),
+        execute: tool.execute
+      };
+    };
+    const addExtensionAITools = (extensionId, tools) => {
+      for (const tool of Array.isArray(tools) ? tools : []) {
+        const clean = normalizeTool(tool, extensionId);
+        aiTools.set(clean.name, {...clean, extensionId});
+      }
+    };
+    const removeExtensionAITools = extensionId => {
+      for (const [name, tool] of aiTools) if (tool.extensionId === extensionId) aiTools.delete(name);
+    };
+    const addExtensionAIHooks = (extensionId, hooks) => {
+      if (!hooks || typeof hooks !== 'object') return;
+      for (const [name, hook] of Object.entries(hooks)) {
+        if (typeof hook !== 'function') continue;
+        const list = aiHooks.get(name) || [];
+        list.push({extensionId, hook});
+        aiHooks.set(name, list);
+      }
+    };
+    const removeExtensionAIHooks = extensionId => {
+      for (const [name, list] of aiHooks) {
+        const next = list.filter(x => x.extensionId !== extensionId);
+        if (next.length) aiHooks.set(name, next); else aiHooks.delete(name);
+      }
+    };
     const notify = () => {
       listeners.forEach(fn => { try { fn(api.list()); } catch (_) {} });
       try {
@@ -1155,35 +1414,60 @@ window.__editorInitPromise = (async function () {
         if (!extension || typeof extension !== 'object') throw new TypeError('Extension must be an object.');
         const id = String(extension.id || '').trim();
         if (!id) throw new Error('Extension id is required.');
+        removeExtensionAITools(id);
+        removeExtensionAIHooks(id);
+        const ai = extension.ai && typeof extension.ai === 'object' ? extension.ai : {};
         const entry = {
           id,
           name: String(extension.name || id),
           description: String(extension.description || ''),
           icon: String(extension.icon || ''),
-          open: typeof extension.open === 'function' ? extension.open : null
+          open: typeof extension.open === 'function' ? extension.open : null,
+          ai: {tools:Array.isArray(extension.aiTools) ? extension.aiTools : (Array.isArray(ai.tools) ? ai.tools : []), hooks:ai.hooks || extension.aiHooks || {}}
         };
         extensions.set(id, entry);
+        addExtensionAITools(id, entry.ai.tools);
+        addExtensionAIHooks(id, entry.ai.hooks);
         notify();
         return api.createHandle(id);
       },
       unregister(id) {
-        const removed = extensions.delete(String(id));
+        const key = String(id);
+        removeExtensionAITools(key);
+        removeExtensionAIHooks(key);
+        const removed = extensions.delete(key);
         if (removed) notify();
         return removed;
       },
       list() {
-        return [...extensions.values()].map(x => ({...x}));
+        return [...extensions.values()].map(x => ({id:x.id,name:x.name,description:x.description,icon:x.icon,ai:{tools:x.ai.tools.map(t=>({name:t.name,description:t.description,parameters:t.parameters,permission:t.permission})),hooks:Object.keys(x.ai.hooks || {})}}));
       },
       get(id) {
         const x = extensions.get(String(id));
-        return x ? {...x} : null;
+        if (!x) return null;
+        return {id:x.id,name:x.name,description:x.description,icon:x.icon,open:x.open,ai:{tools:x.ai.tools.map(t=>({...t})),hooks:{...x.ai.hooks}}};
       },
-      open(id) {
-        const ext = extensions.get(String(id));
-        if (!ext) return null;
-        if (ext.open) return ext.open({state, api});
-        return null;
+      async open(id) {
+        const x = extensions.get(String(id));
+        if (!x || typeof x.open !== 'function') return null;
+        return await x.open({state, api, extensionId:x.id});
       },
+      getAITools() { return [...aiTools.values()].map(x => ({...x})); },
+      getAIHooks(name) { return name ? [...(aiHooks.get(String(name)) || [])] : Object.fromEntries([...aiHooks].map(([k,v]) => [k,[...v]])); },
+      async runAIHook(name, payload) {
+        const hooks = aiHooks.get(String(name)) || [];
+        let value = payload;
+        for (const entry of hooks) value = await entry.hook(value, {state,api,extensionId:entry.extensionId});
+        return value;
+      },
+      registerAITool(extensionId, tool) {
+        const id = String(extensionId || '').trim();
+        const clean = normalizeTool(tool, id || 'extension');
+        clean.extensionId = id || null;
+        aiTools.set(clean.name, clean);
+        return clean.name;
+      },
+      unregisterAITool(name) { return aiTools.delete(String(name)); },
       onChange(fn) {
         if (typeof fn !== 'function') return () => {};
         listeners.add(fn);
@@ -1196,8 +1480,19 @@ window.__editorInitPromise = (async function () {
           update(patch = {}) {
             const ext = extensions.get(key);
             if (!ext) return false;
+            removeExtensionAITools(key);
+            removeExtensionAIHooks(key);
             for (const k of ['name','description','icon']) if (patch[k] != null) ext[k] = String(patch[k]);
             if (typeof patch.open === 'function') ext.open = patch.open;
+            if (patch.ai || patch.aiTools || patch.aiHooks) {
+              const ai = patch.ai && typeof patch.ai === 'object' ? patch.ai : {};
+              ext.ai = {
+                tools:Array.isArray(patch.aiTools) ? patch.aiTools : (Array.isArray(ai.tools) ? ai.tools : ext.ai.tools || []),
+                hooks:ai.hooks || patch.aiHooks || ext.ai.hooks || {}
+              };
+            }
+            addExtensionAITools(key, ext.ai.tools);
+            addExtensionAIHooks(key, ext.ai.hooks);
             notify();
             return true;
           },
@@ -1312,7 +1607,7 @@ window.__editorInitPromise = (async function () {
     card.appendChild(groupCreate);
     const actions = document.createElement('div');
     actions.className = 'workbench-empty-actions';
-    for (const [kind, label] of [['browser', 'Browser'], ['peer', 'Peer Server'], ['terminal', 'Terminal'], ['run', 'Run Configuration'], ['environment', 'Environment Variables'], ['ai', 'AI Chat']]) {
+    for (const [kind, label] of [['browser', 'Browser'], ['peer', 'Peer Server'], ['terminal', 'Terminal'], ['run', 'Run Configuration'], ['environment', 'Environment Variables'], ['ai', 'AI Chat'], ['github-repository', 'GitHub Repository']]) {
       const b = document.createElement('button');
       b.textContent = label;
       b.onclick = () => openBuiltin(kind, g);
@@ -1349,6 +1644,117 @@ window.__editorInitPromise = (async function () {
     }
     state.staticEndpoint = null;
   }
+  function nodeRuntimePath(root, relative) {
+    const base = String(root || '/').replace(/^\/+|\/+$/g, '');
+    const name = String(relative || '').replace(/^\/+/, '');
+    return '/' + [base, name].filter(Boolean).join('/');
+  }
+
+  function hasNodeDependencies(fs, root) {
+    if (!fs) return false;
+    const nodeModulesPath = nodeRuntimePath(root, 'node_modules');
+    if (fs.isDirectorySync?.(nodeModulesPath) || fs.existsSync?.(nodeModulesPath)) return true;
+    const prefix = nodeModulesPath.replace(/\/+$/, '') + '/';
+    try {
+      return fs.listFilesSync().some(path => String(path || '').startsWith(prefix));
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function nodeDependencyManifest(fs, config) {
+    const root = String(config?.rootfolder || '/').replace(/^\/+|\/+$/g, '');
+    const packageJson = nodeRuntimePath(root, 'package.json');
+    const packageLock = nodeRuntimePath(root, 'package-lock.json');
+    return {
+      root,
+      packageJson,
+      packageLock,
+      hasPackageJson: !!fs?.existsSync?.(packageJson),
+      hasLockfile: !!fs?.existsSync?.(packageLock)
+    };
+  }
+
+  async function installNodeDependencies(runtime, config) {
+    const fs = state.fs;
+    const manifest = nodeDependencyManifest(fs, config);
+    if (!manifest.hasPackageJson || hasNodeDependencies(fs, manifest.root)) return false;
+
+    let useCi = false;
+  if (manifest.hasLockfile) {
+    try {
+      const lock = JSON.parse(state.fs.readFileSync(manifest.packageLock, 'utf8') || '{}');
+      useCi = !!lock?.packages && typeof lock.packages === 'object' && !Array.isArray(lock.packages);
+    } catch (_) {}
+  }
+  const command = useCi ? 'npm ci' : 'npm install';
+    if (remoteLoadProgress) {
+      updateRemoteLoadProgress(
+        'Installing Node dependencies…',
+        null,
+        manifest.hasLockfile ? 'Running npm ci from package-lock.json' : 'Running npm install from package.json'
+      );
+    }
+
+    await runtime.terminalCommand(command);
+    return true;
+  }
+
+  async function preloadNodeDependencies() {
+    const config = state.runConfig?.config;
+    if (!state.fs || config?.serverType !== 'node') return false;
+
+    const manifest = nodeDependencyManifest(state.fs, config);
+    if (!manifest.hasPackageJson || hasNodeDependencies(state.fs, manifest.root)) return false;
+
+    let net = state.browserNetwork;
+    if (!net) {
+      for (const info of state.browserTabs.values()) {
+        if (!info?.ready) continue;
+        try {
+          net = await info.ready;
+        } catch (_) {}
+        if (net) break;
+      }
+    }
+    if (!net) return false;
+
+    if (remoteLoadProgress) {
+      updateRemoteLoadProgress(
+        'Installing Node dependencies…',
+        null,
+        manifest.hasLockfile ? 'Running npm ci from package-lock.json' : 'Running npm install from package.json'
+      );
+    }
+
+    const emulator = new NodeEmulator({
+      domain: String(config.domain || 'http://localhost:3000').replace(/\/+$/, ''),
+      rootfolder: manifest.root,
+      pathPrefix: config.path || '/',
+      filesystem: state.fs,
+      fileSystemSync: false,
+      network: net,
+      cwd: config.cwd || '/',
+      env: {
+        NODE_ENV: 'development',
+        USER: 'browser_user',
+        ...state.environment
+      }
+    });
+
+    try {
+      await emulator.ready;
+      const installed = await installNodeDependencies(emulator, config);
+      if (installed) {
+        state.fileManager?.refresh?.();
+        updateStatus();
+      }
+      return installed;
+    } finally {
+      try { emulator.destroy?.(); } catch (_) {}
+    }
+  }
+
   state.ensureNodeRuntime = async function() {
     if (state.nodeEmulator) return state.nodeEmulator;
     if (!state.fs || !state.browserNetwork) throw new Error('Node runtime is not ready.');
@@ -1396,9 +1802,10 @@ window.__editorInitPromise = (async function () {
         state.markDirty?.();
         updateStatus();
       });
-      if (net.replaceRuntimeEndpoint) net.replaceRuntimeEndpoint(emulator.endpoint); else net.prependEndpoint(emulator.endpoint);
       try {
         await emulator.ready;
+        await installNodeDependencies(emulator, c);
+        if (net.replaceRuntimeEndpoint) net.replaceRuntimeEndpoint(emulator.endpoint); else net.prependEndpoint(emulator.endpoint);
       } catch (e) {
         try {
           net.removeEndpoint?.(emulator.endpoint);
@@ -1486,9 +1893,22 @@ window.__editorInitPromise = (async function () {
     updateStatus();
   }
   async function openZipFile(f) {
-    await replaceFileSystem(await FileSystem.create(f, {
-      sync: false
-    }), stripZipProjectName(f.name), true);
+    showRemoteLoadProgress('Opening local project');
+    try {
+      updateRemoteLoadProgress('Inspecting project archive…', 8, formatProgressBytes(f?.size || 0) + ' received');
+      const flattened = await flattenProjectZip(f);
+      updateRemoteLoadProgress('Building workspace…', 90, 'Creating virtual file system');
+      const fs = await FileSystem.create(flattened, { sync: false });
+      updateRemoteLoadProgress('Starting workspace…', 97, stripZipProjectName(f.name));
+      await replaceFileSystem(fs, stripZipProjectName(f.name), true);
+      updateRemoteLoadProgress('Local project ready', 100, 'Workspace loaded');
+      const modal = remoteLoadProgress?.modal;
+      remoteLoadProgress = null;
+      setTimeout(() => modal?.remove(), 180);
+    } catch (e) {
+      failRemoteLoadProgress(e);
+      throw e;
+    }
   }
   function setupDefaultNodeLayout() {
     const wb = state.workbench;
@@ -1536,6 +1956,8 @@ window.__editorInitPromise = (async function () {
     const restored = state.workbench.restore(layout.workbench, data => makeLayoutTab(data, state.runConfig?.config?.serverType));
     if (!restored) return false;
     state.sidebarController.restoreCollapsed(layout.collapsedPaths || []);
+    state.sidebarController.syncSourceControlActivity?.();
+    if (layout.sidebar === 'Source Control' && state.gitEnabled === false) layout.sidebar = 'explorer';
     if (layout.sidebar === 'explorer' || layout.sidebar === 'settings' || layout.sidebar === 'Search' || layout.sidebar === 'Source Control' || layout.sidebar === 'Run and Debug' || layout.sidebar === 'Extensions' || layout.sidebar === 'Profile') {
       state.sidebarController.show(layout.sidebar);
     } else {
@@ -1575,18 +1997,42 @@ window.__editorInitPromise = (async function () {
     return templateCatalogPromise;
   }
   async function createTemplateProject(template) {
-    const manifestURL = new URL(TEMPLATE_MANIFEST_URL, document.baseURI);
-    const fileURL = new URL(template.file, manifestURL).href;
-    const response = await fetch(fileURL, {cache:'no-store'});
-    if (!response.ok) throw new Error(`Failed to load template "${template.title}" (${response.status}).`);
-    const blob = await response.blob();
-    const file = new File([blob], basename(template.file) || 'template.zip', {type:'application/zip'});
-    const fs = await FileSystem.create(file, {sync:false});
-    const projectId = makeProjectId();
-    const projectName = template.title || 'Workspace';
-    fs.mkdirSync(EDITOR_DIR);
-    fs.writeFileSync(EDITOR_PROJECT_PATH, JSON.stringify({id:projectId, name:projectName}, null, 2));
-    await replaceFileSystem(fs, projectName, false, {projectId, isTemplate:true, forceDefaultLayout:true});
+    try {
+      const manifestURL = new URL(TEMPLATE_MANIFEST_URL, document.baseURI);
+      const fileURL = new URL(template.file, manifestURL).href;
+      const response = await fetch(fileURL, {cache:'no-store'});
+      if (!response.ok) throw new Error(`Failed to load template "${template.title}" (${response.status}).`);
+      const blob = await response.blob();
+      const file = new File([blob], basename(template.file) || 'template.zip', {type:'application/zip'});
+
+      updateRemoteLoadProgress('Building workspace…', 90, 'Creating virtual file system');
+
+      const fs = await FileSystem.create(file, {sync:false});
+
+      updateRemoteLoadProgress('Starting workspace…', 97, template.title || 'Workspace');
+
+      const projectId = makeProjectId();
+      const projectName = template.title || 'Workspace';
+
+      fs.mkdirSync(EDITOR_DIR);
+      fs.writeFileSync(EDITOR_PROJECT_PATH, JSON.stringify({id:projectId, name:projectName}, null, 2));
+
+      await replaceFileSystem(fs, projectName, false, {
+        projectId,
+        isTemplate: true,
+        forceDefaultLayout: true
+      });
+
+      updateRemoteLoadProgress('Project ready', 100, 'Workspace created');
+
+      const modal = remoteLoadProgress?.modal;
+      remoteLoadProgress = null;
+
+      setTimeout(() => modal?.remove(), 180);
+    } catch (e) {
+      failRemoteLoadProgress(e);
+      throw e;
+    }
   }
 
   async function createStarter(kind, options = {}) {
@@ -1645,8 +2091,10 @@ window.__editorInitPromise = (async function () {
     state.fs = fs;
     state.saveProjectPermission = 'denied';
     state.projectId = options.projectId || null;
-    state.gitRemote = options.gitRemote || null;
-    state.deploymentSettings = {url:'', usePeerServer:false, branch:String(state.gitRemote?.branch || '').trim(), commit:''};
+    state.projectOwner = options.projectOwner !== false;
+    state.gitEnabled = options.gitEnabled !== false;
+    state.gitRemote = state.gitEnabled ? (options.gitRemote || null) : null;
+    state.deploymentSettings = {thirdParty:false, externalUrl:'', branch:String(state.gitRemote?.branch || '').trim(), commit:'latest', path:'/'};
     state.projectTemplate = !!options.isTemplate;
     state.projectName = name || 'Workspace';
     state.projectKey = state.projectName;
@@ -1654,13 +2102,23 @@ window.__editorInitPromise = (async function () {
     state.lastSavedAt = 0;
     state.lastCachedAt = 0;
     loadEditorConfig();
+    state.runConfig = new EditorRunConfig(state);
     loadProjectMetadata();
+    // URL/project metadata can describe the original GitHub source, but a
+    // detached remix workspace must not inherit that repository.
+    if (options.projectId) state.projectId = String(options.projectId);
+    if (options.gitEnabled === false) state.gitRemote = null;
+    state.projectOwner = options.projectOwner !== false;
+    state.gitEnabled = options.gitEnabled !== false;
     getBuiltin('environment')?.load();
     state.fileManager.setFileSystem(fs);
     state.fileManager.setShowHiddenFolders?.(state.behavior.showHiddenFolders);
     state.fileManager.refresh();
-    state.runConfig = new EditorRunConfig(state);
     state.runConfig.detect();
+    state.sidebarController?.syncSourceControlActivity?.();
+    // Warm Source Control while the remote workspace finishes loading so opening
+    // the sidebar does not have to wait for the repository/branch requests.
+    if (state.gitRemote?.provider === 'github') void state.sidebarController?.sourceControl?.preload?.();
     saveProjectMetadata();
     if (!options.isTemplate) {
       const recent = recentProjects().find(x => x.id === state.projectId);
@@ -1683,6 +2141,16 @@ window.__editorInitPromise = (async function () {
       }
     }
     if (options.fromCache) state.dirty = !!options.cachedDirty;
+    if (state.runConfig?.config?.serverType === 'node') {
+      try {
+        await preloadNodeDependencies();
+      } catch (e) {
+        // Dependency installation is retried by setupRuntime when Run is pressed.
+        // Keep the editor usable if npm is temporarily unavailable while loading.
+        state.nodeDependenciesError = e;
+        console.error('Failed to pre-install Node dependencies:', e);
+      }
+    }
     state.loading = false;
     rememberRecentProject({
       lastOpenedAt: Date.now(),
@@ -1706,14 +2174,46 @@ window.__editorInitPromise = (async function () {
     return source.kind === 'file' && /\.zip$/i.test(source.name || '');
   }
   async function importFileSystemSource(source, name) {
+    const zipSource = isZipSource(source);
+    if (zipSource) {
+      // The source picker should disappear before the actual archive-loading progress UI appears.
+      closeImportModal();
+      showRemoteLoadProgress('Opening local project');
+    }
     try {
-      const fs = await FileSystem.create(source, {
+      let filesystemSource = source;
+
+      if (zipSource) {
+        let zipFile = null;
+        if (source instanceof File || source instanceof Blob) {
+          zipFile = source;
+        } else if (Array.isArray(source) && source.length === 1 && source[0] instanceof File) {
+          zipFile = source[0];
+        } else if (source instanceof FileSystemFileHandle) {
+          zipFile = await source.getFile();
+        }
+        if (zipFile) {
+          updateRemoteLoadProgress('Inspecting project archive…', 8, formatProgressBytes(zipFile.size || 0) + ' received');
+          filesystemSource = await flattenProjectZip(zipFile);
+        }
+      }
+
+      if (zipSource) updateRemoteLoadProgress('Building workspace…', 90, 'Creating virtual file system');
+      const fs = await FileSystem.create(filesystemSource, {
         sync: false
       });
-      const projectName = isZipSource(source) ? stripZipProjectName(name) : (name || 'Workspace');
+      const projectName = zipSource ? stripZipProjectName(name) : (name || 'Workspace');
+      if (zipSource) updateRemoteLoadProgress('Starting workspace…', 97, projectName || 'Workspace');
       await replaceFileSystem(fs, projectName || 'Workspace', true);
       closeImportModal();
+      if (zipSource && remoteLoadProgress) {
+        updateRemoteLoadProgress('Local project ready', 100, 'Workspace loaded');
+        const modal = remoteLoadProgress.modal;
+        remoteLoadProgress = null;
+        setTimeout(() => modal.remove(), 180);
+      }
     } catch (e) {
+      if (zipSource) failRemoteLoadProgress(e);
       logError(e);
     }
   }
@@ -1776,12 +2276,120 @@ window.__editorInitPromise = (async function () {
     if (github.length) return github;
     return [url.href];
   }
-  async function flattenRemoteProjectZip(file, projectName) {
+  let remoteLoadProgress = null;
+  function formatProgressBytes(value) {
+    const n = Number(value) || 0;
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(n < 10 * 1024 ? 1 : 0)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(n < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+  }
+  function showRemoteLoadProgress(title = 'Opening remote project') {
+    document.getElementById('remoteLoadProgressModal')?.remove();
+    const modal = document.createElement('div');
+    modal.id = 'remoteLoadProgressModal';
+    modal.className = 'editor-modal remote-load-progress-modal show';
+    modal.innerHTML = `<div class="editor-modal-content remote-load-progress-content">
+      <div class="remote-load-progress-title">${escapeHTML(title)}</div>
+      <div class="remote-load-progress-stage" data-progress-stage>Starting…</div>
+      <div class="remote-load-progress-track"><div class="remote-load-progress-bar indeterminate" data-progress-bar></div></div>
+      <div class="remote-load-progress-meta"><span data-progress-detail>Preparing…</span><span data-progress-percent></span></div>
+    </div>`;
+    document.body.appendChild(modal);
+    remoteLoadProgress = {
+      modal,
+      stage: modal.querySelector('[data-progress-stage]'),
+      bar: modal.querySelector('[data-progress-bar]'),
+      detail: modal.querySelector('[data-progress-detail]'),
+      percent: modal.querySelector('[data-progress-percent]')
+    };
+    return remoteLoadProgress;
+  }
+  function updateRemoteLoadProgress(stage, percent = null, detail = '') {
+    const p = remoteLoadProgress || showRemoteLoadProgress();
+    p.stage.textContent = stage || '';
+    p.detail.textContent = detail || '';
+    if (percent == null || !Number.isFinite(Number(percent))) {
+      p.bar.classList.add('indeterminate');
+      p.percent.textContent = '';
+      return;
+    }
+    const value = Math.max(0, Math.min(100, Number(percent)));
+    p.bar.classList.remove('indeterminate');
+    p.bar.style.width = `${value}%`;
+    p.percent.textContent = `${Math.round(value)}%`;
+  }
+  function finishRemoteLoadProgress() {
+    if (!remoteLoadProgress) return;
+    updateRemoteLoadProgress('Remote project ready', 100, 'Workspace loaded');
+    const modal = remoteLoadProgress.modal;
+    const state = remoteLoadProgress;
+    remoteLoadProgress = null;
+    setTimeout(() => {
+      if (state.modal === modal) modal.remove();
+      else modal.remove();
+    }, 180);
+  }
+  function failRemoteLoadProgress(error) {
+    if (!remoteLoadProgress) return;
+    const p = remoteLoadProgress;
+    p.stage.textContent = 'Unable to open remote project';
+    p.detail.textContent = error?.message || String(error || 'Unknown error');
+    p.bar.classList.remove('indeterminate');
+    p.bar.style.width = '100%';
+    p.bar.style.background = '#a94b4b';
+    p.percent.textContent = '';
+    const err = document.createElement('div');
+    err.className = 'remote-load-progress-error';
+    err.textContent = error?.message || String(error || 'Unknown error');
+    p.modal.querySelector('.remote-load-progress-content').appendChild(err);
+    const modal = p.modal;
+    remoteLoadProgress = null;
+    setTimeout(() => modal.remove(), 900);
+  }
+  async function responseToBlobWithEditorProgress(response, startPercent, endPercent, label) {
+    const total = Number(response?.headers?.get?.('content-length')) || 0;
+    if (!response?.body?.getReader) {
+      updateRemoteLoadProgress(label, total ? startPercent : null, total ? `0 B / ${formatProgressBytes(total)}` : 'Receiving archive…');
+      const blob = await response.blob();
+      updateRemoteLoadProgress(label, endPercent, total ? `${formatProgressBytes(blob.size)} downloaded` : 'Archive downloaded');
+      return blob;
+    }
+    const reader = response.body.getReader();
+    const chunks = [];
+    let received = 0;
+    updateRemoteLoadProgress(label, total ? startPercent : null, total ? `0 B / ${formatProgressBytes(total)}` : 'Receiving archive…');
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      if (value) {
+        chunks.push(value);
+        received += value.byteLength || value.length || 0;
+      }
+      const ratio = total ? received / total : 0;
+      const percent = total ? startPercent + (endPercent - startPercent) * ratio : null;
+      updateRemoteLoadProgress(label, percent, total ? `${formatProgressBytes(received)} / ${formatProgressBytes(total)}` : `${formatProgressBytes(received)} downloaded`);
+    }
+    const contentType = response.headers?.get?.('content-type') || 'application/zip';
+    const blob = new Blob(chunks, {type: contentType});
+    updateRemoteLoadProgress(label, endPercent, total ? `${formatProgressBytes(received)} / ${formatProgressBytes(total)}` : `${formatProgressBytes(received)} downloaded`);
+    return blob;
+  }
+
+  async function flattenProjectZip(file) {
     if (typeof JSZip === 'undefined') return file;
-    const zip = await JSZip.loadAsync(file);
+    updateRemoteLoadProgress('Inspecting project archive…', 60, formatProgressBytes(file?.size || 0) + ' received');
+    const zip = await JSZip.loadAsync(file, {
+      onUpdate(meta) {
+        const pct = 60 + ((Number(meta?.percent) || 0) / 100) * 8;
+        const currentFile = meta?.currentFile ? ` — ${meta.currentFile}` : '';
+        updateRemoteLoadProgress('Reading project archive…', pct, `${Math.round(Number(meta?.percent) || 0)}%${currentFile}`);
+      }
+    });
+    updateRemoteLoadProgress('Reading project files…', 68, `${Object.keys(zip.files || {}).length} archive entries`);
     const entries = [];
     const topLevels = new Set();
     let hasRootFile = false;
+
     zip.forEach((relativePath, entry) => {
       const path = relativePath.replace(/^\/+|\/+$/g, '');
       if (!path) return;
@@ -1791,17 +2399,16 @@ window.__editorInitPromise = (async function () {
         return;
       }
       topLevels.add(parts[0]);
-      entries.push({path, entry, relativePath});
+      entries.push({path, entry});
     });
+
+    // Only remove a wrapper when the archive is unambiguously wrapped:
+    // no files at the ZIP root, and exactly one top-level folder.
     if (hasRootFile || topLevels.size !== 1 || !entries.length) return file;
+
     const root = [...topLevels][0];
-    const expected = String(projectName || '').trim().replace(/\/$/, '');
-    if (!expected) return file;
-    const rootLower = root.toLowerCase();
-    const expectedLower = expected.toLowerCase();
-    const rootMatchesProject = rootLower === expectedLower || rootLower === expectedLower + '-main' || rootLower === expectedLower + '-master';
-    if (!rootMatchesProject) return file;
     if (!entries.some(item => item.path.startsWith(root + '/'))) return file;
+
     const out = new JSZip();
     for (const item of entries) {
       if (!item.path.startsWith(root + '/')) continue;
@@ -1810,21 +2417,35 @@ window.__editorInitPromise = (async function () {
       if (item.entry.dir) out.folder(target);
       else out.file(target, await item.entry.async('uint8array'));
     }
-    const blob = await out.generateAsync({type:'blob'});
+
+    updateRemoteLoadProgress('Rebuilding project archive…', 76, 'Removing wrapper folder');
+    const blob = await out.generateAsync({type:'blob', streamFiles:true}, meta => {
+      const value = 76 + (Number(meta?.percent) || 0) * 0.12;
+      updateRemoteLoadProgress('Rebuilding project archive…', value, `${Math.round(Number(meta?.percent) || 0)}%`);
+    });
+    updateRemoteLoadProgress('Project archive ready…', 88, formatProgressBytes(blob.size));
     return new File([blob], file.name, {type:'application/zip'});
   }
   async function fetchRemoteProject(url) {
     if (!state.browserNetwork?.request) throw new Error('Network is not initialized.');
+    showRemoteLoadProgress();
+    updateRemoteLoadProgress('Preparing remote project…', 2, url);
     const github = githubRepositoryFromUrl(url);
     if (github && window.GitHubService?.isSignedIn?.()) {
       try {
         const info = await window.GitHubService.getRepository(github.owner, github.repo);
         const branch = github.branch || info.default_branch || 'main';
-        const blob = await window.GitHubService.downloadArchive(github.owner, github.repo, branch);
+        updateRemoteLoadProgress('Downloading project archive…', 5, 'GitHub');
+        const blob = await window.GitHubService.downloadArchive(github.owner, github.repo, branch, {
+          onProgress(received, total) {
+            const pct = total ? 5 + (received / total) * 50 : null;
+            updateRemoteLoadProgress('Downloading project archive…', pct, total ? `${formatProgressBytes(received)} / ${formatProgressBytes(total)}` : `${formatProgressBytes(received)} downloaded`);
+          }
+        });
         if (!blob?.size) throw new Error('GitHub returned an empty project archive.');
         const name = info.name || github.repo;
         let file = new File([blob], name + '.zip', {type:'application/zip'});
-        file = await flattenRemoteProjectZip(file, name);
+        file = await flattenProjectZip(file);
         return {file, name, source:`github:${github.owner}/${github.repo}@${branch}`, gitRemote:{provider:'github',owner:github.owner,repo:github.repo,branch}, projectId:`github:${github.owner}/${github.repo}@${branch}`};
       } catch (e) {
         if (e?.status !== 404 && e?.status !== 401) throw e;
@@ -1841,14 +2462,14 @@ window.__editorInitPromise = (async function () {
           lastStatus = `${response.status} ${response.statusText || ''}`.trim();
           continue;
         }
-        const blob = await response.blob();
+        const blob = await responseToBlobWithEditorProgress(response, 5, 55, 'Downloading project archive…');
         if (!blob.size) {
           lastStatus = 'empty response';
           continue;
         }
         const name = remoteProjectName(url);
         let file = new File([blob], name + '.zip', {type:'application/zip'});
-        file = await flattenRemoteProjectZip(file, name);
+        file = await flattenProjectZip(file);
         return {file, name, source: candidate, gitRemote:null, projectId:null};
       } catch (e) {
         lastStatus = e?.message || String(e);
@@ -1859,69 +2480,199 @@ window.__editorInitPromise = (async function () {
 
   function closeRemoteImportModal(options = {}) {
     document.getElementById('remoteImportModal')?.remove();
-    if (options.returnToChooser) showProjectChooser(options.chooserOptions || {}).catch(logError);
+    if (options.returnToChooser && !document.querySelector('.startup-modal')) {
+      showProjectChooser(options.chooserOptions || {}).catch(logError);
+    }
   }
-  function finishRemoteImport() {
+  function finishRemoteImport(options = {}) {
     document.getElementById('remoteImportModal')?.remove();
+    if (options.returnToChooser) {
+      document.querySelectorAll('.startup-modal').forEach(modal => modal.remove());
+    }
   }
   async function importRemoteProject(input, options = {}) {
     try {
+      // Replace the repository/source chooser with the loading progress UI immediately.
+      finishRemoteImport({returnToChooser:options.returnToChooser});
       const remote = await fetchRemoteProject(input);
+      updateRemoteLoadProgress('Building workspace…', 90, 'Creating virtual file system');
       const fs = await FileSystem.create(remote.file, {sync:false});
+      updateRemoteLoadProgress('Starting workspace…', 97, remote.name || 'Remote Project');
       await replaceFileSystem(fs, remote.name || 'Remote Project', true, {projectId:remote.projectId || undefined, gitRemote:remote.gitRemote || null});
-      finishRemoteImport();
+      finishRemoteImport({returnToChooser:options.returnToChooser});
+      finishRemoteLoadProgress();
       return true;
     } catch (e) {
+      failRemoteLoadProgress(e);
       options.onError?.(e);
       return false;
     }
   }
   async function openGithubRevision(input, revision = '', options = {}) {
+    showRemoteLoadProgress();
     const parsed = githubRepositoryFromUrl(input);
-    if (!parsed) throw new Error('Enter a valid GitHub repository URL.');
-    const requestedRevision = String(revision || parsed.branch || '').trim();
+    if (!parsed) {
+      const error = new Error('Enter a valid GitHub repository URL.');
+      failRemoteLoadProgress(error);
+      throw error;
+    }
+
+    const requestedRevision = String(revision || '').trim();
+
+    // A project owner needs GitHub authentication because opening their project
+    // from a project URL is an authenticated editing flow. Non-owners, however,
+    // must be able to view the public repository anonymously, just like the
+    // "Open Remote Project" URL flow below.
+    if (options.projectOwner !== false && !window.GitHubService?.isSignedIn?.()) {
+      const github = window.GitHubService;
+      if (!github?.startLogin) {
+        const error = new Error('Sign in to GitHub to open your project.');
+        failRemoteLoadProgress(error);
+        throw error;
+      }
+
+      const shouldSignIn = window.confirm(
+        'This is your project. Please sign in to GitHub to continue.'
+      );
+      if (!shouldSignIn) {
+        const error = new Error('GitHub sign-in is required to open your project.');
+        failRemoteLoadProgress(error);
+        throw error;
+      }
+
+      await new Promise(async (resolve, reject) => {
+        let settled = false;
+        let unsubscribe = null;
+        const finish = (error) => {
+          if (settled) return;
+          settled = true;
+          unsubscribe?.();
+          error ? reject(error) : resolve();
+        };
+
+        unsubscribe = github.onChange?.(() => {
+          if (github.isSignedIn?.()) finish();
+        });
+
+        try {
+          await github.startLogin();
+          if (github.isSignedIn?.()) finish();
+        } catch (error) {
+          finish(error);
+        }
+      });
+    }
+
     let info = null;
     if (window.GitHubService?.isSignedIn?.()) {
-      try { info = await window.GitHubService.getRepository(parsed.owner, parsed.repo); } catch (e) { if (e?.status !== 404 && e?.status !== 401) throw e; }
+      try {
+        info = await window.GitHubService.getRepository(parsed.owner, parsed.repo);
+      } catch (e) {
+        if (e?.status !== 404 && e?.status !== 401) throw e;
+      }
     }
-    const ref = requestedRevision || info?.default_branch || 'main';
+
+    const branch = String(options.branch || parsed.branch || info?.default_branch || 'main').trim() || 'main';
+    let ref = requestedRevision || branch;
+
+    // "latest" is stored as a symbolic project revision. Resolve it to the
+    // current HEAD of the selected branch each time the project is opened.
+    if (requestedRevision === 'latest') {
+      // Signed-in owners can resolve the symbolic "latest" revision to a SHA,
+      // preserving the existing authenticated project behavior. For anonymous
+      // non-owner viewers, the public codeload endpoint can resolve the branch
+      // directly, so do not make an authenticated API request just to determine
+      // its current HEAD.
+      if (window.GitHubService?.isSignedIn?.()) {
+        let commits = [];
+        try {
+          commits = await window.GitHubService.listCommits(parsed.owner, parsed.repo, branch, 1) || [];
+        } catch (e) {
+          if (e?.status !== 404 && e?.status !== 401) throw e;
+        }
+        if (!commits[0]?.sha) {
+          throw new Error(`No commits are available on GitHub branch "${branch}".`);
+        }
+        ref = commits[0].sha;
+      } else {
+        ref = branch;
+      }
+    }
+
     let blob = null;
     if (window.GitHubService?.isSignedIn?.()) {
-      try { blob = await window.GitHubService.downloadArchive(parsed.owner, parsed.repo, ref); } catch (e) { if (e?.status !== 404 && e?.status !== 401) throw e; }
+      try {
+        blob = await window.GitHubService.downloadArchive(parsed.owner, parsed.repo, ref, {
+          onProgress(received, total) {
+            const pct = total ? 5 + (received / total) * 50 : null;
+            updateRemoteLoadProgress(
+              'Downloading project archive…',
+              pct,
+              total ? `${formatProgressBytes(received)} / ${formatProgressBytes(total)}` : `${formatProgressBytes(received)} downloaded`
+            );
+          }
+        });
+      } catch (e) {
+        if (e?.status !== 404 && e?.status !== 401) throw e;
+      }
     }
+
     if (!blob) {
       if (!state.browserNetwork?.request) throw new Error('Network is not initialized.');
       const codeload = `https://codeload.github.com/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/zip/${encodeURIComponent(ref).replace(/%2F/g, '/')}`;
       const response = await state.browserNetwork.request(codeload, location.origin, {}, 'project-import');
       if (!response?.ok) throw new Error(`GitHub archive download failed (${response?.status || 'no response'}).`);
-      blob = await response.blob();
+      blob = await responseToBlobWithEditorProgress(response, 5, 55, 'Downloading project archive…');
     }
+
     if (!blob?.size) throw new Error('GitHub returned an empty project archive.');
     const name = info?.name || parsed.repo;
     let file = new File([blob], name + '.zip', {type:'application/zip'});
-    file = await flattenRemoteProjectZip(file, name);
+    file = await flattenProjectZip(file);
+    updateRemoteLoadProgress('Building workspace…', 90, 'Creating virtual file system');
     const fs = await FileSystem.create(file, {sync:false});
-    const branch = info?.default_branch || parsed.branch || 'main';
-    const projectId = `github:${parsed.owner}/${parsed.repo}@${ref}`;
-    await replaceFileSystem(fs, name || 'Remote Project', true, {projectId, gitRemote:{provider:'github',owner:parsed.owner,repo:parsed.repo,branch, ...(requestedRevision ? {revision:ref} : {})}});
+    updateRemoteLoadProgress('Starting workspace…', 97, name || 'Remote Project');
+
+    const projectId = options.projectId || `github:${parsed.owner}/${parsed.repo}@${ref}`;
+    await replaceFileSystem(fs, name || 'Remote Project', true, {
+      projectId,
+      gitEnabled: options.gitEnabled !== false,
+      projectOwner: options.projectOwner !== false,
+      gitRemote: {
+        provider:'github',
+        owner:parsed.owner,
+        repo:parsed.repo,
+        branch,
+        revision:requestedRevision === 'latest' ? 'latest' : ref
+      }
+    });
     finishRemoteImport();
+    finishRemoteLoadProgress();
     return true;
   }
 
   async function openGithubRepository(repo, options = {}) {
+    showRemoteLoadProgress();
     const github = window.GitHubService;
-    if (!github?.isSignedIn?.()) throw new Error('Sign in to GitHub to open a repository.');
+    if (!github?.isSignedIn?.()) { failRemoteLoadProgress(new Error('Sign in to GitHub to open a repository.')); throw new Error('Sign in to GitHub to open a repository.'); }
     if (!repo?.owner || !repo?.repo) throw new Error('Invalid GitHub repository.');
     const branch = String(repo.branch || repo.defaultBranch || 'main');
     const info = repo.defaultBranch ? repo : await github.getRepository(repo.owner, repo.repo);
-    const blob = await github.downloadArchive(repo.owner, repo.repo, branch);
+    updateRemoteLoadProgress('Downloading project archive…', 5, 'GitHub');
+    const blob = await github.downloadArchive(repo.owner, repo.repo, branch, {
+      onProgress(received, total) {
+        const pct = total ? 5 + (received / total) * 50 : null;
+        updateRemoteLoadProgress('Downloading project archive…', pct, total ? `${formatProgressBytes(received)} / ${formatProgressBytes(total)}` : `${formatProgressBytes(received)} downloaded`);
+      }
+    });
     if (!blob?.size) throw new Error('GitHub returned an empty project archive.');
     let file = new File([blob], (info.name || repo.repo) + '.zip', {type:'application/zip'});
-    file = await flattenRemoteProjectZip(file, info.name || repo.repo);
+    file = await flattenProjectZip(file);
     const fs = await FileSystem.create(file, {sync:false});
     const projectId = `github:${repo.owner}/${repo.repo}@${branch}`;
     await replaceFileSystem(fs, info.name || repo.repo || 'Remote Project', true, {projectId, gitRemote:{provider:'github',owner:repo.owner,repo:repo.repo,branch}});
     finishRemoteImport();
+    finishRemoteLoadProgress();
     return true;
   }
   async function openRemoteImportModal(options = {}) {
@@ -1953,10 +2704,22 @@ window.__editorInitPromise = (async function () {
       modal.querySelector('.remote-url-section')?.after(error);
     };
     const setBusy = (value, label = 'Open Remote Project') => {
-      busy = !!value; open.disabled = busy || !selectedRepo || !selectedBranch; cancel.disabled = busy;
+      busy = !!value;
+      open.disabled = busy || !input.value.trim();
+      cancel.disabled = busy;
       open.textContent = busy ? label : 'Open Remote Project';
     };
-    const updateOpenState = () => { open.disabled = busy || !selectedRepo || !selectedBranch; };
+    const updateOpenState = () => {
+      open.disabled = busy || !input.value.trim();
+    };
+    const setProjectUrl = (repo, branch) => {
+      if (!repo?.owner || !repo?.repo) return;
+      const encodedOwner = encodeURIComponent(String(repo.owner));
+      const encodedRepo = encodeURIComponent(String(repo.repo));
+      const encodedBranch = branch ? String(branch).split('/').map(part => encodeURIComponent(part)).join('/') : '';
+      input.value = `https://github.com/${encodedOwner}/${encodedRepo}${encodedBranch ? `/tree/${encodedBranch}` : ''}`;
+      updateOpenState();
+    };
     const renderRepoList = () => {
       const list = githubContent.querySelector('[data-github-repos]');
       if (!list) return;
@@ -1990,7 +2753,10 @@ window.__editorInitPromise = (async function () {
       filter.value = repoFilter;
       filter.addEventListener('input', e => { repoFilter = e.target.value; renderRepoList(); });
       githubContent.querySelector('[data-github-refresh]').onclick = () => loadRepoList(true);
-      githubContent.querySelector('[data-github-branch]').onchange = e => { selectedBranch = e.target.value; updateOpenState(); };
+      githubContent.querySelector('[data-github-branch]').onchange = e => {
+        selectedBranch = e.target.value;
+        setProjectUrl(selectedRepo, selectedBranch);
+      };
       renderRepoList(); renderBranchState();
       const newButton = githubContent.querySelector('[data-github-new]'), createPanel = githubContent.querySelector('[data-github-create]');
       newButton.onclick = () => { createPanel.hidden = !createPanel.hidden; if (!createPanel.hidden) createPanel.querySelector('[data-new-name]').focus(); };
@@ -2006,11 +2772,16 @@ window.__editorInitPromise = (async function () {
     const selectRepoObject = async repo => {
       if (!repo?.owner || !repo?.repo) { showError(new Error('Invalid GitHub repository.')); return; }
       selectedRepo = repo; selectedBranch = repo.defaultBranch || 'main'; branches = [];
+      setProjectUrl(selectedRepo, selectedBranch);
       renderRepoList(); renderBranchState();
       branchLoading = true; renderBranchState();
       try { branches = await window.GitHubService.listBranches(repo.owner, repo.repo); if (!branches.length) branches = [selectedBranch]; if (!branches.includes(selectedBranch)) selectedBranch = branches.includes(repo.defaultBranch) ? repo.defaultBranch : branches[0]; }
       catch (e) { branches = [selectedBranch]; showError(e); }
-      finally { branchLoading = false; renderBranchState(); }
+      finally {
+        branchLoading = false;
+        setProjectUrl(selectedRepo, selectedBranch);
+        renderBranchState();
+      }
     };
     const selectRepo = async fullName => {
       const repo = repos.find(x => x.fullName === fullName);
@@ -2027,24 +2798,31 @@ window.__editorInitPromise = (async function () {
     const unsubscribe = window.GitHubService?.onChange?.(() => { selectedRepo = null; selectedBranch = ''; branches = []; repos = []; repoFilter = ''; renderGithub(); if (window.GitHubService.isSignedIn()) void loadRepoList(); });
     const submit = async () => {
       if (busy) return;
-      if (selectedRepo) {
-        if (!selectedBranch) return;
-        setBusy(true, 'Loading repository…'); modal.querySelectorAll('[data-github-content] button,[data-github-content] input,[data-github-content] select').forEach(el => el.disabled = true);
-        try { await openGithubRepository({...selectedRepo, branch:selectedBranch}, options); } catch (e) { setBusy(false); showError(e); modal.querySelectorAll('[data-github-content] button,[data-github-content] input,[data-github-content] select').forEach(el => el.disabled = false); }
-        return;
-      }
-      const value = input.value.trim(); if (!value) { input.focus(); return; }
-      setBusy(true, 'Loading…'); input.disabled = true; modal.querySelector('.remote-import-error')?.remove();
+      const value = input.value.trim();
+      if (!value) { input.focus(); return; }
+      setBusy(true, 'Loading…');
+      input.disabled = true;
+      modal.querySelector('.remote-import-error')?.remove();
+      modal.querySelectorAll('[data-github-content] button,[data-github-content] input,[data-github-content] select').forEach(el => el.disabled = true);
       const ok = await importRemoteProject(value, {onError:showError, returnToChooser:options.returnToChooser, chooserOptions:options.chooserOptions});
-      if (!ok) { setBusy(false); input.disabled = false; input.focus(); }
+      if (!ok) {
+        setBusy(false);
+        input.disabled = false;
+        modal.querySelectorAll('[data-github-content] button,[data-github-content] input,[data-github-content] select').forEach(el => el.disabled = false);
+        input.focus();
+      }
     };
     const cleanup = () => unsubscribe?.();
     modal.querySelector('.editor-modal-close').onclick = () => { cleanup(); close(); };
     cancel.onclick = () => { cleanup(); close(); };
     open.onclick = submit;
+    input.addEventListener('input', () => {
+      updateOpenState();
+    });
     input.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } else if (e.key === 'Escape') { e.preventDefault(); cleanup(); close(); } };
     modal.addEventListener('click', e => { if (e.target === modal) { cleanup(); close(); } });
     renderGithub();
+    updateOpenState();
     if (window.GitHubService?.isSignedIn?.()) void loadRepoList();
     requestAnimationFrame(() => modal.classList.add('show'));
   }
@@ -2190,7 +2968,8 @@ window.__editorInitPromise = (async function () {
   function formatRecent(record) {
     const time = record.lastOpenedAt ? new Date(record.lastOpenedAt).toLocaleDateString([], {month:'short', day:'numeric'}) : '';
     const type = record.type === 'node' ? 'Node.js' : 'Static';
-    return `<strong>${escapeHTML(record.name)}</strong><span>${type}${time ? ' • ' + time : ''}${record.unsaved ? ' • Unsaved' : ''}</span>`;
+    const git = record.gitConnected ? ' • Git connected' : '';
+    return `<strong>${escapeHTML(record.name)}</strong><span>${type}${time ? ' • ' + time : ''}${git}${record.unsaved ? ' • Unsaved' : ''}</span>`;
   }
   async function loadCachedRecent(record) {
     try {
@@ -2203,13 +2982,30 @@ window.__editorInitPromise = (async function () {
         projectId: record.id,
         fromCache: true,
         cachedDirty: !!record.unsaved,
-        lastSavedAt: record.lastSavedAt || 0
+        lastSavedAt: record.lastSavedAt || 0,
+        gitRemote: record.gitConnected ? record.gitRemote : null,
+        gitEnabled: record.gitConnected ? true : false
       });
+      if (record.gitConnected && state.gitRemote?.provider === 'github') {
+        void state.sidebarController?.sourceControl?.preload?.();
+      }
       return true;
     } catch (e) {
       logError(e);
       return false;
     }
+  }
+
+  async function loadTopCachedRecent() {
+    // Recent Projects is the authoritative ordering for the local project
+    // cache. Try entries from the top until we find the first cache entry that
+    // still exists, so a stale record cannot prevent WK extension startup.
+    const records = recentProjects();
+    for (const record of records) {
+      if (!(await cacheHasProject(record.id))) continue;
+      if (await loadCachedRecent(record)) return true;
+    }
+    return false;
   }
   async function showProjectChooser(options = {}) {
     const canClose = !!options.canClose;
@@ -2422,8 +3218,10 @@ window.__editorInitPromise = (async function () {
           return;
         }
         if (e.key.toLowerCase() === 'e' && !e.shiftKey && !e.altKey) {
-          e.preventDefault();
-          exportProject();
+          if (state.projectOwner === false || !state.projectId) {
+            e.preventDefault();
+            exportProject();
+          }
           return;
         }
         if (e.key === 'Enter' && !e.shiftKey && !e.altKey) {
@@ -2465,10 +3263,14 @@ window.__editorInitPromise = (async function () {
     const params = new URLSearchParams(location.search);
     const githubURL = params.get('github') || params.get('githubUrl') || '';
     if (!githubURL) return false;
+    const gitEnabled = params.get('git') !== '0' && params.get('git') !== 'disabled';
+    const projectOwner = params.get('projectOwner') !== '0' && params.get('projectOwner') !== 'false';
+    const projectId = params.get('projectId') || undefined;
     if (!(await confirmWorkspaceSwitch('opening the project from the URL'))) return false;
     const commit = params.get('commit') || params.get('sha') || '';
+    const branch = params.get('branch') || '';
     try {
-      await openGithubRevision(githubURL, commit, {fromURL:true});
+      await openGithubRevision(githubURL, commit, {fromURL:true, gitEnabled, projectOwner, projectId, branch});
       return true;
     } catch (e) {
       logError(e);
@@ -2497,6 +3299,12 @@ window.__editorInitPromise = (async function () {
     }
     try {
       if (await loadProjectFromURLParams()) return;
+
+      const params = new URLSearchParams(location.search);
+      if (params.get('wkExtension') === '1') {
+        if (await loadTopCachedRecent()) return;
+      }
+
       await showProjectChooser();
     } catch (e) {
       logError(e);
@@ -2512,6 +3320,23 @@ window.__editorInitPromise = (async function () {
     start,
     openFile,
     openBuiltin,
+    showSidebar: name => state.sidebarController?.show?.(name),
+    openRemoteProject: options => openRemoteImportModal(options),
+    getWorkspaceInfo: () => ({
+      loading: !!state.loading,
+      projectId: state.projectId || null,
+      projectName: state.projectName || 'Workspace',
+      gitRemote: state.gitRemote ? { ...state.gitRemote } : null,
+      gitEnabled: state.gitEnabled !== false,
+      projectOwner: state.projectOwner !== false,
+      hasGitHubRepository: !!(state.gitRemote?.provider === 'github' && state.gitRemote.owner && state.gitRemote.repo)
+    }),
+    getDeploymentPreview: () => {
+      if (typeof state.getDeploymentPreview !== 'function') {
+        throw new Error('Deployment Preview is not available.');
+      }
+      return state.getDeploymentPreview();
+    },
     addWelcomeBuiltin,
     removeWelcomeBuiltin,
     runConfigured,

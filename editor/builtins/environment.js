@@ -7,6 +7,16 @@
     }
     function loadEnvironment() {
     state.environment = {};
+    // Projects created before the opt-in existed may already contain
+    // .editor/process.env. Preserve their existing behavior; new projects
+    // remain local-only until the user explicitly enables project saving.
+    try {
+      const explicit = state.deploymentSettings?.saveEnvironmentVariablesExplicit === true;
+      if (!explicit && state.fs?.existsSync?.('/.editor/process.env')) {
+        state.deploymentSettings.saveEnvironmentVariables = true;
+        state.deploymentSettings.saveEnvironmentVariablesExplicit = true;
+      }
+    } catch (_) {}
     if (!ctx.loadProcessEnv()) {
       const legacy = ctx.readLegacyEditorConfig();
       if (legacy?.environment && typeof legacy.environment === 'object' && !Array.isArray(legacy.environment)) {
@@ -38,7 +48,26 @@
     function renderEnvironment(g) {
     const div = document.createElement('div');
     div.className = 'editor-environment-page';
-    div.innerHTML = '<div class="editor-environment-header"><h2>Environment Variables</h2><p>Variables are available through <code>process.env</code> when running a Node project in this workspace.</p></div><div class="editor-environment-toolbar"><button class="editor-environment-add">Add Variable</button><button class="editor-environment-import">Import</button><button class="editor-environment-export">Export .env</button><button class="editor-environment-clear">Clear All</button><input class="editor-environment-import-input" type="file" accept=".env,.txt,.json,application/json,text/plain" hidden></div><div class="editor-environment-table"><div class="editor-environment-row editor-environment-heading"><div>Name</div><div>Value</div><div></div></div><div class="editor-environment-rows"></div></div>';
+    div.innerHTML = '<div class="editor-environment-header"><h2>Environment Variables</h2><p>Variables are available through <code>process.env</code> when running a Node project in this workspace.</p></div><div class="editor-environment-persistence"><label><input class="editor-environment-save-toggle" type="checkbox"> Save environment variables in the project</label><div class="editor-environment-save-warning">Warning: saving environment variables stores their values in the project files. Anyone who can access the repository can see them. Do not save passwords, API keys, tokens, or other secrets.</div></div><div class="editor-environment-toolbar"><button class="editor-environment-add">Add Variable</button><button class="editor-environment-import">Import</button><button class="editor-environment-export">Export .env</button><button class="editor-environment-clear">Clear All</button><input class="editor-environment-import-input" type="file" accept=".env,.txt,.json,application/json,text/plain" hidden></div><div class="editor-environment-table"><div class="editor-environment-row editor-environment-heading"><div>Name</div><div>Value</div><div></div></div><div class="editor-environment-rows"></div></div>';
+    const saveToggle = div.querySelector('.editor-environment-save-toggle');
+    saveToggle.checked = state.deploymentSettings?.saveEnvironmentVariables === true;
+    saveToggle.addEventListener('change', () => {
+      if (saveToggle.checked) {
+        const confirmed = confirm(
+          'Warning: saving environment variables makes them part of the project files and public to anyone who can access the repository. Do not store secrets here. Enable project saving?'
+        );
+        if (!confirmed) {
+          saveToggle.checked = false;
+          return;
+        }
+      }
+      state.deploymentSettings.saveEnvironmentVariables = saveToggle.checked;
+      state.deploymentSettings.saveEnvironmentVariablesExplicit = true;
+      try { ctx.saveProjectMetadata(); } catch (e) { ctx.logError(e); }
+      ctx.markDirty?.('editor/project.json');
+      saveEnvironment();
+    });
+
     const rows = div.querySelector('.editor-environment-rows');
     const renderRows = () => {
       rows.innerHTML = '';

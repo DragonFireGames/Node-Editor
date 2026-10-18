@@ -1,24 +1,26 @@
-// dependencies:
-// network.js
-// filesystem.js
-
+// Node.js emulator — Web Worker runtime
+// Replaces the old hidden iframe runtime while preserving the CommonJS/polyfill/HTTP/WebSocket/terminal API.
+// dependencies: network.js, filesystem.js
 (function() {
-
   function normalizeNodePath(path) {
     const parts = String(path || "/").replace(/\\/g, "/").split("/").filter(Boolean);
     const out = [];
     for (const part of parts) {
       if (part === ".") continue;
-      if (part === "..") {
-        if (out.length) out.pop();
-      } else {
-        out.push(part);
-      }
+      if (part === "..") { if (out.length) out.pop(); }
+      else out.push(part);
     }
     return "/" + out.join("/");
   }
 
-  function nodeExecution() {
+  const nodeExecution =   function nodeExecution(boot = {}) {
+    const nodeEmulator = boot.nodeEmulator || {};
+    const rpc = boot.rpc || (async () => { throw new Error("Worker RPC is not available"); });
+
+    globalThis.global = globalThis;
+    globalThis.__hostOrigin = String(boot.hostOrigin || "");
+    globalThis.__hostURL = String(boot.hostURL || "");
+    globalThis.nodeEmulator = nodeEmulator;
     function normalizeNodePath(path) {
       const parts = String(path || "/").replace(/\\/g, "/").split("/").filter(Boolean);
       const out = [];
@@ -32,20 +34,48 @@
       }
       return "/" + out.join("/");
     }
-    if (!window.nodeEmulator) throw new Error("Emulator not found!");
 
     (function() {
-      var CURRENT_PAGE_URL = "http://127.0.0.1/";
-      var BASE_ORIGIN = "http://127.0.0.1/";
-      const originalFetch = window.fetch.bind(window);
-      
-      window.fetch = async function(input, data = {}, type = 'fetch') {
-        const fetchUrl = typeof input === 'string' ? input : (input instanceof Request ? input.url : input);
+      const CURRENT_PAGE_URL = String(boot.currentPageUrl || "http://127.0.0.1/");
+      const BASE_ORIGIN = String(boot.baseOrigin || "http://127.0.0.1/");
+      const originalFetch = typeof globalThis.fetch === 'function' ? globalThis.fetch.bind(globalThis) : null;
+
+      globalThis.fetch = async function(input, data = {}, type = 'fetch') {
+        const fetchUrl = typeof input === 'string'
+          ? input
+          : (input && typeof input.url === 'string' ? input.url : String(input));
         const resolvedUrl = new URL(fetchUrl, CURRENT_PAGE_URL).href;
-        const response = await nodeEmulator.network.request(resolvedUrl, BASE_ORIGIN, data, type);
+
+        let requestData = data;
+        if (input && typeof input === 'object' && typeof input.method === 'string' &&
+            typeof input.url === 'string' && input !== data) {
+          try {
+            requestData = {
+              method: input.method,
+              headers: Object.fromEntries(new Headers(input.headers || {}).entries()),
+              body: input.body || undefined,
+              credentials: input.credentials,
+              mode: input.mode,
+              cache: input.cache,
+              redirect: input.redirect,
+              referrer: input.referrer,
+              referrerPolicy: input.referrerPolicy
+            };
+          } catch (_) {}
+        }
+
+        const response = await nodeEmulator.network.request(
+          resolvedUrl,
+          BASE_ORIGIN,
+          requestData,
+          type
+        );
         if (response) return response;
-        return await originalFetch.apply(this, arguments);
+        if (!originalFetch) throw new Error('fetch is unavailable in the Worker runtime');
+        return await originalFetch(input, data);
       };
+
+      // CommonJS modules resolve bare `fetch(...)` through the Worker global.
     })();
 
     Object.keys(console).forEach(method => {
@@ -64,7 +94,7 @@
       setTimeout(()=>e.addEventListener(p,f,t),0);
     }
 
-    addEventListener(window, 'error', function(e) {
+    addEventListener(globalThis, 'error', function(e) {
       nodeEmulator.dispatchEvent('error',e,'[node runtime env]');
     });
 
@@ -124,11 +154,11 @@
     }
 
     // 1. Initialize Globals (Removed mockFileSystem per request)
-    window.activeServers = new Map(); // Active HTTP servers bound to ports/domains
+    globalThis.activeServers = new Map(); // Active HTTP servers bound to ports/domains
     
     // Standard Node Globals
-    window.global = window;
-    window.process = {
+    globalThis.global = globalThis;
+    globalThis.process = {
       type: 'renderer',
       env: ENV_SETTINGS,
       cwd: () => nodeEmulator.cwd || '/',
@@ -203,6 +233,7 @@
 
     // --- Modular Polyfill Suite ---
     const polyfills = {};
+    globalThis.polyfills = polyfills;
 
     {
       /**
@@ -1020,11 +1051,11 @@
         };
 
         // Expose globally
-        if (typeof window !== 'undefined' && !window.Buffer) {
-          window.Buffer = Buffer;
+        if (typeof globalThis !== 'undefined' && !globalThis.Buffer) {
+          globalThis.Buffer = Buffer;
         }
-        if (typeof global !== 'undefined' && !global.Buffer) {
-          global.Buffer = Buffer;
+        if (typeof globalThis !== 'undefined' && !globalThis.Buffer) {
+          globalThis.Buffer = Buffer;
         }
 
         module.exports = { Buffer: Buffer };
@@ -1040,9 +1071,9 @@
 
         // Dynamically retrieve the resolved FileSystem instance
         function getFS() {
-          const fsInstance = window.fileSystem;
+          const fsInstance = globalThis.fileSystem;
           if (!fsInstance || typeof fsInstance.existsSync !== 'function') {
-            throw new Error("FileSystem Error: window.fileSystem is not ready or initialized.");
+            throw new Error("FileSystem Error: globalThis.fileSystem is not ready or initialized.");
           }
           return fsInstance;
         }
@@ -1074,7 +1105,7 @@
           if (!p) return getRootFolder().slice(1).replace(/\/+$/, '');
           
           const rawPath = String(p ?? '.');
-          const cwd = (window.process && typeof window.process.cwd === 'function') ? window.process.cwd() : '/';
+          const cwd = (globalThis.process && typeof globalThis.process.cwd === 'function') ? globalThis.process.cwd() : '/';
           const resolved = rawPath.startsWith('/') ? rawPath : `${cwd}/${rawPath}`;
 
           const normalized = normalizePath(resolved);
@@ -1550,7 +1581,16 @@
           }
 
           close(cb) {
+            const ports = [];
+            try {
+              if (typeof activeServers !== 'undefined' && activeServers?.entries) {
+                for (const [port, server] of activeServers.entries()) {
+                  if (server === this) { activeServers.delete(port); ports.push(port); }
+                }
+              }
+            } catch (_) {}
             this.listening = false;
+            try { nodeEmulator?.dispatchEvent?.('serverclose', this, ports[0] ?? null); } catch (_) {}
             if (cb) cb();
             return this;
           }
@@ -2143,7 +2183,7 @@
             const wsUrl = `${protocol}//${this.remoteAddress}:${this.remotePort}`;
 
             // Instantiate our InterceptableWebSocket
-            this._ws = new window.WebSocket(wsUrl, 'tcp-tunnel');
+            this._ws = new globalThis.WebSocket(wsUrl, 'tcp-tunnel');
             this._ws.binaryType = 'arraybuffer'; // Crucial for raw byte streams
 
             this._ws.onopen = () => {
@@ -2184,7 +2224,7 @@
           _write(chunk, encoding, callback) {
             this.bytesWritten += chunk.length;
             
-            if (this._ws && this._ws.readyState === window.WebSocket.OPEN) {
+            if (this._ws && this._ws.readyState === globalThis.WebSocket.OPEN) {
               this._ws.send(chunk);
               if (callback) callback();
             } else {
@@ -2216,7 +2256,7 @@
           }
 
           destroy(error) {
-            if (this._ws && this._ws.readyState !== window.WebSocket.CLOSED) {
+            if (this._ws && this._ws.readyState !== globalThis.WebSocket.CLOSED) {
               this._ws.close();
             }
             if (error) this.emit('error', error);
@@ -2251,7 +2291,16 @@
           }
 
           close(cb) {
+            const ports = [];
+            try {
+              if (typeof activeServers !== 'undefined' && activeServers?.entries) {
+                for (const [port, server] of activeServers.entries()) {
+                  if (server === this) { activeServers.delete(port); ports.push(port); }
+                }
+              }
+            } catch (_) {}
             this.listening = false;
+            try { nodeEmulator?.dispatchEvent?.('serverclose', this, ports[0] ?? null); } catch (_) {}
             if (cb) cb();
             return this;
           }
@@ -2592,8 +2641,8 @@
       if (typeof polyfills !== 'undefined' && polyfills[cleanSpecifier]) {
         return polyfills[cleanSpecifier];
       }
-      if (typeof window !== 'undefined' && window.polyfills && window.polyfills[cleanSpecifier]) {
-        return window.polyfills[cleanSpecifier];
+      if (typeof globalThis !== 'undefined' && globalThis.polyfills && globalThis.polyfills[cleanSpecifier]) {
+        return globalThis.polyfills[cleanSpecifier];
       }
       return null;
     }
@@ -2627,8 +2676,8 @@
      * File System Reader over JSZip
      */
     async function resolveZipPath(absolutePath) {
-      const filesystem = window.fileSystem;
-      if (!filesystem) throw new Error("FileSystem not found on window.fileSystem.");
+      const filesystem = globalThis.fileSystem;
+      if (!filesystem) throw new Error("FileSystem not found on globalThis.fileSystem.");
 
       const root = String(typeof rootfolder !== 'undefined' ? rootfolder || '' : '')
         .replace(/^\/+|\/+$/g,'');
@@ -2643,7 +2692,9 @@
 
       const candidates = [
         physicalPath,
+        `${physicalPath}.mjs`,
         `${physicalPath}.js`,
+        `${physicalPath}.cjs`,
         `${physicalPath}.json`
       ];
 
@@ -2735,6 +2786,315 @@
       throw new Error(`Cannot find module '${moduleSpecifier}' required from '${parentDir}'`);
     }
 
+    // --- ES Module Support -------------------------------------------------
+    // Mirrors the browser emulator's Acorn/Astring module rewriting model, but
+    // resolves modules from the virtual filesystem instead of network URLs.
+
+    const esmModuleRecords = new Map(); // canonical path -> { namespace, loading, promise }
+    let esmImportCounter = 0;
+
+    function getModuleTooling() {
+      const ac = globalThis.acorn;
+      const as = globalThis.astring;
+      if (!ac || typeof ac.parse !== 'function' || !as || typeof as.generate !== 'function') {
+        throw new Error('ES module support requires the Acorn and Astring parser runtimes.');
+      }
+      return { acorn: ac, astring: as };
+    }
+
+    function getPatternNames(pattern, names = []) {
+      if (!pattern) return names;
+      if (pattern.type === 'Identifier') {
+        if (!names.includes(pattern.name)) names.push(pattern.name);
+      } else if (pattern.type === 'ObjectPattern') {
+        for (const prop of pattern.properties || []) {
+          if (prop.type === 'RestElement') getPatternNames(prop.argument, names);
+          else getPatternNames(prop.value || prop.argument, names);
+        }
+      } else if (pattern.type === 'ArrayPattern') {
+        for (const element of pattern.elements || []) if (element) getPatternNames(element, names);
+      } else if (pattern.type === 'RestElement') {
+        getPatternNames(pattern.argument, names);
+      } else if (pattern.type === 'AssignmentPattern') {
+        getPatternNames(pattern.left, names);
+      }
+      return names;
+    }
+
+    function makeSafeModuleSnippet(code) {
+      const { acorn } = getModuleTooling();
+      const parsed = acorn.parse(code, {
+        ecmaVersion: 'latest',
+        allowAwaitOutsideFunction: true,
+        sourceType: 'script'
+      });
+      return parsed.body.length === 1 ? parsed.body[0] : { type: 'BlockStatement', body: parsed.body };
+    }
+
+    function transformModuleNode(node) {
+      if (!node || typeof node !== 'object') return node;
+
+      if (node.type === 'ImportExpression') {
+        node.type = 'CallExpression';
+        node.callee = { type: 'Identifier', name: '__importModule' };
+        node.arguments = [transformModuleNode(node.source)];
+        delete node.source;
+        return node;
+      }
+
+      if (node.type === 'MetaProperty' &&
+          node.meta?.name === 'import' &&
+          node.property?.name === 'meta') {
+        return {
+          type: 'MemberExpression',
+          object: { type: 'Identifier', name: '__importModule' },
+          property: { type: 'Identifier', name: 'meta' },
+          computed: false,
+          optional: false
+        };
+      }
+
+      for (const key of Object.keys(node)) {
+        if (key === 'parent' || key === 'start' || key === 'end' || key === 'loc') continue;
+        const child = node[key];
+        if (Array.isArray(child)) {
+          child.forEach((item, i) => {
+            if (item && typeof item === 'object' && item.type) child[i] = transformModuleNode(item);
+          });
+        } else if (child && typeof child === 'object' && child.type) {
+          node[key] = transformModuleNode(child);
+        }
+      }
+      return node;
+    }
+
+    function transformESModuleSource(sourceCode) {
+      const { acorn, astring } = getModuleTooling();
+      let ast = acorn.parse(sourceCode, {
+        ecmaVersion: 'latest',
+        sourceType: 'module',
+        allowAwaitOutsideFunction: true
+      });
+
+      const newBody = [];
+      for (const originalNode of ast.body) {
+        const node = transformModuleNode(originalNode);
+
+        if (node.type === 'ImportDeclaration') {
+          const source = JSON.stringify(node.source.value);
+          const importId = `__esmImport_${++esmImportCounter}`;
+          const specifiers = node.specifiers || [];
+
+          if (!specifiers.length) {
+            newBody.push(makeSafeModuleSnippet(`await __importModule(${source});`));
+            continue;
+          }
+
+          const statements = [`const ${importId} = await __importModule(${source});`];
+          let namespaceImported = false;
+          for (const spec of specifiers) {
+            if (spec.type === 'ImportNamespaceSpecifier') {
+              statements.push(`const ${spec.local.name} = ${importId};`);
+              namespaceImported = true;
+            } else if (spec.type === 'ImportDefaultSpecifier') {
+              statements.push(`const ${spec.local.name} = ${importId}.default;`);
+            } else if (spec.type === 'ImportSpecifier') {
+              const imported = JSON.stringify(spec.imported.name || spec.imported.value);
+              statements.push(`const ${spec.local.name} = ${importId}[${imported}];`);
+            }
+          }
+          if (namespaceImported && specifiers.length === 1) {
+            // The namespace case above already declared the local binding.
+          }
+          newBody.push(makeSafeModuleSnippet(statements.join('\n')));
+          continue;
+        }
+
+        if (node.type === 'ExportDefaultDeclaration') {
+          const declaration = node.declaration;
+          if (declaration.type === 'FunctionDeclaration' || declaration.type === 'ClassDeclaration') {
+            const name = declaration.id?.name || '__defaultExport';
+            if (!declaration.id) declaration.id = { type: 'Identifier', name };
+            newBody.push(declaration);
+            newBody.push(makeSafeModuleSnippet(`__exportModule({ default: ${name} });`));
+          } else {
+            const { astring: gen } = getModuleTooling();
+            const expr = gen.generate(declaration);
+            newBody.push(makeSafeModuleSnippet(`__exportModule({ default: (${expr}) });`));
+          }
+          continue;
+        }
+
+        if (node.type === 'ExportNamedDeclaration') {
+          if (node.declaration) {
+            const decl = node.declaration;
+            newBody.push(decl);
+            if (decl.type === 'VariableDeclaration') {
+              const names = [];
+              for (const d of decl.declarations || []) getPatternNames(d.id, names);
+              if (names.length) newBody.push(makeSafeModuleSnippet(`__exportModule({ ${names.map(n => `${JSON.stringify(n)}: ${n}`).join(', ')} });`));
+            } else if (decl.type === 'FunctionDeclaration' || decl.type === 'ClassDeclaration') {
+              if (decl.id?.name) newBody.push(makeSafeModuleSnippet(`__exportModule({ ${JSON.stringify(decl.id.name)}: ${decl.id.name} });`));
+            }
+            continue;
+          }
+
+          if (node.specifiers?.length) {
+            if (node.source) {
+              const source = JSON.stringify(node.source.value);
+              const importId = `__esmReexport_${++esmImportCounter}`;
+              const mappings = node.specifiers.map(spec => `${JSON.stringify(spec.exported.name || spec.exported.value)}: ${importId}[${JSON.stringify(spec.local.name || spec.local.value)}]`).join(', ');
+              newBody.push(makeSafeModuleSnippet(`const ${importId} = await __importModule(${source});\n__exportModule({ ${mappings} });`));
+            } else {
+              const mappings = node.specifiers.map(spec => `${JSON.stringify(spec.exported.name || spec.exported.value)}: ${spec.local.name || spec.local.value}`).join(', ');
+              newBody.push(makeSafeModuleSnippet(`__exportModule({ ${mappings} });`));
+            }
+          }
+          continue;
+        }
+
+        if (node.type === 'ExportAllDeclaration') {
+          const source = JSON.stringify(node.source.value);
+          const importId = `__esmStar_${++esmImportCounter}`;
+          if (node.exported) {
+            const name = node.exported.name || node.exported.value;
+            newBody.push(makeSafeModuleSnippet(`const ${name} = await __importModule(${source});\n__exportModule({ ${JSON.stringify(name)}: ${name} });`));
+          } else {
+            newBody.push(makeSafeModuleSnippet(`const ${importId} = await __importModule(${source});\n__exportModule(${importId});`));
+          }
+          continue;
+        }
+
+        newBody.push(node);
+      }
+
+      ast.body = newBody;
+      return astring.generate(ast);
+    }
+
+    async function packageTypeFor(filePath) {
+      let dir = dirname(filePath);
+      while (true) {
+        try {
+          const pkg = await resolveZipPath(joinPaths(dir, 'package.json'));
+          if (pkg?.zipPath) {
+            const raw = globalThis.fileSystem.readFileSync(pkg.zipPath, 'utf8');
+            const parsed = JSON.parse(raw || '{}');
+            if (parsed && typeof parsed.type === 'string') return parsed.type;
+          }
+        } catch (_) {}
+        if (dir === '/') break;
+        dir = dirname(dir);
+      }
+      return null;
+    }
+
+    async function isESModulePath(filePath) {
+      const normalized = normalizePath(filePath);
+      if (/\.mjs$/i.test(normalized)) return true;
+      if (/\.cjs$/i.test(normalized)) return false;
+      if (/\.js$/i.test(normalized)) return (await packageTypeFor(normalized)) === 'module';
+      return false;
+    }
+
+    function namespaceFromExports(value) {
+      const namespace = { default: value };
+      if (value && (typeof value === 'object' || typeof value === 'function')) {
+        for (const key of Object.keys(value)) {
+          if (!(key in namespace)) namespace[key] = value[key];
+        }
+      }
+      return namespace;
+    }
+
+    async function importModuleFrom(fileSpecifier, parentFilePath) {
+      const parentDir = dirname(parentFilePath);
+      const location = await lookupFileInZip(fileSpecifier, parentDir);
+
+      if (location.isBuiltin) return namespaceFromExports(location.exports);
+
+      const resolvedPath = location.resolvedPath;
+      const existing = esmModuleRecords.get(resolvedPath);
+      if (existing) return existing.loading ? existing.namespace : existing.promise;
+
+      if (resolvedPath.endsWith('.json')) {
+        const raw = globalThis.fileSystem.readFileSync(location.zipPath, 'utf8');
+        const parsed = JSON.parse(raw);
+        const namespace = { default: parsed };
+        const promise = Promise.resolve(namespace);
+        esmModuleRecords.set(resolvedPath, { namespace, loading: false, promise });
+        return namespace;
+      }
+
+      const esm = await isESModulePath(resolvedPath);
+      if (!esm) {
+        await preloadModule(fileSpecifier, parentFilePath);
+        const commonjs = executeModuleSync(resolvedPath);
+        const namespace = namespaceFromExports(commonjs);
+        const promise = Promise.resolve(namespace);
+        esmModuleRecords.set(resolvedPath, { namespace, loading: false, promise });
+        return namespace;
+      }
+
+      const namespace = {};
+      const record = { namespace, loading: true, promise: null };
+      esmModuleRecords.set(resolvedPath, record);
+
+      const rawSource = globalThis.fileSystem.readFileSync(location.zipPath, 'utf8');
+      // Preserve compatibility for occasional CommonJS-style requires embedded in ESM.
+      for (const specifier of extractRequireSpecifiers(rawSource)) {
+        try { await preloadModule(specifier, resolvedPath); } catch (_) {}
+      }
+
+      const transformed = transformESModuleSource(rawSource);
+      const requireSync = createRequireSync(resolvedPath);
+      const processForModule = {
+        env: ENV_SETTINGS,
+        cwd: () => nodeEmulator.cwd || '/',
+        chdir: path => {
+          const target = resolveWorkingPath(path);
+          if (!directoryExists(target)) throw new Error(`chdir: no such directory: ${path}`);
+          const previous = nodeEmulator.cwd || '/';
+          nodeEmulator.previousCwd = previous;
+          nodeEmulator.cwd = target;
+          ENV_SETTINGS.PWD = target;
+          ENV_SETTINGS.OLDPWD = previous;
+        },
+        nextTick: (cb, ...args) => setTimeout(() => cb(...args), 0),
+        env: ENV_SETTINGS,
+        platform: 'browser'
+      };
+
+      const importMeta = {
+        url: new URL(resolvedPath.replace(/^\//, ''), CURRENT_PAGE_URL).href,
+        resolve(specifier) {
+          const candidate = String(specifier || '');
+          try { return new URL(candidate, importMeta.url).href; } catch (_) { return candidate; }
+        }
+      };
+
+      const __importModule = specifier => importModuleFrom(String(specifier), resolvedPath);
+      __importModule.meta = importMeta;
+      const __exportModule = exports => Object.assign(namespace, exports || {});
+
+      record.promise = (async () => {
+        try {
+          const factory = new Function(
+            '__importModule', '__exportModule', 'require', 'process', 'global', 'console', 'importMeta',
+            `"use strict";\nreturn (async function(){\n${transformed}\n}).call(undefined);\n//# sourceURL=${resolvedPath}`
+          );
+          await factory(__importModule, __exportModule, requireSync, processForModule, globalThis, safeConsole, importMeta);
+          record.loading = false;
+          return namespace;
+        } catch (error) {
+          esmModuleRecords.delete(resolvedPath);
+          throw error;
+        }
+      })();
+
+      return record.promise;
+    }
+
     /**
      * Extract require(...) targets from code via regex scan
      */
@@ -2772,7 +3132,7 @@
         return location;
       }
 
-      const filesystem = window.fileSystem;
+      const filesystem = globalThis.fileSystem;
 
       if (resolvedPath.endsWith('.json')) {
         const jsonText = filesystem.readFileSync(location.zipPath, 'utf8');
@@ -2788,6 +3148,7 @@
       }
 
       const rawSource = filesystem.readFileSync(location.zipPath, 'utf8');
+      const moduleIsESM = await isESModulePath(resolvedPath);
 
       // Reserve module container
       const moduleObj = { exports: {} };
@@ -2796,7 +3157,8 @@
         moduleObj: moduleObj,
         loaded: false,
         rawSource,
-        location
+        location,
+        isESModule: moduleIsESM
       };
       moduleCache.set(resolvedPath, cachedEntry);
 
@@ -2831,6 +3193,10 @@
         const resolvedPath = specifierMap.get(mapKey);
 
         if (resolvedPath && moduleCache.has(resolvedPath)) {
+          const cached = moduleCache.get(resolvedPath);
+          if (cached?.isESModule || /\.mjs$/i.test(resolvedPath)) {
+            throw new Error(`ERR_REQUIRE_ESM: Cannot synchronously require an ES module '${resolvedPath}'. Use import() instead.`);
+          }
           return executeModuleSync(resolvedPath);
         }
 
@@ -2935,7 +3301,7 @@
           resolvedPath,
           dirname(resolvedPath),
           simulatedProcess,
-          window,
+          globalThis,
           safeConsole
         );
 
@@ -2971,10 +3337,17 @@
         return location.exports;
       }
 
+      if (await isESModulePath(location.resolvedPath)) {
+        const namespace = await importModuleFrom(moduleSpecifier, currentFilePath);
+        return namespace?.default !== undefined && Object.keys(namespace).length === 1
+          ? namespace.default
+          : namespace;
+      }
+
       return executeModuleSync(location.resolvedPath);
     }
 
-    window.getServer = function(urlObj) {
+    globalThis.getServer = function(urlObj) {
       // Safely parse your custom domain variable to get the target hostname
       const targetDomainObj = typeof domain !== 'undefined' ? new URL(domain) : null;
       const targetHostname = targetDomainObj ? targetDomainObj.hostname : 'localhost';
@@ -2991,7 +3364,7 @@
       return server;
     };
 
-    window.handleRequest = async function(request,type) {
+    globalThis.handleRequest = async function(request,type) {
       let urlObj;
       try { urlObj = new URL(request.url); } catch (e) {
         return null;
@@ -3008,7 +3381,13 @@
       return await new Promise(async resolve => {
         const method = request.method || 'GET';
         const headers = request.headers || {};
-        const body = request.body ? await request.clone().text() : null;
+        let body = null;
+        if (request && request.body !== undefined && request.body !== null) {
+          if (typeof request.body === 'string') body = request.body;
+          else if (request.body instanceof ArrayBuffer) body = new TextDecoder().decode(new Uint8Array(request.body));
+          else if (typeof Uint8Array !== 'undefined' && request.body instanceof Uint8Array) body = new TextDecoder().decode(request.body);
+          else body = String(request.body);
+        }
         
         let requestPath = urlObj.pathname + urlObj.search;
         if (pathPrefix !== '/' && (requestPath === pathPrefix || requestPath.startsWith(pathPrefix + '/'))) {
@@ -3026,7 +3405,15 @@
       });
     };
 
-    window.handleSocket = async function(absoluteUrl, protocols) {
+    function postSocketEvent(socketBackend, eventName, ...args) {
+      const socketId = socketBackend && socketBackend.__socketId;
+      if (socketId == null) return;
+      try {
+        nodeEmulator.dispatchEvent('socket', { socketId, event: eventName, args });
+      } catch (_) {}
+    }
+
+    globalThis.handleSocket = async function(absoluteUrl, protocols) {
       let urlObj;
       try { urlObj = new URL(absoluteUrl); } catch (e) {
         return null;
@@ -3070,6 +3457,7 @@
             // installs its `packet` listener. A synchronous server reply would
             // arrive before that listener exists.
             setTimeout(() => {
+              postSocketEvent(mockBackend, 'open');
               if (typeof mockBackend._onOpen === 'function') mockBackend._onOpen();
             }, 0);
             return;
@@ -3092,6 +3480,7 @@
             setTimeout(() => {
               if (typeof mockBackend._onServerData !== 'function') return;
               try {
+                postSocketEvent(mockBackend, 'data', serverData);
                 mockBackend._onServerData(serverData);
               } catch (err) {
                 console.error('[VirtualWS v17] BROWSER SERVER DATA CALLBACK THREW', err && err.stack || err);
@@ -3110,6 +3499,7 @@
             size: 0,
             data: String(code) + " " + String(reason || "")
           });
+          postSocketEvent(mockBackend, 'close', code, reason);
           if (typeof mockBackend._onClose === 'function') {
             mockBackend._onClose(code, reason);
           }
@@ -3506,10 +3896,48 @@
     };
 
     // 6. Terminal Command Execution
+    class WorkerNPMProxy {
+      constructor(options = {}) {
+        this.rootfolder = String(options.rootfolder || getRuntimeRootFolder());
+      }
+
+      static splitCommand(command) {
+        const result = [];
+        const input = String(command || '');
+        let current = '';
+        let quote = null;
+        let escaped = false;
+        for (const ch of input) {
+          if (escaped) { current += ch; escaped = false; continue; }
+          if (ch === '\\') { escaped = true; continue; }
+          if (quote) {
+            if (ch === quote) quote = null;
+            else current += ch;
+            continue;
+          }
+          if (ch === '"' || ch === "'") { quote = ch; continue; }
+          if (/\s/.test(ch)) {
+            if (current) { result.push(current); current = ''; }
+          } else current += ch;
+        }
+        if (escaped) current += '\\';
+        if (current) result.push(current);
+        return result;
+      }
+
+      async run(args) {
+        return await rpc('npm.run', {
+          args: Array.from(args || []),
+          rootfolder: this.rootfolder,
+          cwd: nodeEmulator.cwd || '/'
+        });
+      }
+    }
+
+    globalThis.NPM = WorkerNPMProxy;
+
     function splitTerminalCommand(command) {
-      const NpmClass = typeof window !== 'undefined' && (window.NPM || window.parent?.NPM);
-      if (NpmClass && typeof NpmClass.splitCommand === 'function') return NpmClass.splitCommand(command);
-      return String(command || '').trim().split(/\s+/).filter(Boolean);
+      return WorkerNPMProxy.splitCommand(command);
     }
 
     function getRuntimeRootFolder() {
@@ -3520,30 +3948,16 @@
     }
 
     function getNpmManager() {
-      const NpmClass = typeof window !== 'undefined' && (window.NPM || window.parent?.NPM);
-      if (!NpmClass) return null;
       const runtimeRoot = getRuntimeRootFolder();
       if (!nodeEmulator.npm) {
-        nodeEmulator.npm = new NpmClass({
-          filesystem: nodeEmulator.filesystem,
-          network: nodeEmulator.network,
-          rootfolder: runtimeRoot,
-          log: console,
-          env: nodeEmulator.env,
-          commandRunner: async command => await window.terminalCommand(command),
-          onFileSystemChange: () => {
-            try {
-              window.nodeEmulator?.dispatchEvent?.('filesystemchange');
-            } catch (_) {}
-          }
-        });
+        nodeEmulator.npm = new WorkerNPMProxy({ rootfolder: runtimeRoot });
       } else {
         nodeEmulator.npm.rootfolder = runtimeRoot;
       }
       return nodeEmulator.npm;
     }
 
-    window.terminalCommand = async function(cmd) {
+    globalThis.terminalCommand = async function(cmd) {
       console.logText(`\$ ${cmd}`);
       const parts = splitTerminalCommand(cmd);
       const bin = parts[0];
@@ -3596,7 +4010,7 @@
         return entries;
       } else if (bin === "which") {
         const name = args[0];
-        const supported = new Set(['pwd','cd','echo','printf','true','false','whoami','hostname','env','which','ls','dir','node','npm']);
+        const supported = new Set(['pwd','cd','cat','echo','printf','true','false','whoami','hostname','env','which','ls','dir','node','npm']);
         if (!name || !supported.has(name)) {
           console.logText(`${name || ''}: not found`);
           return null;
@@ -3631,6 +4045,32 @@
         const entries = listDirectory(target);
         console.logText(entries.join('  '));
         return entries;
+      } else if (bin === "cat") {
+        const files = args.filter(arg => !arg.startsWith('-'));
+        if (!files.length) {
+          const error = new Error('cat: missing file operand');
+          console.error(error.message);
+          throw error;
+        }
+        let output = '';
+        for (const fileArg of files) {
+          const target = resolveWorkingPath(fileArg);
+          const physical = getPhysicalPath(target);
+          if (!nodeEmulator.filesystem?.existsSync?.(physical)) {
+            const error = new Error(`cat: ${fileArg}: No such file`);
+            console.error(error.message);
+            throw error;
+          }
+          try {
+            output += String(nodeEmulator.filesystem.readFileSync(physical, 'utf8') ?? '');
+          } catch (e) {
+            const error = new Error(`cat: ${fileArg}: ${e?.message || 'Unable to read file'}`);
+            console.error(error.message);
+            throw error;
+          }
+        }
+        console.logText(output);
+        return output;
       } else if (bin === "node") {
         const entryArgument = args[0] || "index.js";
         const entryFile = resolveWorkingPath(entryArgument);
@@ -3656,41 +4096,375 @@
           throw e;
         }
       } else {
-        const error = new Error(`Command not found: ${bin}. The virtual terminal is not a real OS shell; supported commands are pwd, cd, echo, printf, true, false, whoami, hostname, env, which, ls/dir, node, and npm.`);
+        const error = new Error(`Command not found: ${bin}. The virtual terminal is not a real OS shell; supported commands are pwd, cd, cat, echo, printf, true, false, whoami, hostname, env, which, ls/dir, node, and npm.`);
         console.error(error.message);
         throw error;
       }
     };
 
+
     // Initialize app defaults
     console.log("Node Simulator environment loaded. Use terminalCommand('node index.js') to start.");
-  };
+  };;
+
+  function workerBootstrap() {
+  
+    'use strict';
+  
+    let runtime = null;
+    let nextHostRequestId = 1;
+    const hostRequests = new Map();
+  
+    function safeClone(value, seen = new WeakSet()) {
+      if (value == null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return value;
+      if (typeof value === 'bigint') return String(value) + 'n';
+      if (typeof value === 'function') return `[Function ${value.name || 'anonymous'}]`;
+      if (value instanceof Error) return { name: value.name, message: value.message, stack: value.stack, code: value.code };
+      if (value instanceof ArrayBuffer) return value.slice(0);
+      if (ArrayBuffer.isView(value)) return new value.constructor(value);
+      if (seen.has(value)) return '[Circular]';
+      seen.add(value);
+      if (Array.isArray(value)) return value.map(v => safeClone(v, seen));
+      if (value instanceof Map) return Array.from(value.entries()).map(([k,v]) => [safeClone(k, seen), safeClone(v, seen)]);
+      if (value instanceof Set) return Array.from(value.values()).map(v => safeClone(v, seen));
+      if (typeof Headers !== 'undefined' && value instanceof Headers) return Object.fromEntries(value.entries());
+      if (typeof URLSearchParams !== 'undefined' && value instanceof URLSearchParams) return value.toString();
+      const out = {};
+      try {
+        for (const key of Object.keys(value)) out[key] = safeClone(value[key], seen);
+      } catch (_) {
+        return String(value);
+      }
+      return out;
+    }
+  
+    function postEvent(name, ...args) {
+      const payload = safeClone(args);
+      self.postMessage({ type: 'event', name, args: payload });
+    }
+  
+    function hostRpc(method, payload) {
+      const id = nextHostRequestId++;
+      return new Promise((resolve, reject) => {
+        hostRequests.set(id, { resolve, reject });
+        self.postMessage({ type: 'hostRequest', capability: runtime?.capabilityToken, id, method, payload: safeClone(payload) });
+      });
+    }
+  
+    class WorkerFileSystemProxy {
+      constructor(files = [], onWrite = null) {
+        this._files = new Map();
+        this._onWrite = typeof onWrite === 'function' ? onWrite : null;
+        this.replaceSnapshot(files);
+      }
+      _normalize(path) {
+        return String(path || '').replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+/g, '/').replace(/(^|\/)\.\//g, '$1');
+      }
+      _bytes(value) {
+        if (value == null) return new Uint8Array(0);
+        if (value instanceof Uint8Array) return new Uint8Array(value);
+        if (value instanceof ArrayBuffer) return new Uint8Array(value.slice(0));
+        if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+        if (typeof value === 'string') return new TextEncoder().encode(value);
+        return new TextEncoder().encode(String(value));
+      }
+      replaceSnapshot(files = []) {
+        const next = new Map();
+        for (const entry of files || []) {
+          if (!entry) continue;
+          const path = this._normalize(entry.path);
+          if (!path) continue;
+          next.set(path, this._bytes(entry.data));
+        }
+        this._files = next;
+      }
+      listFilesSync() { return Array.from(this._files.keys()); }
+      existsSync(path) { return this._files.has(this._normalize(path)); }
+      readFileSync(path, encoding) {
+        const normalized = this._normalize(path);
+        if (!this._files.has(normalized)) throw new Error(`ENOENT: no such file or directory, open '${path}'`);
+        const data = new Uint8Array(this._files.get(normalized));
+        if (encoding === 'utf8' || (encoding && encoding.encoding === 'utf8')) return new TextDecoder().decode(data);
+        return data;
+      }
+      writeFileSync(path, content) {
+        const normalized = this._normalize(path);
+        if (!normalized) throw new Error('EINVAL: invalid file path');
+        const data = this._bytes(content);
+        this._files.set(normalized, new Uint8Array(data));
+        if (this._onWrite) {
+          try { this._onWrite(normalized, new Uint8Array(data)); } catch (_) {}
+        }
+      }
+    }
+  
+    function createWorkerCompat(config) {
+      const w = Object.create(null);
+      const copyNames = [
+        'URL', 'URLSearchParams', 'Request', 'Response', 'Headers', 'FormData', 'Blob', 'File',
+        'TextEncoder', 'TextDecoder', 'ArrayBuffer', 'Uint8Array', 'Uint16Array', 'Uint32Array', 'DataView',
+        'Uint8ClampedArray', 'Int8Array', 'Int16Array', 'Int32Array', 'Float32Array', 'Float64Array',
+        'BigInt64Array', 'BigUint64Array', 'WebSocket', 'Event', 'EventTarget', 'MessageEvent',
+        'CloseEvent', 'DOMException', 'AbortController', 'AbortSignal', 'ReadableStream', 'WritableStream',
+        'TransformStream', 'crypto', 'atob', 'btoa', 'structuredClone', 'performance', 'queueMicrotask',
+        'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'setImmediate', 'clearImmediate'
+      ];
+      for (const name of copyNames) if (name in globalThis) w[name] = globalThis[name];
+      w.self = w;
+      w.window = w;
+      w.parent = w;
+      w.top = w;
+      w.global = globalThis;
+      w.location = config.location || {
+        href: config.currentPageUrl || 'http://127.0.0.1/', origin: config.hostOrigin || '',
+        protocol: 'http:', host: '127.0.0.1', hostname: '127.0.0.1', port: '', pathname: '/', search: '', hash: ''
+      };
+      w.document = undefined;
+      if (typeof globalThis.addEventListener === 'function') w.addEventListener = globalThis.addEventListener.bind(globalThis);
+      if (typeof globalThis.removeEventListener === 'function') w.removeEventListener = globalThis.removeEventListener.bind(globalThis);
+      if (typeof globalThis.dispatchEvent === 'function') w.dispatchEvent = globalThis.dispatchEvent.bind(globalThis);
+      return w;
+    }
+  
+    function serializeResponse(response) {
+      if (!response) return null;
+      return response.arrayBuffer().then(async body => ({
+        status: response.status,
+        statusText: response.statusText,
+        headers: Array.from(response.headers.entries()),
+        body
+      }));
+    }
+  
+    function serializeThrown(error) {
+      return safeClone(error instanceof Error ? error : new Error(String(error)));
+    }
+  
+    async function handleRpc(message) {
+      if (!runtime) throw new Error('Node Worker runtime is not initialized');
+      switch (message.method) {
+        case 'terminalCommand':
+          return await global.terminalCommand(message.payload.cmd);
+        case 'eval':
+          return safeClone(await (0, eval)(String(message.payload.code || '')));
+        case 'handleRequest': {
+          const response = await global.handleRequest(message.payload.request, message.payload.type);
+          return await serializeResponse(response);
+        }
+        case 'handleSocket': {
+          const backend = await global.handleSocket(message.payload.url, message.payload.protocols);
+          if (!backend) return null;
+          const socketId = runtime.nextSocketId++;
+          backend.__socketId = socketId;
+          runtime.sockets.set(socketId, backend);
+          return { socketId };
+        }
+        case 'socket.clientMessage': {
+          const backend = runtime.sockets.get(message.payload.socketId);
+          if (!backend) return false;
+          backend.onClientMessage(message.payload.data);
+          return true;
+        }
+        case 'socket.sendToClient': {
+          const backend = runtime.sockets.get(message.payload.socketId);
+          if (!backend) return false;
+          backend.sendToClient(message.payload.data);
+          return true;
+        }
+        case 'socket.closeClient': {
+          const backend = runtime.sockets.get(message.payload.socketId);
+          if (!backend) return false;
+          backend.closeClient(message.payload.code, message.payload.reason);
+          runtime.sockets.delete(message.payload.socketId);
+          return true;
+        }
+        case 'getServerState': {
+          const ports = [];
+          for (const [port, server] of global.activeServers.entries()) {
+            if (server && server.listening) ports.push(String(port));
+          }
+          return ports;
+        }
+        default:
+          throw new Error(`Unknown Worker RPC method: ${message.method}`);
+      }
+    }
+  
+    function loadModuleParserRuntime(config) {
+      if (globalThis.acorn?.parse && globalThis.astring?.generate) return;
+      if (typeof importScripts !== 'function') {
+        throw new Error('ES module parser runtime cannot be loaded in this Worker.');
+      }
+      const urls = config.moduleParserUrls || {};
+      const scripts = [urls.acorn, urls.astring].filter(Boolean);
+      if (!scripts.length) {
+        throw new Error('ES module parser URLs were not supplied to the Node Worker.');
+      }
+      for (const url of scripts) {
+        importScripts(String(url));
+      }
+      if (!globalThis.acorn?.parse || !globalThis.astring?.generate) {
+        throw new Error('Failed to initialize the ES module parser runtime in the Node Worker.');
+      }
+    }
+
+    async function startRuntime(config) {
+      const fileSystem = new WorkerFileSystemProxy(config.files || [], (path, data) => {
+        self.postMessage({ type: 'hostRequest', capability: runtime?.capabilityToken, id: nextHostRequestId++, method: 'fs.write', payload: { path, data } }, [data.buffer]);
+      });
+      const network = {
+        request: async (url, baseOrigin, data, type) => {
+          const result = await hostRpc('network.request', { url, baseOrigin, data, type });
+          if (!result) return null;
+          return new Response(result.body, {
+            status: result.status,
+            statusText: result.statusText,
+            headers: result.headers || []
+          });
+        },
+        dispatchEvent: (name, ...args) => postEvent('network', name, ...args)
+      };
+      const nodeEmulator = {
+        domain: String(config.domain || ''),
+        rootfolder: String(config.rootfolder || '').replace(/^\/+|\/+$/g, ''),
+        pathPrefix: String(config.pathPrefix || '/').startsWith('/') ? String(config.pathPrefix || '/') : '/' + String(config.pathPrefix || '/'),
+        source: undefined,
+        filesystem: fileSystem,
+        cwd: String(config.cwd || '/'),
+        previousCwd: String(config.cwd || '/'),
+        env: Object.assign({}, config.env || {}),
+        fileSystemSync: config.fileSystemSync !== false,
+        network,
+        npm: null,
+        dispatchEvent: (name, ...args) => postEvent(name, ...args)
+      };
+      // The Worker itself is the Node global scope. Keep the public runtime
+      // namespace on `global`/`globalThis` rather than creating a fake window.
+      const compat = globalThis;
+      try {
+        const runtimeOrigin = String(config.domain || 'http://127.0.0.1').replace(/\/+$/, '');
+        const runtimePathRaw = String(config.pathPrefix || '/');
+        const runtimePath = runtimePathRaw.startsWith('/') ? runtimePathRaw : '/' + runtimePathRaw;
+        const virtualUrl = new URL(runtimePath || '/', runtimeOrigin + '/');
+        compat.__nodeLocation = {
+          href: virtualUrl.href,
+          origin: virtualUrl.origin,
+          protocol: virtualUrl.protocol,
+          host: virtualUrl.host,
+          hostname: virtualUrl.hostname,
+          port: virtualUrl.port,
+          pathname: virtualUrl.pathname,
+          search: virtualUrl.search,
+          hash: virtualUrl.hash,
+          reload() {},
+          assign() {},
+          replace() {}
+        };
+      } catch (_) {}
+      compat.fileSystem = fileSystem;
+      compat.nodeEmulator = nodeEmulator;
+      compat.network = network;
+      globalThis.__runtimeCompat = compat;
+      globalThis.global = globalThis;
+      globalThis.__hostOrigin = String(config.hostOrigin || '');
+      globalThis.__hostURL = String(config.hostURL || '');
+      // The existing fs/npm/module resolver implementations use the global
+      // FileSystem binding. In the Worker this must point at the proxied
+      // filesystem created above rather than the host-page object.
+      globalThis.fileSystem = fileSystem;
+      globalThis.filesystem = fileSystem;
+      compat.fileSystem = fileSystem;
+  
+      runtime = {
+        compat,
+        nodeEmulator,
+        fileSystem,
+        capabilityToken: String(config.capabilityToken || ''),
+        nextSocketId: 1,
+        sockets: new Map()
+      };
+  
+      try {
+        if (config.enableESModules !== false) loadModuleParserRuntime(config);
+        const fn = new Function(`return (${config.nodeExecution});`)();
+        fn({
+          
+          nodeEmulator,
+          rpc: hostRpc,
+          hostOrigin: config.hostOrigin,
+          hostURL: config.hostURL,
+          currentPageUrl: config.currentPageUrl,
+          baseOrigin: config.baseOrigin,
+          location: compat.__nodeLocation
+        });
+
+        // nodeExecution installs its runtime APIs directly on `global`.
+
+        self.postMessage({ type: 'ready' });
+      } catch (error) {
+        self.postMessage({ type: 'initError', error: serializeThrown(error) });
+        throw error;
+      }
+    }
+  
+    self.onmessage = async event => {
+      const message = event.data || {};
+      try {
+        if (message.type === 'init') {
+          await startRuntime(message.config);
+          return;
+        }
+        if (message.type === 'hostResponse') {
+          const pending = hostRequests.get(message.id);
+          if (!pending) return;
+          hostRequests.delete(message.id);
+          if (message.ok) pending.resolve(message.value);
+          else pending.reject(Object.assign(new Error(message.error?.message || 'Host RPC failed'), message.error || {}));
+          return;
+        }
+        if (message.type === 'syncFilesystem' && runtime) {
+          runtime.fileSystem.replaceSnapshot(message.files || []);
+          runtime.nodeEmulator.filesystem = runtime.fileSystem;
+          globalThis.fileSystem = runtime.fileSystem;
+          return;
+        }
+        if (message.type === 'rpc') {
+          const value = await handleRpc(message);
+          const transfer = [];
+          if (value && value.body instanceof ArrayBuffer) transfer.push(value.body);
+          self.postMessage({ type: 'rpcResult', id: message.id, ok: true, value }, transfer);
+          return;
+        }
+      } catch (error) {
+        if (message.type === 'rpc') {
+          self.postMessage({ type: 'rpcResult', id: message.id, ok: false, error: serializeThrown(error) });
+        } else if (message.type === 'init') {
+          self.postMessage({ type: 'initError', error: serializeThrown(error) });
+        }
+      }
+    };
+  }
 
   class NodeEndpoint extends NetworkEndpoint {
-    constructor(emulator, enabled = true) {
-      super(enabled);
-      this.emulator = emulator;
-    }
-    async handleRequest(request,type) {
-      if (!this.emulator?.context?.handleRequest) return null;
-      var response = await this.emulator.context.handleRequest(request, type);
-      if (response) Object.setPrototypeOf(response, Response.prototype);
-      return response;
+    constructor(emulator, enabled = true) { super(enabled); this.emulator = emulator; }
+    async handleRequest(request, type) {
+      if (!this.emulator) return null;
+      return await this.emulator._handleNetworkRequest(request, type);
     }
     async handleSocket(absoluteUrl, protocols) {
-      if (!this.emulator?.context?.handleRequest) return null;
-      return await this.emulator.context.handleSocket(absoluteUrl, protocols);
+      if (!this.emulator) return null;
+      return await this.emulator._handleNetworkSocket(absoluteUrl, protocols);
     }
   }
 
   class NodeEmulator extends EventHandler {
     constructor(options = {}) {
       super(options.enabled ?? true);
-
-      this.domain = String(options.domain || "").replace(/\/+$/ ,"");
-      this.rootfolder = String(options.rootfolder || "").replace(/^\/+|\/+$/g,"");
+      this.domain = String(options.domain || "").replace(/\/+$/, "");
+      this.rootfolder = String(options.rootfolder || "").replace(/^\/+|\/+$/g, "");
       this.pathPrefix = String(options.pathPrefix || "/").startsWith("/") ? String(options.pathPrefix || "/") : "/" + String(options.pathPrefix || "/");
       this.pathPrefix = this.pathPrefix === "/" ? "/" : this.pathPrefix.replace(/\/+$/, "");
+      this.options = options;
       this.source = options.source;
       this.filesystem = options.filesystem;
       this.cwd = normalizeNodePath(options.cwd || '/');
@@ -3698,94 +4472,352 @@
       this.loaded = false;
       this.env = options.env || {};
       this.fileSystemSync = options.fileSystemSync !== false;
-      this.endpoint = new NodeEndpoint(this);
       this.network = options.network || new Network();
+      this.endpoint = new NodeEndpoint(this);
+      this.worker = null;
+      this.workerUrl = null;
+      this.context = null;
       this.loadError = null;
-      this.contextReady = this.runframe();
+      this._rpcId = 1;
+      this._rpcPending = new Map();
+      this._socketBridges = new Map();
+      this._serverState = new Map();
+      this.npm = null;
+      this._destroyed = false;
+      this._capabilityToken = (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') ? globalThis.crypto.randomUUID() : `${Math.random().toString(36).slice(2)}.${Date.now()}.${Math.random()}`;
+      this.contextReady = this._initialize();
       this.ready = this.load().catch(e => { this.loadError = e; return null; });
     }
-    async load() {
+
+    async _snapshotFilesystem() {
+      if (!this.filesystem) return [];
+      const files = [];
+      const list = typeof this.filesystem.listFilesSync === 'function' ? this.filesystem.listFilesSync() : [];
+      for (const path of list) {
+        try {
+          const raw = this.filesystem.readFileSync(path, 'binary');
+          let data;
+          if (raw instanceof ArrayBuffer) data = raw.slice(0);
+          else if (ArrayBuffer.isView(raw)) data = raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength);
+          else if (typeof raw === 'string') {
+            const bytes = new Uint8Array(raw.length);
+            for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i) & 0xff;
+            data = bytes.buffer;
+          } else data = new TextEncoder().encode(String(raw ?? '')).buffer;
+          files.push({ path: String(path).replace(/^\/+/, ''), data });
+        } catch (_) {}
+      }
+      return files;
+    }
+
+    _snapshotTransferList(files) { return files.map(f => f.data).filter(v => v instanceof ArrayBuffer); }
+
+    _hostOrigin() {
+      try { return location.origin; } catch (_) { return ''; }
+    }
+
+    _config(snapshot) {
+      const hostOrigin = String(this.options?.hostOrigin || this._hostOrigin());
+      let hostURL = String(this.options?.hostURL || '');
+      if (!hostURL) {
+        try { hostURL = String(location.href || ''); } catch (_) {}
+      }
+      let currentPageUrl = 'http://127.0.0.1/';
+      try { currentPageUrl = new URL(hostOrigin + '/').href.replace(/\/$/, '/') + ''; } catch (_) {}
+      let moduleParserUrls = {};
       try {
-        const context = await this.contextReady;
-        if (!context) throw new Error('Node runtime context could not be created.');
-        this.context = context;
-        this.context.nodeEmulator = this;
+        const emulatorScript = Array.from(document.scripts || []).map(script => script.src).find(src => /\/browser\/lib\//.test(src));
+        if (emulatorScript) {
+          moduleParserUrls = {
+            acorn: new URL('../external/acorn.js', emulatorScript).href,
+            astring: new URL('../external/astring.js', emulatorScript).href
+          };
+        }
+      } catch (_) {}
+      if (!moduleParserUrls.acorn || !moduleParserUrls.astring) {
+        try {
+          moduleParserUrls = {
+            acorn: new URL('/editor/browser/external/acorn.js', location.href).href,
+            astring: new URL('/editor/browser/external/astring.js', location.href).href
+          };
+        } catch (_) {}
+      }
+      return {
+        domain: this.domain,
+        rootfolder: this.rootfolder,
+        pathPrefix: this.pathPrefix,
+        cwd: this.cwd,
+        env: this.env,
+        fileSystemSync: this.fileSystemSync,
+        hostOrigin,
+        hostURL,
+        currentPageUrl,
+        baseOrigin: 'http://127.0.0.1/',
+        files: snapshot,
+        enableESModules: true,
+        moduleParserUrls,
+        capabilityToken: this._capabilityToken,
+        nodeExecution: `(${nodeExecution.toString()})`
+      };
+    }
+
+    async _initialize() {
+      try {
         if (!this.filesystem) {
           if (!this.source) throw new Error('No filesystem source was provided to the Node runtime.');
           this.filesystem = await FileSystem.create(this.source, { sync: this.fileSystemSync });
         }
-        this.context.fileSystem = this.filesystem;
-        this.loaded = true;
-        this.dispatchEvent('loaded',this);
-        return this;
+        const snapshot = await this._snapshotFilesystem();
+        const worker = await this._startWorker(this._config(snapshot));
+        this.context = {
+          handleRequest: (request, type) => this._handleNetworkRequest(request, type),
+          handleSocket: (url, protocols) => this._handleNetworkSocket(url, protocols),
+          terminalCommand: cmd => this.terminalCommand(cmd),
+          eval: code => this.evalInContext(code),
+          activeServers: this._serverState
+        };
+        return worker;
       } catch (e) {
         this.loadError = e;
-        this.dispatchEvent('loaderror',e);
         throw e;
       }
     }
-    runframe() {
-      this.iframe = document.createElement('iframe');
-      this.iframe.style.display = "none";
-      this.iframe.src = 'about:blank';
-      (document.body || document.documentElement).appendChild(this.iframe);
 
-      const init = () => {
-        const context = this.iframe.contentWindow || this.iframe.contentDocument?.defaultView || null;
-        const doc = this.iframe.contentDocument || context?.document || null;
-        if (!context || !doc?.body) return false;
-        if (this.context) return true;
-        this.context = context;
-        this.context.nodeEmulator = this;
-        const script = doc.createElement('script');
-        script.innerHTML = `(${nodeExecution.toString()})()`;
-        doc.body.appendChild(script);
-        return true;
-      };
+    async _startWorker(config) {
+      const blob = new Blob([`(${workerBootstrap.toString()})()`], { type: 'application/javascript' });
+      this.workerUrl = URL.createObjectURL(blob);
+      const worker = new Worker(this.workerUrl);
+      this.worker = worker;
+      URL.revokeObjectURL(this.workerUrl);
+      this.workerUrl = null;
 
-      if (init()) return Promise.resolve(this.context);
-      return new Promise((resolve,reject) => {
-        let attempts = 0;
-        const check = () => {
-          if (init()) return resolve(this.context);
-          if (++attempts > 100) return reject(new Error('Node runtime context could not be created.'));
-          setTimeout(check,0);
+      return await new Promise((resolve, reject) => {
+        let settled = false;
+        const fail = error => { if (!settled) { settled = true; try { worker.terminate(); } catch (_) {} reject(error instanceof Error ? error : new Error(String(error))); } };
+        worker.onmessage = event => {
+          const message = event.data || {};
+          if (message.type === 'ready') { if (!settled) { settled = true; resolve(worker); } return; }
+          if (message.type === 'initError') { const error = Object.assign(new Error(message.error?.message || 'Node emulator Worker initialization failed'), message.error || {}); this._handleWorkerMessage(message); fail(error); return; }
+          if (message.type === 'hostRequest') {
+            if (message.capability !== this._capabilityToken) return;
+            Promise.resolve(this._handleHostRequest(message.method, message.payload))
+              .then(value => {
+                const transfer = [];
+                if (value && value.body instanceof ArrayBuffer) transfer.push(value.body);
+                worker.postMessage({ type: 'hostResponse', id: message.id, ok: true, value }, transfer);
+              })
+              .catch(error => worker.postMessage({ type: 'hostResponse', id: message.id, ok: false, error: { name: error.name, message: error.message, stack: error.stack, code: error.code } }));
+            return;
+          }
+          if (message.type === 'event' || message.type === 'rpcResult' || message.type === 'initError') this._handleWorkerMessage(message);
         };
-        check();
+        worker.onerror = event => {
+          const error = new Error(event.message || 'Node emulator Worker failed');
+          this.dispatchEvent('error', error, '[node worker]');
+          for (const [, pending] of this._rpcPending) pending.reject(error);
+          this._rpcPending.clear();
+          fail(error);
+        };
+        worker.onmessageerror = () => fail(new Error('Node emulator Worker message could not be deserialized'));
+        try {
+          const transfers = this._snapshotTransferList(config.files || []);
+          worker.postMessage({ type: 'init', config }, transfers);
+        } catch (e) { fail(e); }
       });
     }
+
+    _sendWorkerRpc(method, payload = {}) {
+      if (!this.worker || this._destroyed) return Promise.reject(new Error('Node emulator Worker is not running'));
+      const id = this._rpcId++;
+      return new Promise((resolve, reject) => {
+        this._rpcPending.set(id, { resolve, reject });
+        try { this.worker.postMessage({ type: 'rpc', id, method, payload }); }
+        catch (e) { this._rpcPending.delete(id); reject(e); }
+      });
+    }
+
+    _handleWorkerMessage(message) {
+      if (message.type === 'rpcResult') {
+        const pending = this._rpcPending.get(message.id);
+        if (!pending) return;
+        this._rpcPending.delete(message.id);
+        if (message.ok) pending.resolve(message.value);
+        else pending.reject(Object.assign(new Error(message.error?.message || 'Node worker RPC failed'), message.error || {}));
+        return;
+      }
+      if (message.type === 'initError') {
+        const error = Object.assign(new Error(message.error?.message || 'Node worker initialization failed'), message.error || {});
+        this.loadError = error;
+        this.dispatchEvent('loaderror', error);
+        return;
+      }
+      if (message.type !== 'event') return;
+      const args = Array.isArray(message.args) ? message.args : [];
+      if (message.name === 'console') {
+        this.dispatchEvent('console', args[0], args[1] || []);
+      } else if (message.name === 'error') {
+        this.dispatchEvent('error', args[0], args[1] || '[node runtime env]');
+      } else if (message.name === 'serverstart') {
+        const port = args[1] != null ? String(args[1]) : null;
+        if (port != null) this._serverState.set(port, { listening: true });
+        this.dispatchEvent('serverstart', args[0], args[1]);
+      } else if (message.name === 'serverclose') {
+        const port = args[1] != null ? String(args[1]) : null;
+        if (port != null) this._serverState.delete(port);
+        this.dispatchEvent('serverclose', args[0], args[1]);
+      } else if (message.name === 'filesystemchange') {
+        this.dispatchEvent('filesystemchange');
+      } else if (message.name === 'network') {
+        try { this.network?.dispatchEvent?.(...args); } catch (e) { this.dispatchEvent('error', e, '[node network]'); }
+      } else if (message.name === 'socket') {
+        const info = args[0] || {};
+        const bridge = this._socketBridges.get(info.socketId);
+        if (!bridge) return;
+        if (info.event === 'open') bridge._onOpen?.();
+        else if (info.event === 'data') bridge._onServerData?.(info.args?.[0]);
+        else if (info.event === 'close') { bridge._onClose?.(info.args?.[0], info.args?.[1]); this._socketBridges.delete(info.socketId); }
+      }
+    }
+
+    async _handleHostRequest(method, payload) {
+      if (method === 'fs.write') {
+        if (!this.filesystem || typeof this.filesystem.writeFileSync !== 'function') throw new Error('FileSystem does not support writeFileSync');
+        const data = payload?.data instanceof Uint8Array ? payload.data : new Uint8Array(payload?.data || []);
+        this.filesystem.writeFileSync(payload.path, data);
+        this.dispatchEvent('filesystemchange');
+        return true;
+      }
+      if (method === 'network.request') {
+        const response = await this.network.request(payload.url, payload.baseOrigin, payload.data || {}, payload.type || 'fetch');
+        if (!response) return null;
+        const body = await response.arrayBuffer();
+        return { status: response.status, statusText: response.statusText, headers: Array.from(response.headers.entries()), body };
+      }
+      if (method === 'npm.run') {
+        const npm = this._getNpmManager();
+        if (!npm) return null;
+        const result = await npm.run(payload?.args || []);
+        await this.syncFilesystem();
+        this.dispatchEvent('filesystemchange');
+        return result;
+      }
+      throw new Error(`Unknown host request: ${method}`);
+    }
+
+    _getNpmManager() {
+      const NpmClass = globalThis.NPM || globalThis.parent?.NPM;
+      if (!NpmClass) return null;
+      const runtimeRoot = String(this.rootfolder || '').replace(/^\/+|\/+$/g, '');
+      if (!this.npm) {
+        this.npm = new NpmClass({
+          filesystem: this.filesystem,
+          network: this.network,
+          rootfolder: runtimeRoot,
+          log: console,
+          env: this.env,
+          commandRunner: async command => await this.terminalCommand(command),
+          onFileSystemChange: () => { try { this.dispatchEvent('filesystemchange'); } catch (_) {} }
+        });
+      } else this.npm.rootfolder = runtimeRoot;
+      return this.npm;
+    }
+
+    async _handleNetworkRequest(request, type) {
+      await this.ready;
+      if (this.loadError) throw this.loadError;
+      let body = null;
+      try { if (request?.body) body = await request.clone().text(); } catch (_) {}
+      const plainRequest = {
+        url: request?.url || '', method: request?.method || 'GET',
+        headers: request?.headers ? Object.fromEntries(request.headers.entries()) : {},
+        body
+      };
+      const result = await this._sendWorkerRpc('handleRequest', { request: plainRequest, type });
+      if (!result) return null;
+      return new Response(result.body, { status: result.status, statusText: result.statusText, headers: result.headers || [] });
+    }
+
+    async _handleNetworkSocket(absoluteUrl, protocols) {
+      await this.ready;
+      if (this.loadError) throw this.loadError;
+      const result = await this._sendWorkerRpc('handleSocket', { url: absoluteUrl, protocols });
+      if (!result?.socketId) return null;
+      const socketId = result.socketId;
+      const bridge = {
+        socketId,
+        _onOpen: null,
+        _onServerData: null,
+        _onClose: null,
+        onClientMessage: data => this._sendWorkerRpc('socket.clientMessage', { socketId, data }),
+        closeClient: (code, reason) => { this._sendWorkerRpc('socket.closeClient', { socketId, code, reason }).catch(() => {}); },
+        sendToClient: data => this._sendWorkerRpc('socket.sendToClient', { socketId, data }).catch(() => {})
+      };
+      this._socketBridges.set(socketId, bridge);
+      return bridge;
+    }
+
+    async syncFilesystem() {
+      await this.ready.catch(() => {});
+      if (!this.worker || !this.filesystem) return false;
+      const files = await this._snapshotFilesystem();
+      const transfers = this._snapshotTransferList(files);
+      this.worker.postMessage({ type: 'syncFilesystem', files }, transfers);
+      return true;
+    }
+
     hasListeningServer() {
-      try {
-        const servers = this.context?.activeServers;
-        if (!servers || typeof servers.values !== 'function') return false;
-        for (const server of servers.values()) {
-          if (server?.listening) return true;
-        }
-      } catch (_) {}
+      for (const state of this._serverState.values()) if (state?.listening) return true;
       return false;
     }
+
     async waitForServer(timeout = 10000, interval = 50) {
       const start = Date.now();
       while (Date.now() - start <= timeout) {
         if (this.hasListeningServer()) return true;
+        try {
+          const ports = await this._sendWorkerRpc('getServerState', {});
+          if (Array.isArray(ports) && ports.length) return true;
+        } catch (_) {}
         await new Promise(r => setTimeout(r, interval));
       }
       return this.hasListeningServer();
     }
-    destroy() {
-      try { this.iframe?.remove(); } catch (e) {}
-      this.context = null;
-      this.loaded = false;
+
+    async load() {
+      try {
+        await this.contextReady;
+        this.loaded = true;
+        this.dispatchEvent('loaded', this);
+        return this;
+      } catch (e) {
+        this.loadError = e;
+        this.dispatchEvent('loaderror', e);
+        throw e;
+      }
     }
+
     async terminalCommand(cmd) {
       await this.ready;
       if (this.loadError) throw this.loadError;
-      return await this.context.terminalCommand(cmd);
+      return await this._sendWorkerRpc('terminalCommand', { cmd: String(cmd ?? '') });
     }
+
     async evalInContext(code) {
       await this.ready;
       if (this.loadError) throw this.loadError;
-      return await this.context.eval(code);
+      return await this._sendWorkerRpc('eval', { code: String(code ?? '') });
+    }
+
+    destroy() {
+      this._destroyed = true;
+      for (const [, pending] of this._rpcPending) pending.reject(new Error('Node emulator destroyed'));
+      this._rpcPending.clear();
+      this._socketBridges.clear();
+      try { this.worker?.terminate(); } catch (_) {}
+      this.worker = null;
+      this.context = null;
+      this.loaded = false;
+      this._serverState.clear();
     }
   }
 

@@ -31,6 +31,10 @@
       this.root.addEventListener('drop', e => this.handleDrop(e));
       document.addEventListener('dragend', this._onDragEnd);
       this.createGroup();
+      // The workbench can be opened programmatically immediately after
+      // construction (for example by an extension). Render the initial group
+      // synchronously so its tab/view DOM exists before addTab/activateTab.
+      this.rebuild();
     }
     notifyLayoutChange() {
       if (!this.restoring) this.onLayoutChange(this.serialize());
@@ -273,12 +277,20 @@
         icon.className = 'tab-icon';
         if (t.icon) {
           try {
-            const raw = String(t.icon).replace(/^\s*<\?xml[^>]*>\s*/i, '').trim();
+            const raw = String(t.icon).trim();
             const tpl = document.createElement('template');
             tpl.innerHTML = raw;
+            const img = tpl.content.querySelector('img');
             const svg = tpl.content.querySelector('svg');
-            if (svg) icon.appendChild(svg.cloneNode(true)); else icon.textContent = '';
-          } catch (_) {
+            if (img) {
+              img.style.width = '100%';
+              img.style.height = '100%';
+              img.style.objectFit = 'contain';
+              icon.appendChild(img.cloneNode(true));
+            } else if (svg) {
+              icon.appendChild(svg.cloneNode(true));
+            }
+          } catch(e) {
             icon.textContent = '';
           }
         }
@@ -307,7 +319,10 @@
           el.classList.add('dragging');
           document.body.classList.add('workbench-dragging');
           e.dataTransfer.effectAllowed = 'move';
-          e.dataTransfer.setData('text/plain', 'workbench-tab:' + t.id);
+          e.dataTransfer.setData('application/x-editor-workbench-tab', t.id);
+          // Never expose internal tab identifiers as plain text: dropping a tab
+          // onto a browser/preview surface must not navigate it to our drag token.
+          e.dataTransfer.setData('text/plain', '');
         });
         el.addEventListener('dragend', () => {
           el.classList.remove('dragging');

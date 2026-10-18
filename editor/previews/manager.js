@@ -43,26 +43,42 @@
       if (!view) return false;
       const tab = group?.tabs?.find(t => t.id === file.id) || file;
 
-      // Preview ownership lives here. Temporarily activating another tab must
-      // not dispose the embedded editor; the same host can be reattached later.
-      if (tab._previewHost && tab._previewViewId === id) {
-        if (tab._previewHost.parentNode !== host) host.appendChild(tab._previewHost);
-        if (tab._previewPromise) {
-          try { await tab._previewPromise; } catch (_) {}
+      // Keep a live preview instance for every view of a file. Switching tabs,
+      // moving groups, or changing between preview views must detach/reattach
+      // the existing DOM instead of destroying embedded editors such as Piskel.
+      const instances = (tab._previewInstances ||= new Map());
+      let instance = instances.get(id);
+
+      if (instance?.host) {
+        if (instance.host.parentNode !== host) host.appendChild(instance.host);
+        const frame = instance.host.querySelector?.('iframe');
+        if (frame?.contentWindow) {
+          try { frame.contentWindow.dispatchEvent(new Event('resize')); } catch (_) {}
         }
-        return !!tab._previewHost;
+        if (instance.promise) {
+          try { await instance.promise; } catch (_) {}
+        }
+        tab._previewHost = instance.host;
+        tab._previewViewId = id;
+        return !instance.host.dataset.disposed;
       }
 
-      // A different preview view is being opened, so the previous preview
-      // must really be disposed before constructing the new one.
-      if (tab._previewHost || tab._previewViewId) this.dispose(tab);
-
-      const generation = (tab._previewGeneration || 0) + 1;
+      const generation = (tab._previewGeneration ||= 0) + 1;
       tab._previewGeneration = generation;
       const previewHost = document.createElement('div');
       previewHost.className = 'editor-preview-surface';
       previewHost.style.cssText = 'position:relative;width:100%;height:100%;min-height:0;overflow:hidden;';
       host.appendChild(previewHost);
+
+      instance = {
+        id,
+        host: previewHost,
+        promise: null,
+        cleanups: [],
+        urls: [],
+        generation
+      };
+      instances.set(id, instance);
       tab._previewHost = previewHost;
       tab._previewViewId = id;
 
@@ -100,7 +116,7 @@
           const data = this.state.fs.readFileSync(path, 'binary');
           if (!data) return null;
           const url = URL.createObjectURL(new Blob([data], { type: type || (EditorInferMime ? EditorInferMime(path) : 'application/octet-stream') }));
-          (tab._previewURLs ||= []).push(url);
+          instance.urls.push(url);
           return url;
         },
         markDirty: path => {
@@ -108,42 +124,56 @@
           this.state.updateStatus?.();
         },
         isActive: () => group?.active === file.id && tab.view === id && tab._viewActivation === activation,
-        isCurrent: () => tab._previewGeneration === generation && tab._previewViewId === id && !previewHost.dataset.disposed,
+        isCurrent: () => instances.get(id) === instance && !previewHost.dataset.disposed,
         addCleanup: cleanup => {
           if (typeof cleanup !== 'function') return;
-          (tab._previewCleanups ||= []).push(cleanup);
+          instance.cleanups.push(cleanup);
         }
       };
+
       try {
         const promise = Promise.resolve().then(() => view.create(context));
-        tab._previewPromise = promise;
+        instance.promise = promise;
         await promise;
       } catch (error) {
-        if (context.isCurrent()) this.dispose(tab);
+        if (context.isCurrent()) this.dispose(tab, id);
         throw error;
       } finally {
-        if (tab._previewPromise) tab._previewPromise = null;
+        if (instances.get(id) === instance) instance.promise = null;
       }
       return context.isCurrent();
     }
-    dispose(file) {
+    dispose(file, id = null) {
       if (!file) return;
+      const instances = file._previewInstances;
+      if (!instances) return;
+
+      const disposeInstance = (key, instance) => {
+        if (!instance) return;
+        instance.host.dataset.disposed = '1';
+        for (const cleanup of instance.cleanups || []) {
+          try { cleanup(); } catch (_) {}
+        }
+        instance.cleanups = [];
+        for (const url of instance.urls || []) {
+          try { URL.revokeObjectURL(url); } catch (_) {}
+        }
+        instance.urls = [];
+        try { instance.host.remove(); } catch (_) {}
+        instances.delete(key);
+      };
+
+      if (id != null) {
+        disposeInstance(id, instances.get(id));
+      } else {
+        for (const [key, instance] of [...instances]) disposeInstance(key, instance);
+      }
+
       file._previewGeneration = (file._previewGeneration || 0) + 1;
-      if (file._previewHost) file._previewHost.dataset.disposed = '1';
-      for (const cleanup of file?._previewCleanups || []) {
-        try { cleanup(); } catch (_) {}
-      }
-      file._previewCleanups = [];
-      for (const url of file?._previewURLs || []) {
-        try { URL.revokeObjectURL(url); } catch (_) {}
-      }
-      file._previewURLs = [];
-      if (file?._previewHost) {
-        try { file._previewHost.remove(); } catch (_) {}
-      }
       file._previewHost = null;
       file._previewViewId = null;
       file._previewPromise = null;
+      if (!instances.size) delete file._previewInstances;
     }
   }
   window.EditorPreviewManager = EditorPreviewManager;

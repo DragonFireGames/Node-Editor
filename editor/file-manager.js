@@ -1,4 +1,21 @@
 (function () {
+  const EDITOR_FILE_MIME_TYPES = Object.freeze({
+    html: 'text/html', htm: 'text/html', css: 'text/css',
+    js: 'text/javascript', mjs: 'text/javascript', cjs: 'text/javascript',
+    json: 'application/json', map: 'application/json', xml: 'application/xml',
+    txt: 'text/plain', md: 'text/markdown', csv: 'text/csv',
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+    webp: 'image/webp', avif: 'image/avif', svg: 'image/svg+xml', bmp: 'image/bmp', ico: 'image/x-icon',
+    mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4',
+    mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime',
+    pdf: 'application/pdf', zip: 'application/zip', wasm: 'application/wasm',
+    gltf: 'model/gltf+json', glb: 'model/gltf-binary',
+    woff: 'font/woff', woff2: 'font/woff2', ttf: 'font/ttf', otf: 'font/otf'
+  });
+  function editorFileMimeType(name) {
+    const ext = String(name || '').split('.').pop().toLowerCase();
+    return EDITOR_FILE_MIME_TYPES[ext] || '';
+  }
   class FileManager {
     constructor(options = {}) {
       this.fs = options.fs || null;
@@ -203,11 +220,7 @@
         e.preventDefault();
         e.stopPropagation();
         rootList.classList.remove('draghover');
-        const raw = e.dataTransfer.getData('application/x-file-manager-paths') || e.dataTransfer.getData('text/plain');
-        if (!raw) return;
-        let paths;
-        try { paths = JSON.parse(raw); } catch (_) { paths = [raw]; }
-        this.handleMoveMany(paths, this.root).catch(err => this.report(err));
+        this.handleDrop(e, this.root).catch(err => this.report(err));
       };
       buttons.querySelector('#collapseall').onclick = () => this.collapseAll();
       buttons.querySelector('#newfile').onclick = () => this.createFile(this.selectedNode || this.root);
@@ -248,24 +261,7 @@
         container.querySelectorAll('.draghover').forEach(el => el.classList.remove('draghover'));
         const targetLi = e.target.closest?.('li[data-path]');
         const targetNode = targetLi ? this.nodeByPath.get(targetLi.dataset.path) || this.root : this.root;
-        const browserToken = e.dataTransfer.getData('application/x-proxy-download');
-        if (browserToken) {
-          try {
-            const file = window.__editorFileDropBridge?.take?.(browserToken);
-            if (file) return this.uploadFiles([file], targetNode).catch(err => this.report(err));
-          } catch (err) {
-            this.report(err);
-            return;
-          }
-        }
-        const files = e.dataTransfer.files;
-        if (files.length) return this.uploadFiles(files, targetNode).catch(err => this.report(err));
-        const raw = e.dataTransfer.getData('application/x-file-manager-paths') || e.dataTransfer.getData('text/plain');
-        if (raw) {
-          let paths;
-          try { paths = JSON.parse(raw); } catch (_) { paths = [raw]; }
-          this.handleMoveMany(paths, targetNode).catch(err => this.report(err));
-        }
+        this.handleDrop(e, targetNode).catch(err => this.report(err));
       };
     }
     renderNode(node) {
@@ -316,6 +312,7 @@
           this.showContextMenu(e.clientX, e.clientY);
         };
         li.draggable = true;
+        let editorFileDropToken = '';
         li.ondragstart = e => {
           const sourceLi = e.target?.closest?.('li[data-path]');
           if (sourceLi !== li) return;
@@ -323,10 +320,40 @@
           const paths = [...this.selectedNodes];
           e.dataTransfer.setData('text/plain', JSON.stringify(paths));
           e.dataTransfer.setData('application/x-file-manager-paths', JSON.stringify(paths));
-          e.dataTransfer.effectAllowed = 'move';
+          // Keep internal explorer drags as moves, while also exposing selected files
+          // to the embedded browser's custom upload picker through a separate type.
+          e.dataTransfer.effectAllowed = 'copyMove';
+          if (editorFileDropToken) window.__editorFileDropBridge?.release?.(editorFileDropToken);
+          editorFileDropToken = '';
+          const selectedFiles = paths
+            .map(path => this.nodeByPath.get(path))
+            .filter(node => node && !node.isDir)
+            .map(node => ({path: node.path, name: node.name}));
+          if (selectedFiles.length && this.fs && typeof File === 'function') {
+            const sourceFs = this.fs;
+            editorFileDropToken = window.__editorFileDropBridge?.registerProvider?.(() => {
+              const files = [];
+              for (const item of selectedFiles) {
+                const bytes = sourceFs.readFileSync(item.path, 'binary');
+                if (bytes == null) throw new Error('File no longer exists: ' + item.path);
+                files.push(new File([bytes], item.name, {
+                  type: editorFileMimeType(item.name),
+                  lastModified: Date.now()
+                }));
+              }
+              return files;
+            }) || '';
+            if (editorFileDropToken) {
+              e.dataTransfer.setData('application/x-wk-editor-files', editorFileDropToken);
+            }
+          }
           li.classList.add('dragging');
         };
-        li.ondragend = () => li.classList.remove('dragging');
+        li.ondragend = () => {
+          li.classList.remove('dragging');
+          if (editorFileDropToken) window.__editorFileDropBridge?.release?.(editorFileDropToken);
+          editorFileDropToken = '';
+        };
         li.ondragover = e => {
           e.preventDefault();
           li.classList.add('draghover');
@@ -336,30 +363,47 @@
           e.preventDefault();
           e.stopPropagation();
           li.classList.remove('draghover');
-          const browserToken = e.dataTransfer.getData('application/x-proxy-download');
-          if (browserToken) {
-            try {
-              const file = window.__editorFileDropBridge?.take?.(browserToken);
-              if (file) {
-                const destination = child.isDir ? child : this.nodeByPath.get(this.pathBase(child.path)) || this.root;
-                return this.uploadFiles([file], destination).catch(err => this.report(err));
-              }
-            } catch (err) {
-              this.report(err);
-              return;
-            }
-          }
-          const raw = e.dataTransfer.getData('application/x-file-manager-paths') || e.dataTransfer.getData('text/plain');
-          if (raw) {
-            let paths;
-            try { paths = JSON.parse(raw); } catch (_) { paths = [raw]; }
-            this.handleMoveMany(paths, child).catch(err => this.report(err));
-          }
+          const destination = child.isDir
+            ? child
+            : this.nodeByPath.get(this.pathBase(child.path)) || this.root;
+          this.handleDrop(e, destination).catch(err => this.report(err));
         };
         if (child.isDir) li.appendChild(this.renderNode(child));
         ul.appendChild(li);
       }
       return ul;
+    }
+    async handleDrop(e, targetNode) {
+      const transfer = e.dataTransfer;
+      const browserToken = transfer.getData('application/x-proxy-download');
+      const browserDownloadId = transfer.getData('application/x-proxy-download-id');
+
+      if (browserToken || browserDownloadId) {
+        if (!browserToken) {
+          throw new Error('The browser download could not be transferred. Try dragging it again.');
+        }
+        const payload = await window.__editorFileDropBridge?.take?.(browserToken);
+        const files = (Array.isArray(payload) ? payload : [payload]).filter(file =>
+          file && typeof file.name === 'string' && typeof file.arrayBuffer === 'function'
+        );
+        if (!files.length) {
+          throw new Error('The downloaded file is no longer available. Try dragging it again.');
+        }
+        await this.uploadFiles(files, targetNode);
+        return;
+      }
+
+      if (transfer.files?.length) {
+        await this.uploadFiles(transfer.files, targetNode);
+        return;
+      }
+
+      const raw = transfer.getData('application/x-file-manager-paths') || transfer.getData('text/plain');
+      if (raw) {
+        let paths;
+        try { paths = JSON.parse(raw); } catch (_) { paths = [raw]; }
+        await this.handleMoveMany(paths, targetNode);
+      }
     }
     visibleNodes() {
       return [...this.tree.querySelectorAll('li[data-path]')]

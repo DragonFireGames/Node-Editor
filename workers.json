@@ -1,5 +1,5 @@
 {
-  "proxy": "https://proxy.dragonfire7z.workers.dev/",
-  "fallbackProxy": false,
-  "github": "https://github-auth.dragonfire7z.workers.dev/"
+  "proxy": "https://proxy.watermelonkatana.workers.dev/",
+  "fallbackProxy": "https://proxy.dragonfire7z.workers.dev/",
+  "github": "https://github-auth.watermelonkatana.workers.dev/"
 }

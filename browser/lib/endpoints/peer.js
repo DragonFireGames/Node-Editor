@@ -737,18 +737,39 @@
     let endpoint = null;
     let server = null;
     let checking = false;
+    let ownsServer = false;
+
+    function startHostKeepAlive() {
+      if (!ownsServer) return;
+      try { window.keepAlive?.enable?.(); } catch (_) {}
+      try { window.keepAlive?.start?.(); } catch (_) {}
+    }
+
+    function stopHostKeepAlive() {
+      if (!ownsServer) return;
+      try { window.keepAlive?.stop?.(); } catch (_) {}
+      try { window.keepAlive?.disable?.(); } catch (_) {}
+    }
 
     async function ensure() {
       if (checking) return;
       checking = true;
 
       try {
-        if (server && !server.closed) return;
+        if (server && !server.closed) {
+          startHostKeepAlive();
+          return;
+        }
 
         const exists = await peerServerExists(normalized);
 
         if (exists) {
+          // Another page is already hosting this peer server. This caller is
+          // a client, so it must not claim ownership of host keepalive.
           server = null;
+          endpoint = null;
+          ownsServer = false;
+          stopHostKeepAlive();
           return;
         }
 
@@ -757,10 +778,13 @@
 
         try {
           await server.ready;
-          try { window.keepAlive?.enable?.(); window.keepAlive?.start?.(); } catch (_) {}
+          ownsServer = true;
+          startHostKeepAlive();
         } catch (error) {
+          try { await server.close(); } catch (_) {}
           server = null;
           endpoint = null;
+          ownsServer = false;
           if (error && /^A PeerServer is already registered for /i.test(String(error.message || error))) return;
           throw error;
         }
@@ -774,10 +798,16 @@
     const timer = setInterval(async function() {
       if (server && !server.closed) {
         const exists = await peerServerExists(normalized);
-        if (exists) return;
+        if (exists) {
+          startHostKeepAlive();
+          return;
+        }
 
         try { await server.close(); } catch (_) {}
         server = null;
+        endpoint = null;
+        stopHostKeepAlive();
+        ownsServer = false;
       }
 
       try {
@@ -794,12 +824,22 @@
       get endpoint() {
         return endpoint;
       },
+      get hosting() {
+        return ownsServer;
+      },
       close() {
         clearInterval(timer);
-        if (server) server.close();
+        const owned = ownsServer;
+        if (server) {
+          try { server.close(); } catch (_) {}
+        }
         server = null;
         endpoint = null;
-        try { window.keepAlive?.disable?.(); } catch (_) {};
+        if (owned) {
+          try { window.keepAlive?.stop?.(); } catch (_) {}
+          try { window.keepAlive?.disable?.(); } catch (_) {}
+        }
+        ownsServer = false;
       }
     };
   }

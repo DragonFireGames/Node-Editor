@@ -14,6 +14,10 @@
         el.controls = true;
         el.src = ctx.getURL();
         ctx.host.appendChild(el);
+        ctx.addCleanup(() => {
+          try { el.pause(); } catch (_) {}
+          try { el.removeAttribute('src'); el.load(); } catch (_) {}
+        });
       }
     }]
   });

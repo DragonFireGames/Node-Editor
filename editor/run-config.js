@@ -10,7 +10,10 @@
         runfile: '/index.html',
         nodeCommand: 'node server.js',
         cwd: '/',
-        autoClear: true
+        autoClear: true,
+        usePeerServer: false,
+        peerLayer: '',
+        saveEnvironmentVariables: false
       };
       this.load();
     }

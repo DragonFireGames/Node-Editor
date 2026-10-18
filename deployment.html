@@ -8,30 +8,62 @@
 html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color:#ddd;font:13px system-ui,sans-serif}
 #status{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;color:#999;background:#000;z-index:10;pointer-events:none}
 #status.error{color:#f0a0a8;white-space:pre-wrap;text-align:center;padding:24px;box-sizing:border-box}
+#progress{position:fixed;left:50%;top:50%;width:min(520px,calc(100vw - 48px));transform:translate(-50%,-50%);z-index:11;color:#aaa;text-align:center}
+#progress.hidden{display:none}
+#progressTitle{font-size:14px;margin-bottom:12px;color:#ddd}
+#progressTrack{width:100%;height:8px;border-radius:999px;background:#202020;overflow:hidden;box-shadow:inset 0 0 0 1px #303030}
+#progressBar{height:100%;width:0%;background:#3cdfa9;border-radius:999px;transition:width .12s ease}
+#progress.indeterminate #progressBar{width:35%;animation:deploymentProgress 1.15s ease-in-out infinite}
+#progressMeta{margin-top:9px;font-size:12px;color:#777;min-height:16px}
+@keyframes deploymentProgress{0%{transform:translateX(-130%)}100%{transform:translateX(360%)}}
 #stage{position:fixed;inset:0;display:none;background:#000}
 #stage.ready{display:block}
 #stage iframe{width:100%;height:100%;border:0;display:block;background:#fff}
 </style>
-<script src="browser/external/acorn.js"></script>
-<script src="browser/external/acorn-walk.js"></script>
-<script src="browser/external/astring.js"></script>
-<script src="browser/external/jszip.js"></script>
-<script src="browser/lib/filesystem.js"></script>
-<script src="browser/lib/network.js"></script>
-<script src="browser/lib/emulator.js"></script>
-<script src="browser/lib/npm.js"></script>
-<script src="browser/lib/endpoints/app.js"></script>
-<script src="browser/lib/endpoints/static.js"></script>
-<script src="browser/external/peer.js"></script>
-<script src="browser/lib/keepalive.js"></script>
-<script>window.__peerLayer = new URLSearchParams(location.search).get('peerLayer') || 'peer';</script>
-<script src="browser/lib/endpoints/peer.js"></script>
+<script>
+window.__deploymentAssetsReady = (async function() {
+  const sources = [
+    'browser/external/acorn.js',
+    'browser/external/acorn-walk.js',
+    'browser/external/astring.js',
+    'browser/external/jszip.js',
+    'browser/lib/filesystem.js',
+    'browser/lib/network.js',
+    'browser/lib/emulator.js',
+    'browser/lib/npm.js',
+    'browser/lib/endpoints/app.js',
+    'browser/lib/endpoints/static.js',
+    'browser/external/peer.js',
+    'browser/lib/keepalive.js',
+    'browser/lib/endpoints/peer.js'
+  ];
+
+  // Keep asset references relative to this deployment document. Do not resolve
+  // them through the emulated project URL.
+
+  for (const source of sources) {
+    const script = document.createElement('script');
+    script.src = source;
+    await new Promise((resolve, reject) => {
+      script.addEventListener('load', resolve, {once:true});
+      script.addEventListener('error', () => reject(new Error('Failed to load deployment asset: ' + script.src)), {once:true});
+      document.head.appendChild(script);
+    });
+  }
+})(); 
+</script>
 </head>
 <body>
 <div id="stage"></div>
 <div id="status">Loading deployment…</div>
+<div id="progress">
+  <div id="progressTitle">Loading deployment…</div>
+  <div id="progressTrack"><div id="progressBar"></div></div>
+  <div id="progressMeta"></div>
+</div>
 <script>
 window.__deploymentNetworkReady = (async function() {
+  await window.__deploymentAssetsReady;
   const workers = await fetch('workers.json',{cache:'no-store'}).then(async r => {
     if (!r.ok) throw new Error(`Failed to load workers.json (${r.status}).`);
     return await r.json();
@@ -43,26 +75,114 @@ window.__deploymentNetworkReady = (async function() {
   const network = new Network();
   const native = new NetworkEndpoint(true, true);
   native.__networkRole = 'native';
-  const configuredFallbackProxy = typeof workers.fallbackProxy === 'string' ? workers.fallbackProxy.trim() : '';
-  const selectedProxy = configuredFallbackProxy || String(workers.proxy || '');
-  const proxy = new ProxyNetworkEndpoint(selectedProxy, true, !!selectedProxy);
-  network.appendEndpoint(native);
-  network.appendEndpoint(proxy);
+
+  // Keep the deployment network's base endpoints aligned with the browser:
+  // native fetch is the default error source, followed by the primary proxy
+  // and the optional fallback proxy.
+  const primaryProxyUrl = String(workers.proxy || '').trim();
+  const fallbackProxyUrl = typeof workers.fallbackProxy === 'string' ? workers.fallbackProxy.trim() : '';
+  const primaryProxy = new ProxyNetworkEndpoint(primaryProxyUrl, true, !!primaryProxyUrl);
+  const fallbackProxy = new ProxyNetworkEndpoint(fallbackProxyUrl, true, !!fallbackProxyUrl);
+
+  network.setEndpoints([
+    native,
+    primaryProxy,
+    fallbackProxy
+  ]);
+  network.__deploymentBaseEndpoints = {
+    native,
+    primary: primaryProxy,
+    fallback: fallbackProxy
+  };
   return network;
 })();
 
 (async () => {
   const status = document.getElementById('status');
   const stage = document.getElementById('stage');
+  const progress = document.getElementById('progress');
+  const progressTitle = document.getElementById('progressTitle');
+  const progressBar = document.getElementById('progressBar');
+  const progressMeta = document.getElementById('progressMeta');
   const params = new URLSearchParams(location.search);
-  const githubURL = params.get('github') || params.get('githubUrl') || '';
-  let resolvedCommit = params.get('commit') || params.get('sha') || '';
-  const requestedPath = params.get('path') || params.get('url') || '';
-  let usePeerNetwork = params.has('usePeerNetwork') ? (params.get('usePeerNetwork') === '1' || params.get('usePeerNetwork') === 'true' || params.get('usePeerNetwork') === '') : null;
+
+  function formatBytes(bytes) {
+    const n = Number(bytes) || 0;
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  }
+
+  function setProgress(title, percent = null, meta = '') {
+    progress.classList.remove('hidden');
+    progress.classList.toggle('indeterminate', percent == null);
+    progressTitle.textContent = title;
+    progressMeta.textContent = meta;
+    if (percent != null && Number.isFinite(Number(percent))) {
+      progressBar.style.width = `${Math.max(0, Math.min(100, Number(percent)))}%`;
+    }
+  }
+
+  function hideProgress() {
+    progress.classList.add('hidden');
+    progress.classList.remove('indeterminate');
+  }
+
+  async function responseToBlobWithProgress(response, label) {
+    const total = Number(response.headers?.get?.('content-length')) || 0;
+    if (!response.body?.getReader) {
+      setProgress(label, total ? 12 : null, total ? formatBytes(total) : 'Preparing download…');
+      const blob = await response.blob();
+      setProgress(label, 100, formatBytes(blob.size));
+      return blob;
+    }
+
+    const reader = response.body.getReader();
+    const chunks = [];
+    let received = 0;
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      chunks.push(value);
+      received += value.byteLength;
+      const percent = total ? (received / total) * 100 : null;
+      setProgress(
+        label,
+        percent,
+        total ? `${formatBytes(received)} / ${formatBytes(total)}` : `${formatBytes(received)} downloaded`
+      );
+    }
+
+    const blob = new Blob(chunks, {type: response.headers?.get?.('content-type') || 'application/zip'});
+    setProgress(label, 100, formatBytes(blob.size));
+    return blob;
+  }
   const network = await window.__deploymentNetworkReady;
+
+  function requiredParam(name) {
+    if (!params.has(name)) throw new Error(`Deployment requires a ${name} query parameter.`);
+    const value = String(params.get(name) || '').trim();
+    if (!value) throw new Error(`Deployment requires a non-empty ${name} query parameter.`);
+    return value;
+  }
+
+  function requiredPresence(name) {
+    if (!params.has(name)) throw new Error(`Deployment requires a ${name} query parameter.`);
+    return String(params.get(name) || '');
+  }
+
+  function requiredBooleanParam(name) {
+    const raw = requiredParam(name).toLowerCase();
+    if (raw === '1' || raw === 'true') return true;
+    if (raw === '0' || raw === 'false') return false;
+    throw new Error(`Deployment parameter ${name} must be true/false.`);
+  }
 
   function showError(error) {
     console.error(error);
+    hideProgress();
     status.textContent = error?.message || String(error);
     status.className = 'error';
   }
@@ -84,12 +204,21 @@ window.__deploymentNetworkReady = (async function() {
     const codeload = `https://codeload.github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/zip/${encodeURIComponent(ref).replace(/%2F/g,'/')}`;
     const response = await network.request(codeload, undefined, {}, 'deployment-archive');
     if (!response.ok) throw new Error(`GitHub archive download failed (${response.status}).`);
-    const blob = await response.blob();
+    setProgress('Downloading project archive…', response.headers?.get?.('content-length') ? 0 : null, 'Connecting to GitHub…');
+    const blob = await responseToBlobWithProgress(response, 'Downloading project archive…');
     if (!blob.size) throw new Error('GitHub returned an empty project archive.');
     return blob;
   }
-  function flattenZip(file, projectName, owner = '', revision = '') {
-    return JSZip.loadAsync(file).then(async zip => {
+  function flattenZip(file) {
+    setProgress('Inspecting project archive…', 0, 'Reading ZIP structure…');
+    return JSZip.loadAsync(file, {
+      createFolders: true,
+      onUpdate: meta => setProgress(
+        'Inspecting project archive…',
+        Number(meta?.percent) || 0,
+        meta?.currentFile ? `Reading ${meta.currentFile}` : 'Reading ZIP structure…'
+      )
+    }).then(async zip => {
       const entries = [], tops = new Set(); let rootFile = false;
       zip.forEach((path, entry) => {
         const clean = path.replace(/^\/+|\/+$/g,'');
@@ -100,21 +229,7 @@ window.__deploymentNetworkReady = (async function() {
       });
       if (rootFile || tops.size !== 1 || !entries.length) return file;
       const root = [...tops][0];
-      const project = String(projectName || '').trim();
-      const ownerName = String(owner || '').trim();
-      const ref = String(revision || '').trim();
-      const candidates = new Set([
-        project,
-        ownerName ? `${ownerName}-${project}` : '',
-        `${project}-main`,
-        `${project}-master`,
-        ownerName ? `${ownerName}-${project}-main` : '',
-        ownerName ? `${ownerName}-${project}-master` : '',
-        ref ? `${project}-${ref}` : '',
-        ownerName && ref ? `${ownerName}-${project}-${ref}` : ''
-      ].filter(Boolean).map(value => value.toLowerCase()));
-      const rl = root.toLowerCase();
-      if (!candidates.has(rl)) return file;
+      if (!entries.some(item => item.clean.startsWith(root + '/'))) return file;
       const out = new JSZip();
       for (const item of entries) {
         if (!item.clean.startsWith(root + '/')) continue;
@@ -123,7 +238,14 @@ window.__deploymentNetworkReady = (async function() {
         if (item.entry.dir) out.folder(target);
         else out.file(target, await item.entry.async('uint8array'));
       }
-      const blob = await out.generateAsync({type:'blob'});
+      const blob = await out.generateAsync(
+        {type:'blob'},
+        meta => setProgress(
+          'Flattening project archive…',
+          Number(meta?.percent) || 0,
+          meta?.currentFile ? `Writing ${meta.currentFile}` : 'Building normalized archive…'
+        )
+      );
       return new File([blob], file.name || 'project.zip', {type:'application/zip'});
     });
   }
@@ -151,286 +273,795 @@ window.__deploymentNetworkReady = (async function() {
     const match = raw.match(/^([^?#]*)([?#].*)?$/);
     return {pathname:match?.[1] || '/', suffix:match?.[2] || ''};
   }
+  function readProcessEnv(fs) {
+    try {
+      if (!fs?.existsSync?.('/.editor/process.env')) return {};
+      const env = {};
+      for (const raw of String(fs.readFileSync('/.editor/process.env', 'utf8') || '').split(/\r?\n/)) {
+        const line = raw.trim();
+        if (!line || line.startsWith('#')) continue;
+        const body = line.startsWith('export ') ? line.slice(7).trim() : line;
+        const i = body.indexOf('=');
+        if (i <= 0) continue;
+        const key = body.slice(0, i).trim();
+        if (!key) continue;
+        let value = body.slice(i + 1).trim();
+        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+          value = value.slice(1, -1);
+        }
+        env[key] = value.replace(/\\n/g, '\n');
+      }
+      return env;
+    } catch (_) {
+      return {};
+    }
+  }
+
   function normalizeDomain(value) {
     let s = String(value || 'http://localhost:3000/').trim();
     if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) s = 'http://' + s;
     try { return new URL(s).origin; } catch (_) { return 'http://localhost:3000'; }
   }
   async function main() {
-    if (!githubURL) throw new Error('Deployment requires a github query parameter.');
+    const pathOverride = requiredParam('path');
+    const githubURL = requiredParam('github');
     const repo = parseGithub(githubURL);
-    const repository = await getRepositoryInfo(repo.owner, repo.repo);
-    const branchOverride = params.has('branch') ? String(params.get('branch') || '').trim() : null;
-    const commitOverride = params.has('commit') ? String(params.get('commit') || '').trim() : null;
-    const urlOverride = params.has('url') ? String(params.get('url') || '').trim() : null;
-    const peerOverride = params.has('peerServer') ? (params.get('peerServer') === '1' || params.get('peerServer') === 'true' || params.get('peerServer') === '') : (params.has('usePeerNetwork') ? (params.get('usePeerNetwork') === '1' || params.get('usePeerNetwork') === 'true' || params.get('usePeerNetwork') === '') : null);
-    let resolvedRef = commitOverride !== null ? (commitOverride && commitOverride !== 'latest' ? commitOverride : (branchOverride || repository.defaultBranch)) : (branchOverride || repository.defaultBranch);
-    status.textContent = 'Downloading deployment revision…';
-    let blob = await loadArchive(repo.owner, repo.repo, resolvedRef);
-    let file = await flattenZip(new File([blob], repo.repo + '.zip', {type:'application/zip'}), repo.repo, repo.owner, resolvedRef);
-    let fs = await FileSystem.create(file, {sync:false});
-    let deploymentConfig = readJSON(fs, '/.editor/deployment.json');
-    if (commitOverride === null && branchOverride === null) {
-      const savedBranch = String(deploymentConfig.branch || '').trim();
-      const savedCommit = String(deploymentConfig.commit || '').trim();
-      const savedRef = savedCommit || savedBranch || repository.defaultBranch;
-      if (savedRef && savedRef !== resolvedRef) {
-        status.textContent = 'Loading saved deployment revision…';
-        resolvedRef = savedRef;
-        blob = await loadArchive(repo.owner, repo.repo, resolvedRef);
-        file = await flattenZip(new File([blob], repo.repo + '.zip', {type:'application/zip'}), repo.repo, repo.owner, resolvedRef);
-        fs = await FileSystem.create(file, {sync:false});
-        deploymentConfig = readJSON(fs, '/.editor/deployment.json');
+    await getRepositoryInfo(repo.owner, repo.repo);
+    const branchOverride = requiredParam('branch');
+    const commitOverride = requiredParam('commit');
+    let resolvedRef = commitOverride;
+    if (commitOverride === 'latest') {
+      const commitsResponse = await network.request(
+        `https://api.github.com/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.repo)}/commits?sha=${encodeURIComponent(branchOverride)}&per_page=1`,
+        undefined,
+        {headers:{Accept:'application/vnd.github+json','X-GitHub-Api-Version':'2026-03-10'}},
+        'deployment-github-latest'
+      );
+      if (!commitsResponse?.ok) {
+        throw new Error(`Unable to resolve latest commit for branch "${branchOverride}" (${commitsResponse?.status || 'no response'}).`);
       }
+      const commits = await commitsResponse.json().catch(() => []);
+      resolvedRef = String(commits?.[0]?.sha || '').trim();
+      if (!/^[0-9a-f]{7,40}$/i.test(resolvedRef)) {
+        throw new Error(`No commits are available on GitHub branch "${branchOverride}".`);
+      }
+    } else if (!/^[0-9a-f]{7,40}$/i.test(commitOverride)) {
+      throw new Error('Deployment requires a commit SHA or "latest".');
     }
-    const runConfig = readJSON(fs, '.editor/config.json');
-    const projectMeta = readJSON(fs, '.editor/project.json');
+
+    const rawTarget = pathOverride || urlOverride;
+    async function loadRevision(ref) {
+      status.textContent = 'Loading deployment revision…';
+      setProgress('Downloading project archive…', null, 'Preparing download…');
+      const blob = await loadArchive(repo.owner, repo.repo, ref);
+      setProgress('Preparing project files…', null, `Archive downloaded: ${formatBytes(blob.size)}`);
+      const file = await flattenZip(new File([blob], repo.repo + '.zip', {type:'application/zip'}));
+      setProgress('Indexing project files…', null, 'Building virtual filesystem…');
+      const fs = await FileSystem.create(file, {sync:false});
+      setProgress('Project ready', 100, `${formatBytes(blob.size)} archive`);
+      return {blob,file,fs};
+    }
+
+    const revision = await loadRevision(resolvedRef);
+    const fs = revision.fs;
+    const runConfigFromProject = readJSON(fs, '/.editor/config.json');
+    const inferredRunConfig = {
+      serverType: 'static',
+      domain: 'http://localhost:3000/',
+      path: '/',
+      rootfolder: '/',
+      runfile: '/index.html',
+      cwd: '/',
+      nodeCommand: ''
+    };
+    const runConfig = {...inferredRunConfig, ...runConfigFromProject};
+    // The deployment wrapper explicitly opts into the peer server. The
+    // project config still owns the peer layer itself.
+    const usePeerServer = params.get('usePeerServer') === '1';
+    const peerLayer = String(runConfig.peerLayer || 'peer').trim() || 'peer';
+    const saveEnvironmentVariables = runConfig.saveEnvironmentVariables === true;
+    const deploymentEnvironment = saveEnvironmentVariables ? readProcessEnv(fs) : {};
     const type = runConfig.serverType === 'node' ? 'node' : 'static';
-    const savedUrl = String(deploymentConfig.url || projectMeta?.deployment?.url || '').trim();
-    const target = urlOverride || savedUrl || (() => {
-      const domain = String(runConfig.domain || 'http://localhost:3000').replace(/\/+$/,'');
-      const path = String(runConfig.path || '/');
-      return domain + (path.startsWith('/') ? path : '/' + path);
-    })();
-    const targetUrl = new URL(target);
-    const domain = targetUrl.origin;
-    const runtimePath = targetUrl.pathname || '/';
-    const usePeerServer = peerOverride === null ? (!!deploymentConfig.usePeerServer || !!projectMeta?.deployment?.usePeerServer) : !!peerOverride;
+
+    function resolveEditorTarget(value) {
+      const raw = String(value || '').trim();
+      const configuredDomain = normalizeDomain(runConfig.domain);
+      try {
+        const absolute = new URL(raw);
+        if (/^https?:$/i.test(absolute.protocol)) return absolute.href;
+      } catch (_) {}
+      const path = raw.startsWith('/') ? raw : '/' + raw;
+      return configuredDomain + path;
+    }
+
+    const deploymentOrigin = normalizeDomain(runConfig.domain);
+    const initialTargetUrl = new URL(resolveEditorTarget(rawTarget));
+
+    // A deployment only emulates documents that belong to its configured origin.
+    if (initialTargetUrl.origin !== deploymentOrigin) {
+      location.replace(initialTargetUrl.href);
+      return;
+    }
+
+    const domain = deploymentOrigin;
+    const runtimePath = initialTargetUrl.pathname || '/';
+
     let peerEndpoint = null;
-    if (usePeerServer) { try { peerEndpoint = new PeerEndpoint(); } catch (e) { console.warn('Peer network unavailable:', e); } }
+    if (usePeerServer) {
+      try { peerEndpoint = new PeerEndpoint(); }
+      catch (e) { console.warn('Peer network unavailable:', e); }
+    }
+
     const root = normalizeRoot(runConfig.rootfolder);
     let runtime;
+
     function forwardConsole(method, args) {
       const target = method === 'logText' ? console.log : console[method];
       if (typeof target !== 'function') return;
       try { target.apply(console, Array.isArray(args) ? args : [args]); } catch (_) {}
     }
+
     function forwardError(error, location) {
       const message = error?.message || String(error);
       const stack = error?.error?.stack || error?.stack || '';
       const suffix = location ? ` (${location})` : '';
       try { console.error(`Uncaught Error${suffix}: ${message}`, stack); } catch (_) {}
     }
+
     if (type === 'static') {
-      runtime = new StaticEndpoint({domain, path:runtimePath, rootfolder:root, runfile:runConfig.runfile || '/index.html', filesystem:fs});
-      network.prependEndpoint(runtime);
+      runtime = new StaticEndpoint({
+        domain,
+        path: runtimePath,
+        rootfolder: root,
+        runfile: runConfig.runfile || '/index.html',
+        filesystem: fs
+      });
       await runtime.loading;
-      if (peerEndpoint) network.prependEndpoint(peerEndpoint);
     } else {
-      runtime = new NodeEmulator({domain,rootfolder:root,pathPrefix:runtimePath,filesystem:fs,fileSystemSync:false,network,cwd:runConfig.cwd || '/',env:{NODE_ENV:'production',USER:'browser_user'}});
-      network.prependEndpoint(runtime.endpoint);
+      runtime = new NodeEmulator({
+        domain,
+        rootfolder: root,
+        pathPrefix: runtimePath,
+        filesystem: fs,
+        fileSystemSync: false,
+        network,
+        cwd: runConfig.cwd || '/',
+        env: {NODE_ENV:'production', USER:'browser_user', ...deploymentEnvironment}
+      });
       await runtime.ready;
+
+      // Published repositories normally omit node_modules. Reconstruct the
+      // dependency tree inside the Node emulator before starting the app.
+      const packageJsonPath = root === '/' ? '/package.json' : root + '/package.json';
+      const packageLockPath = root === '/' ? '/package-lock.json' : root + '/package-lock.json';
+      const nodeModulesPath = root === '/' ? '/node_modules' : root + '/node_modules';
+      const hasNodeModules = fs.existsSync(nodeModulesPath) ||
+        fs.listFilesSync().some(path => String(path || '').startsWith(nodeModulesPath.replace(/\/+$/, '') + '/'));
+      if (fs.existsSync(packageJsonPath) && !hasNodeModules) {
+        let useCi = false;
+        if (fs.existsSync(packageLockPath)) {
+          try {
+            const lock = JSON.parse(fs.readFileSync(packageLockPath, 'utf8') || '{}');
+            useCi = !!lock?.packages && typeof lock.packages === 'object' && !Array.isArray(lock.packages);
+          } catch (_) {}
+        }
+        const packageCommand = useCi ? 'npm ci' : 'npm install';
+        setProgress(
+          'Installing Node dependencies…',
+          null,
+          useCi ? 'Running npm ci from package-lock.json' : (fs.existsSync(packageLockPath) ? 'Running npm install from package-lock.json' : 'Running npm install from package.json')
+        );
+        await runtime.terminalCommand(packageCommand);
+        setProgress('Dependencies installed', 100, useCi ? 'package-lock.json applied' : 'package dependencies installed');
+      }
+
       if (runConfig.nodeCommand) await runtime.terminalCommand(runConfig.nodeCommand);
-      if (!await runtime.waitForServer?.(10000,50)) throw new Error('Node command finished, but no listening server was created.');
-      if (peerEndpoint) network.prependEndpoint(peerEndpoint);
+      if (!await runtime.waitForServer?.(10000,50)) {
+        throw new Error('Node command finished, but no listening server was created.');
+      }
     }
+
+    const runtimeEndpoint = type === 'node' ? runtime.endpoint : runtime;
+
+    // Always give the online peer endpoint first priority. This is important
+    // when a local Node/static runtime also exists: the deployment should use
+    // the already-hosted peer instance rather than shadowing it with local files.
+    const deploymentEndpoints = [];
+    if (peerEndpoint) deploymentEndpoints.push(peerEndpoint);
+    deploymentEndpoints.push(runtimeEndpoint);
+    deploymentEndpoints.push(
+      network.__deploymentBaseEndpoints.native,
+      network.__deploymentBaseEndpoints.primary,
+      network.__deploymentBaseEndpoints.fallback
+    );
+    network.setEndpoints(deploymentEndpoints);
+
     if (runtime?.addEventListener) {
       runtime.addEventListener('console', (method, args) => forwardConsole(method, args));
       runtime.addEventListener('error', (error, location) => forwardError(error, location));
     }
+
     if (usePeerServer) {
-      const layer = String(deploymentConfig.peerLayer || projectMeta?.peerLayer || 'peer').trim() || 'peer';
+      const layer = peerLayer;
       status.textContent = 'Starting peer server…';
-      window.__deploymentPeerServer = await ensurePeerServer(domain, async()=>type === 'node' ? runtime.endpoint : runtime, {peerLayer:layer});
+      window.__deploymentPeerServer = await ensurePeerServer(
+        domain,
+        async()=>type === 'node' ? runtime.endpoint : runtime,
+        {peerLayer:layer}
+      );
     }
+
     const iframe = document.createElement('iframe');
     stage.appendChild(iframe);
-    const pageURL = targetUrl.href;
-    const page = new PageEmulator(iframe, {network, location:{url:pageURL,origin:domain}, history:[]});
-    function deploymentURL(target) {
+    const pageURL = initialTargetUrl.href;
+    const page = new PageEmulator(iframe, {
+      network,
+      location: {url: pageURL, origin: domain},
+      history: []
+    });
+    const deploymentRootPage = page;
+
+    function deploymentPageUrl(target) {
+      const resolved = new URL(target, page.location.url);
+      if (resolved.origin !== domain) {
+        throw new Error('deploymentPageUrl requires a deployment-origin URL');
+      }
+
+      const current = new URL(location.href);
+      current.searchParams.delete('githubUrl');
+      current.searchParams.delete('sha');
+      current.searchParams.set('github', githubURL);
+      current.searchParams.set('branch', branchOverride);
+      current.searchParams.set('commit', commitOverride);       current.searchParams.set('path', (resolved.pathname || '/') + (resolved.search || '') + (resolved.hash || ''));
+      current.searchParams.set('saveEnvironmentVariables', saveEnvironmentVariables ? '1' : '0');
+      current.searchParams.set('usePeerServer', usePeerServer ? '1' : '0');
+
+      return current.href;
+    }
+
+    function deploymentStateUrl(target) {
       const resolved = new URL(target, page.location.url);
       const current = new URL(location.href);
       current.searchParams.delete('githubUrl');
       current.searchParams.delete('sha');
       current.searchParams.set('github', githubURL);
-      current.searchParams.set('commit', resolvedRef);
-      if (branchOverride !== null) current.searchParams.set('branch', branchOverride);
-      else current.searchParams.delete('branch');
-      current.searchParams.delete('path');
-      current.searchParams.set('url', resolved.origin + resolved.pathname + resolved.search + resolved.hash);
-      if (usePeerServer) current.searchParams.set('peerServer','1');
-      else current.searchParams.delete('peerServer');
-      current.searchParams.delete('usePeerNetwork');
+      current.searchParams.set('branch', branchOverride);
+      current.searchParams.set('commit', commitOverride);       current.searchParams.set('path', (resolved.pathname || '/') + (resolved.search || '') + (resolved.hash || ''));
+      current.searchParams.set('saveEnvironmentVariables', saveEnvironmentVariables ? '1' : '0');
+
       return current.href;
     }
-    function navigateReal(target, replace = false) {
+
+    function updateDeploymentBrowserUrl(target, replace = false) {
+      const href = deploymentStateUrl(target);
+      try {
+        if (replace) history.replaceState({}, document.title, href);
+        else history.pushState({}, document.title, href);
+      } catch (_) {}
+      return href;
+    }
+
+    function updatePageHistory(target, replace = false) {
+      const resolved = new URL(target, page.location.url).href;
+      page.setLocation(resolved, new URL(resolved).origin);
+      page.history = Array.isArray(page.history) ? page.history : [];
+
+      if (replace && page.history.length) {
+        if (page.historyIndex < 0) page.historyIndex = page.history.length - 1;
+        page.history[page.historyIndex] = resolved;
+      } else {
+        page.history = page.history.slice(0, page.historyIndex + 1);
+        page.history.push(resolved);
+        page.historyIndex = page.history.length - 1;
+      }
+      return resolved;
+    }
+
+    async function loadEmulatedPage(target, options = {}) {
       const resolved = new URL(target, page.location.url);
+
       if (resolved.origin !== domain) {
-        if (replace) location.replace(resolved.href);
+        if (options.hostFrame) {
+          options.hostFrame.removeAttribute('srcdoc');
+          options.hostFrame.src = resolved.href;
+          return true;
+        }
+        if (options.externalReplace) location.replace(resolved.href);
         else location.assign(resolved.href);
         return true;
       }
-      const href = deploymentURL(resolved.href);
-      if (replace) location.replace(href); else location.assign(href);
+
+      const response = await network.request(
+        resolved.href,
+        resolved.origin,
+        {},
+        options.requestType || 'navigation'
+      );
+
+      if (!response?.ok) {
+        if (options.hostFrame) {
+          options.hostFrame.removeAttribute('srcdoc');
+          options.hostFrame.src = resolved.href;
+          return true;
+        }
+        location.assign(resolved.href);
+        return true;
+      }
+
+      const rawHtml = await getDocumentContent(
+        response,
+        resolved.href,
+        resolved.origin,
+        options.page || page
+      );
+
+      const targetPage = options.page || page;
+      await targetPage.setDocument(rawHtml, true, resolved.href);
+      targetPage.setLocation(resolved.href, resolved.origin);
+      targetPage.history = Array.isArray(targetPage.history) ? targetPage.history : [];
+
+      if (options.replaceHistory && targetPage.history.length) {
+        if (targetPage.historyIndex < 0) targetPage.historyIndex = targetPage.history.length - 1;
+        targetPage.history[targetPage.historyIndex] = resolved.href;
+      } else if (options.recordHistory !== false) {
+        targetPage.history = targetPage.history.slice(0, targetPage.historyIndex + 1);
+        targetPage.history.push(resolved.href);
+        targetPage.historyIndex = targetPage.history.length - 1;
+      }
+
       return true;
     }
-    async function getDocumentContent(response, url, origin, page) {
-      const contentType = String(response.headers.get('content-type') || 'text/html').toLowerCase();
-      if (contentType.includes('text/html') || contentType.includes('application/xhtml+xml') || contentType.includes('application/xml') || contentType.includes('text/xml')) {
-        return await response.clone().text();
+
+    function getDownloadName(url, filename, response) {
+      if (typeof filename === 'string' && filename.trim()) return filename.trim();
+
+      const disposition = response?.headers?.get?.('content-disposition') || '';
+      const match = disposition.match(/filename\\*=UTF-8''([^;]+)|filename=(?:"([^"]+)"|([^;]+))/i);
+      if (match) {
+        const value = (match[1] || match[2] || match[3] || '').trim();
+        if (value) {
+          try { return decodeURIComponent(value); } catch (_) { return value; }
+        }
       }
-      if (contentType.includes('image/') || contentType.includes('audio/') || contentType.includes('video/')) {
-        const blob = await response.clone().blob();
-        const dataUrl = await new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result);
-          reader.onerror = () => reject(reader.error || new Error('Failed to create data URL.'));
-          reader.readAsDataURL(blob);
-        });
-        if (contentType.includes('image/')) return `<html><body style=\"margin:0;background:#1e1e1e;display:flex;align-items:center;justify-content:center;height:100vh\"><img src=\"${dataUrl}\" style=\"max-width:100%;max-height:100%;object-fit:contain\"></body></html>`;
-        if (contentType.includes('audio/')) return `<html><body style=\"margin:0;background:#1e1e1e;display:flex;align-items:center;justify-content:center;height:100vh\"><audio controls src=\"${dataUrl}\"></audio></body></html>`;
-        return `<html><body style=\"margin:0;background:#1e1e1e;display:flex;align-items:center;justify-content:center;height:100vh\"><video controls autoplay src=\"${dataUrl}\" style=\"max-width:100%;max-height:100%\"></video></body></html>`;
-      }
-      return await response.clone().text();
+
+      try {
+        const parsed = new URL(response?.url || response?.requested_url || url);
+        const parts = parsed.pathname.split('/').filter(Boolean);
+        if (parts.length) {
+          const value = decodeURIComponent(parts[parts.length - 1]);
+          if (value) return value;
+        }
+      } catch (_) {}
+
+      return 'download';
     }
-    window.getDocumentContent = getDocumentContent;
-    function installDeploymentInterceptors(page, parentPage = null) {
-      page.interceptEvent('console', (method, args) => forwardConsole(method, args));
-      page.interceptEvent('error', (error, location) => forwardError(error, location));
-      page.interceptEvent('iframe-create', function(obj) {
+
+    async function triggerDownload(url, filename, sourcePage = page) {
+      const resolved = new URL(url, sourcePage.location?.url || page.location.url);
+
+      let response = null;
+      try {
+        response = await network.request(
+          resolved.href,
+          resolved.origin,
+          {},
+          'download'
+        );
+      } catch (_) {}
+
+      if (!response?.ok) {
+        const link = document.createElement('a');
+        link.href = resolved.href;
+        if (filename) link.download = filename;
+        link.style.display = 'none';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        return true;
+      }
+
+      const blob = await response.blob();
+      const name = getDownloadName(resolved.href, filename, response);
+      const blobUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.download = name;
+      link.style.display = 'none';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 30000);
+      return true;
+    }
+
+    function clearHostedEmbed(embed) {
+      const frame = embed?.__embedFrame;
+      try { embed?.__embedCleanup?.(); } catch (_) {}
+      if (!frame) {
+        try { embed.style.opacity = ''; } catch (_) {}
+        try { embed.style.pointerEvents = ''; } catch (_) {}
+        return;
+      }
+      try { frame.remove(); } catch (_) {}
+      try { frame.pageEmulator?.remove?.(); } catch (_) {}
+      try { delete frame.pageEmulator; } catch (_) {}
+      try { delete embed.__embedFrame; } catch (_) {}
+      try { embed.style.opacity = ''; } catch (_) {}
+      try { embed.style.pointerEvents = ''; } catch (_) {}
+    }
+
+    function syncHostedEmbed(embed, frame, ownerWindow) {
+      if (!embed?.isConnected || !frame?.isConnected) return;
+
+      const rect = embed.getBoundingClientRect();
+      const style = ownerWindow.getComputedStyle ? ownerWindow.getComputedStyle(embed) : null;
+      const visible = !style || (
+        style.visibility !== 'hidden' &&
+        style.visibility !== 'collapse' &&
+        style.display !== 'none'
+      );
+
+      frame.style.left = rect.left + 'px';
+      frame.style.top = rect.top + 'px';
+      frame.style.width = Math.max(0, rect.width) + 'px';
+      frame.style.height = Math.max(0, rect.height) + 'px';
+      frame.style.visibility = visible ? 'visible' : 'hidden';
+      frame.style.opacity = visible ? '1' : '0';
+      frame.style.pointerEvents = visible ? 'auto' : 'none';
+    }
+
+    function createHostedDeploymentFrame(embed) {
+      if (embed.__embedFrame?.pageEmulator) return embed.__embedFrame;
+
+      const ownerDocument = embed.ownerDocument || document;
+      const ownerWindow = ownerDocument.defaultView || window;
+      const frame = ownerDocument.createElement('iframe');
+
+      frame.setAttribute('data-embed-frame', '1');
+      frame.setAttribute('frameborder', '0');
+      frame.style.position = 'fixed';
+      frame.style.border = '0';
+      frame.style.margin = '0';
+      frame.style.padding = '0';
+      frame.style.background = 'transparent';
+      frame.style.zIndex = '2147483646';
+      frame.style.display = 'block';
+
+      ownerDocument.body?.appendChild(frame);
+
+      const child = new PageEmulator(frame, {
+        network,
+        location: {
+          url: 'about:blank',
+          origin: domain
+        },
+        history: []
+      });
+
+      frame.pageEmulator = child;
+      frame.usefulHelpers = window.__pageRegistry?.__usefulHelpers;
+      embed.__embedFrame = frame;
+      embed.style.opacity = '0';
+      embed.style.pointerEvents = 'none';
+
+      embed.__syncEmbedBounds = () => syncHostedEmbed(embed, frame, ownerWindow);
+      ownerWindow.addEventListener('resize', embed.__syncEmbedBounds);
+      ownerWindow.addEventListener('scroll', embed.__syncEmbedBounds, true);
+
+      const observer = ownerWindow.MutationObserver
+        ? new ownerWindow.MutationObserver(embed.__syncEmbedBounds)
+        : null;
+      if (observer) {
+        observer.observe(embed, {
+          attributes: true,
+          attributeFilter: ['style', 'class', 'hidden']
+        });
+      }
+      embed.__embedCleanup = () => {
+        try { ownerWindow.removeEventListener('resize', embed.__syncEmbedBounds); } catch (_) {}
+        try { ownerWindow.removeEventListener('scroll', embed.__syncEmbedBounds, true); } catch (_) {}
+        try { observer?.disconnect?.(); } catch (_) {}
+        try { delete embed.__syncEmbedBounds; } catch (_) {}
+        try { delete embed.__embedCleanup; } catch (_) {}
+      };
+
+      embed.__syncEmbedBounds();
+      return frame;
+    }
+
+    function installEmulatedPageEvents(currentPage, options = {}) {
+      const hostFrame = options.hostFrame || null;
+      const isRootPage = currentPage === deploymentRootPage;
+
+      currentPage.interceptEvent('console', (method, args) => forwardConsole(method, args));
+      currentPage.interceptEvent('error', (error, location) => forwardError(error, location));
+
+      currentPage.interceptEvent('download', async (url, filenameOrUnused, filename) => {
+        // emulator.js sends (url, filename); accept the historical three-argument
+        // form as well so downloads always receive the requested file name.
+        return await triggerDownload(
+          url,
+          filename ?? filenameOrUnused,
+          currentPage
+        );
+      });
+
+      currentPage.interceptEvent('open', (url, activateTab = true) => {
+        const resolved = new URL(url, currentPage.location?.url || domain + '/');
+
+        if (resolved.origin === domain) {
+          const popup = window.open(
+            deploymentPageUrl(resolved.href),
+            '_blank',
+            'noopener'
+          );
+          if (activateTab === false && popup) {
+            try { popup.opener = null; } catch (_) {}
+          }
+          return popup || true;
+        }
+
+        const popup = window.open(resolved.href, '_blank', 'noopener');
+        if (activateTab === false && popup) {
+          try { popup.opener = null; } catch (_) {}
+        }
+        return popup || true;
+      });
+
+      currentPage.interceptEvent('iframe-create', function(obj) {
         if (!obj?.iframe) return null;
-        if (obj.iframe.pageEmulator) return obj.iframe.pageEmulator;
-        const child = new PageEmulator(obj.iframe, {network, location:{url:'about:blank',origin:page.location?.origin || domain}, history:[]});
-        obj.iframe.pageEmulator = child;
-        page.addChild?.(child);
-        installDeploymentInterceptors(child, page);
-        child.setLocation('about:blank', page.location?.origin || domain);
+
+        const frame = obj.iframe;
+        if (frame.pageEmulator) return frame.pageEmulator;
+
+        const child = new PageEmulator(frame, {
+          network,
+          location: {
+            url: 'about:blank',
+            origin: currentPage.location?.origin || domain
+          },
+          history: []
+        });
+
+        frame.pageEmulator = child;
+        frame.usefulHelpers = window.__pageRegistry?.__usefulHelpers;
+        currentPage.addChild?.(child);
         return child;
       });
-      page.interceptEvent('iframe-navigate', async function(obj) {
+
+      currentPage.interceptEvent('iframe-navigate', async function(obj) {
         const frame = obj?.iframe;
         if (!frame) return;
-        const child = frame.pageEmulator;
-        if (!child) return;
+
         const navigationId = obj.navigationId;
-        if (navigationId !== undefined && frame.__iframeNavigationId !== navigationId) return;
+        if (
+          navigationId !== undefined &&
+          frame.__iframeNavigationId !== navigationId
+        ) return;
+
         if (obj.is_doc) {
-          child.setLocation('about:srcdoc', page.location?.origin || domain);
+          let child = frame.pageEmulator;
+          if (!child) {
+            child = new PageEmulator(frame, {
+              network,
+              location: {
+                url: 'about:srcdoc',
+                origin: currentPage.location?.origin || domain
+              },
+              history: []
+            });
+            frame.pageEmulator = child;
+            frame.usefulHelpers = window.__pageRegistry?.__usefulHelpers;
+            currentPage.addChild?.(child);
+          }
+
+          child.setLocation('about:srcdoc', currentPage.location?.origin || domain);
           child.rawDocument = String(obj.srcdoc || '');
-          if (navigationId !== undefined && frame.__iframeNavigationId !== navigationId) return;
           await child.setDocument(obj.srcdoc || '');
           return;
         }
+
         if (!obj.src) return;
+
         let targetUrl;
-        try { targetUrl = new URL(obj.src, page.location?.url || domain + '/'); } catch (_) { return; }
-        child.setLocation(targetUrl.href, targetUrl.origin);
-        const res = await child.network.request(targetUrl.href, targetUrl.origin, {}, 'iframe');
-        if (navigationId !== undefined && frame.__iframeNavigationId !== navigationId) return;
-        if (!res || !res.ok) return;
-        const rawHtml = await window.getDocumentContent(res, targetUrl.href, targetUrl.origin, obj);
-        if (navigationId !== undefined && frame.__iframeNavigationId !== navigationId) return;
-        child.rawDocument = String(rawHtml || '');
-        await child.setDocument(rawHtml);
-      });
-      page.interceptEvent('embed-create', function(obj) {
-        if (!obj?.embed) return null;
-        const embed = obj.embed;
-        if (embed.__embedFrame?.pageEmulator) return embed.__embedFrame.pageEmulator;
-        const ownerDocument = embed.ownerDocument || document;
-        const ownerWindow = ownerDocument.defaultView || window;
-        const frame = ownerDocument.createElement('iframe');
-        frame.setAttribute('data-embed-frame','1');
-        frame.setAttribute('frameborder','0');
-        frame.style.position = 'fixed';
-        frame.style.border = '0';
-        frame.style.margin = '0';
-        frame.style.padding = '0';
-        frame.style.background = 'transparent';
-        frame.style.zIndex = '2147483646';
-        frame.style.display = 'block';
-        ownerDocument.body?.appendChild(frame);
-        embed.style.opacity = '0';
-        embed.style.pointerEvents = 'none';
-        embed.__embedFrame = frame;
-        function syncBounds() {
-          if (!embed.isConnected || !frame.isConnected) return;
-          const r = embed.getBoundingClientRect();
-          const style = ownerWindow.getComputedStyle ? ownerWindow.getComputedStyle(embed) : null;
-          const visible = !style || (style.visibility !== 'hidden' && style.visibility !== 'collapse' && style.display !== 'none');
-          frame.style.left = r.left + 'px'; frame.style.top = r.top + 'px';
-          frame.style.width = Math.max(0, r.width) + 'px'; frame.style.height = Math.max(0, r.height) + 'px';
-          frame.style.visibility = visible ? 'visible' : 'hidden';
-          frame.style.opacity = visible ? '1' : '0';
-          frame.style.pointerEvents = visible ? 'auto' : 'none';
+        try {
+          targetUrl = new URL(
+            obj.src,
+            currentPage.location?.url || domain + '/'
+          );
+        } catch (_) {
+          return;
         }
-        embed.__syncEmbedBounds = syncBounds;
-        ownerWindow.addEventListener('resize', syncBounds);
-        ownerWindow.addEventListener('scroll', syncBounds, true);
-        const observer = ownerWindow.MutationObserver ? new ownerWindow.MutationObserver(syncBounds) : null;
-        if (observer) observer.observe(embed, {attributes:true, attributeFilter:['style','class','hidden']});
-        syncBounds();
-        const child = new PageEmulator(frame, {network, location:{url:'about:blank',origin:page.location?.origin || domain}, history:[]});
-        frame.pageEmulator = child;
-        page.addChild?.(child);
-        installDeploymentInterceptors(child, page);
-        return child;
-      });
-      page.interceptEvent('embed-navigate', async function(obj) {
-        const embed = obj?.embed;
-        if (!embed?.__embedFrame) return;
-        const frame = embed.__embedFrame;
+
+        const isInternal = targetUrl.origin === domain;
+
+        // Internal iframe pages are represented by another deployment page
+        // carrying their own ?url= parameter. External frames remain native.
         const child = frame.pageEmulator;
-        if (!child || !obj.src) return;
+        if (child) child.setLocation(targetUrl.href, targetUrl.origin);
+
+        const frameUrl = isInternal
+          ? deploymentPageUrl(targetUrl.href)
+          : targetUrl.href;
+
+        frame.removeAttribute('srcdoc');
+        frame.src = frameUrl;
+      });
+
+      currentPage.interceptEvent('embed-create', function() {
+        // setupEmbed() removes the original src before embed-navigate. No
+        // PageEmulator is necessary for a normal embed; embed-navigate decides
+        // whether it stays native, becomes a deployment iframe, or becomes a
+        // data: URL.
+        return null;
+      });
+
+      currentPage.interceptEvent('embed-navigate', async function(obj) {
+        const embed = obj?.embed;
+        if (!embed) return;
+
         const navigationId = obj.navigationId;
-        if (navigationId !== undefined && embed.__embedNavigationId !== navigationId) return;
+        if (
+          navigationId !== undefined &&
+          embed.__embedNavigationId !== navigationId
+        ) return;
+
+        if (!obj.src) return;
+
         let targetUrl;
-        try { targetUrl = new URL(obj.src, page.location?.url || domain + '/'); } catch (_) { return; }
-        child.setLocation(targetUrl.href, targetUrl.origin);
-        const res = await child.network.request(targetUrl.href, targetUrl.origin, {}, 'embed');
-        if (navigationId !== undefined && embed.__embedNavigationId !== navigationId) return;
-        if (!res || !res.ok) return;
-        const rawHtml = await window.getDocumentContent(res, targetUrl.href, targetUrl.origin, obj);
-        if (navigationId !== undefined && embed.__embedNavigationId !== navigationId) return;
-        child.rawDocument = String(rawHtml || '');
-        await child.setDocument(rawHtml, true, targetUrl.href);
-        embed.__syncEmbedBounds?.();
+        try {
+          targetUrl = new URL(
+            obj.src,
+            currentPage.location?.url || domain + '/'
+          );
+        } catch (_) {
+          return;
+        }
+
+        clearHostedEmbed(embed);
+
+        if (targetUrl.origin !== domain) {
+          embed.setAttribute('src', targetUrl.href);
+          return;
+        }
+
+        let response;
+        try {
+          response = await network.request(
+            targetUrl.href,
+            targetUrl.origin,
+            {},
+            'embed'
+          );
+        } catch (_) {
+          embed.setAttribute('src', targetUrl.href);
+          return;
+        }
+
+        if (!response?.ok) {
+          embed.setAttribute('src', targetUrl.href);
+          return;
+        }
+
+        const contentType = String(
+          response.headers?.get?.('content-type') || ''
+        ).toLowerCase();
+
+        const isHtml =
+          contentType.includes('text/html') ||
+          contentType.includes('application/xhtml+xml') ||
+          contentType.includes('application/xml') ||
+          contentType.includes('text/xml');
+
+        if (isHtml) {
+          const frame = createHostedDeploymentFrame(embed);
+          const frameUrl = deploymentPageUrl(targetUrl.href);
+
+          frame.pageEmulator?.setLocation(frameUrl, new URL(frameUrl).origin);
+          frame.src = frameUrl;
+          embed.__syncEmbedBounds?.();
+          return;
+        }
+
+        try {
+          const dataUri = await createDataUri(response.clone());
+          if (dataUri) {
+            embed.setAttribute('src', dataUri);
+            return;
+          }
+        } catch (_) {}
+
+        embed.setAttribute('src', targetUrl.href);
+      });
+
+      currentPage.interceptEvent('navigate', async function(url, ...args) {
+        const resolved = new URL(url, currentPage.location?.url || domain + '/');
+
+        const isHistoryStateChange =
+          args.length >= 2 &&
+          args[0] === true &&
+          (args[1] === false || args[1] === true);
+
+        const replaceHistory =
+          isHistoryStateChange && args[1] === true;
+
+        if (isHistoryStateChange) {
+          updatePageHistory(resolved.href, replaceHistory);
+
+          if (isRootPage) {
+            // pushState()/replaceState() only changes the deployment URL.
+            // It never recreates the emulated document, even for an external
+            // URL.
+            updateDeploymentBrowserUrl(resolved.href, replaceHistory);
+          }
+          return true;
+        }
+
+        if (resolved.origin !== domain) {
+          if (hostFrame) {
+            hostFrame.removeAttribute('srcdoc');
+            hostFrame.src = resolved.href;
+          } else {
+            location.assign(resolved.href);
+          }
+          return true;
+        }
+
+        if (isRootPage) {
+          await loadEmulatedPage(resolved.href, {
+            page: currentPage,
+            requestType: 'navigation',
+            recordHistory: true
+          });
+          updateDeploymentBrowserUrl(resolved.href, false);
+          return true;
+        }
+
+        if (hostFrame) {
+          hostFrame.removeAttribute('srcdoc');
+          hostFrame.src = deploymentPageUrl(resolved.href);
+          return true;
+        }
+
+        await loadEmulatedPage(resolved.href, {
+          page: currentPage,
+          requestType: 'navigation',
+          recordHistory: true
+        });
+        return true;
       });
     }
-    installDeploymentInterceptors(page);
-    page.interceptEvent('navigate', async function(url) {
-      const resolved = new URL(url, page.location.url);
-      const response = await network.request(resolved.href, resolved.origin, {}, 'navigation');
-      if (!response?.ok) {
-        navigateReal(resolved.href, false);
-        return true;
-      }
-      const rawHtml = await getDocumentContent(response, resolved.href, resolved.origin, page);
-      await page.setDocument(rawHtml, true, resolved.href);
-      page.setLocation(resolved.href, resolved.origin);
-      page.history = page.history || [];
-      page.history = page.history.slice(0, (page.historyIndex ?? page.history.length - 1) + 1);
-      page.history.push(resolved.href);
-      page.historyIndex = page.history.length - 1;
-      history.pushState({}, document.title, deploymentURL(resolved.href));
-      return true;
-    });
-    page.interceptEvent('open', (url, activateTab) => {
-      const resolved = new URL(url, page.location.url);
-      if (resolved.origin !== domain) return window.open(resolved.href, '_blank', 'noopener');
-      const popup = window.open(deploymentURL(resolved.href), '_blank', 'noopener');
-      if (activateTab === false && popup) { try { popup.opener = null; } catch (_) {} }
-      return popup || true;
-    });
-    try {
-      const canonical = new URL(location.href);
-      canonical.searchParams.delete('githubUrl');
-      canonical.searchParams.delete('sha');
-      canonical.searchParams.set('github', githubURL);
-      canonical.searchParams.set('commit', resolvedRef);
-      if (branchOverride !== null) canonical.searchParams.set('branch', branchOverride); else canonical.searchParams.delete('branch');
-      canonical.searchParams.delete('path');
-      canonical.searchParams.set('url', pageURL);
-      if (usePeerServer) canonical.searchParams.set('peerServer','1'); else canonical.searchParams.delete('peerServer');
-      canonical.searchParams.delete('usePeerNetwork');
-      history.replaceState({}, document.title, canonical.pathname + canonical.search + canonical.hash);
-    } catch (_) {}
+
+    installEmulatedPageEvents(page);
+
+    // The deployment URL always records the actual emulated page currently
+    // loaded by this deployment wrapper.
+    page.setLocation(pageURL, domain);
+    page.history = [pageURL];
+    page.historyIndex = 0;
+    updateDeploymentBrowserUrl(pageURL, true);
+
+    setProgress('Starting project…', null, 'Launching deployment runtime…');
     status.textContent = 'Starting project…';
-    const response = await network.request(pageURL, location.origin, {}, 'deployment');
-    if (!response?.ok) throw new Error(`Project entry page failed to load (${response?.status || 'no response'}).`);
+
+    const response = await network.request(
+      pageURL,
+      domain,
+      {},
+      'deployment'
+    );
+
+    if (!response?.ok) {
+      throw new Error(
+        `Project entry page failed to load (${response?.status || 'no response'}).`
+      );
+    }
+
     const html = await response.text();
     await page.setDocument(html, true, pageURL);
     stage.classList.add('ready');
+    setProgress('Deployment ready', 100, pageURL);
+    hideProgress();
     status.remove();
   }
   main().catch(showError);

@@ -1572,6 +1572,10 @@
           node.__editingAttribute = false;
         }
 
+        // Keep the dynamic-node processor available to the Element prototype
+        // setters below without relying on a later lexical reference.
+        window.__checkNodeAndChildren = checkNodeAndChildren;
+
         function processStyleNode(node) {
           if (node.tagName && node.tagName.toLowerCase() === 'style' && node.textContent.includes('url(')) {
             if (!node.hasAttribute('data-raw-style-text')) node.setAttribute('data-raw-style-text', node.textContent);
@@ -1957,9 +1961,17 @@
           // Pass false if features specify background rules, or default to foreground (true)
           const activateTab = !features || !features.includes('background');
           const newPage = sendEvent('open', resolved, activateTab);
-          
-          // Return a mock window context matching standard JS expectations
-          return newPage.iframe.contentWindow.__windowProxy || newPage.iframe.contentWindow;
+
+          // An open interceptor may create an emulated PageEmulator, return
+          // its iframe/window proxy, or hand the URL to the real browser for
+          // an external origin. Do not assume every result has an iframe.
+          if (!newPage) return null;
+          if (newPage.__windowProxy) return newPage.__windowProxy;
+          if (newPage.iframe) {
+            const contentWindow = newPage.iframe.contentWindow;
+            return contentWindow?.__windowProxy || contentWindow || newPage;
+          }
+          return newPage;
         };
 
         ['MouseEvent', 'KeyboardEvent', 'FocusEvent', 'UIEvent'].forEach(eventName => {
@@ -3004,9 +3016,20 @@
           reload: function() { sendEvent('navigate', DOCUMENT_URL, false); },
           toString: function() { return DOCUMENT_URL; }
         });
-        Object.defineProperty(virtualLocation, 'href', {
-          get: function() { return DOCUMENT_URL; },
-          set: function(u) { return this.assign(u); }
+        ['href', 'origin', 'protocol', 'host', 'hostname', 'pathname', 'search', 'hash'].forEach(function(prop) {
+          Object.defineProperty(virtualLocation, prop, {
+            get: function() {
+              try {
+                const current = new URL(DOCUMENT_URL);
+                return current[prop];
+              } catch (_) {
+                return prop === 'href' ? DOCUMENT_URL : '';
+              }
+            },
+            set: prop === 'href' ? function(u) { return this.assign(u); } : undefined,
+            configurable: true,
+            enumerable: true
+          });
         });
         Object.defineProperty(virtualLocation, Symbol.toStringTag, {
           value: 'Location',
@@ -3151,6 +3174,19 @@
           }
         });
 
+        function updateVirtualDocumentURL(url) {
+          try {
+            const resolvedUrl = new URL(url, DOCUMENT_URL).href;
+            DOCUMENT_URL = resolvedUrl;
+            CURRENT_PAGE_URL = resolvedUrl;
+            try { BASE_ORIGIN = new URL(resolvedUrl).origin; } catch (_) {}
+            try { window.origin = BASE_ORIGIN; } catch (_) {}
+            return resolvedUrl;
+          } catch (_) {
+            return DOCUMENT_URL;
+          }
+        }
+
         var virtualHistory;
         Object.keys(virtualHistory = {
           state: null,
@@ -3159,6 +3195,7 @@
             this.state = state;
             if (url) {
               const resolvedUrl = new URL(url, virtualLocation.href).href;
+              updateVirtualDocumentURL(resolvedUrl);
               sendEvent('navigate', resolvedUrl, true, false);
             }
           },
@@ -3166,7 +3203,8 @@
             this.state = state;
             if (url) {
               const resolvedUrl = new URL(url, virtualLocation.href).href;
-              virtualLocation.replace(resolvedUrl);
+              updateVirtualDocumentURL(resolvedUrl);
+              sendEvent('navigate', resolvedUrl, true, true);
             }
           },
           go: function(delta) {
@@ -3407,6 +3445,8 @@
         window.__windowProxy = windowProxy;
         pageEmulator.__windowProxy = windowProxy;
         window.__rawReflectApply = rawReflectApply;
+        window.__hostURL = window.top.location.href;
+        window.__hostOrigin = window.top.location.origin;
       })();
 
       window.__executeCode = function(__codeString, __sourceURL, __thisArg, __event) {
@@ -3515,18 +3555,98 @@
       window.__serializePublicElement = function(elem, outer) { return serializePublicElement(elem, outer); };
       window.__isEmulatorInjectedScript = function(code) { return /createRuntimeInterceptor|__runSyncInterceptor|__pageRegistry/.test(String(code || '')); };
 
+      // Native HTML assignments bypass the MutationObserver until after the
+      // current JavaScript turn. Queue the same dynamic-node processing for a
+      // microtask instead of running it synchronously: page code must be able
+      // to see the freshly-assigned DOM in its native state before the emulator
+      // adds data/raw attributes, rewrites handlers, or virtualizes resources.
+      const assignedNodeQueue = new Set();
+      let assignedNodeFlushScheduled = false;
+
+      function flushAssignedNodes() {
+        assignedNodeFlushScheduled = false;
+        const processNode = window.__checkNodeAndChildren;
+        if (typeof processNode !== 'function') {
+          assignedNodeQueue.clear();
+          return;
+        }
+
+        const nodes = Array.from(assignedNodeQueue);
+        assignedNodeQueue.clear();
+
+        for (const node of nodes) {
+          if (!node) continue;
+          processNode(node);
+          if (node.nodeType === Node.ELEMENT_NODE) {
+            node.querySelectorAll('*').forEach(child => processNode(child));
+          }
+        }
+      }
+
+      function queueAssignedNodes(nodes) {
+        for (const node of nodes || []) {
+          if (node) assignedNodeQueue.add(node);
+        }
+        if (assignedNodeFlushScheduled) return;
+        assignedNodeFlushScheduled = true;
+        Promise.resolve().then(flushAssignedNodes);
+      }
+
+      // Resource-bearing nodes need an emulator request started immediately.
+      // In particular, document.head.innerHTML += can replace an already
+      // virtualized stylesheet with its original URL; waiting for a microtask
+      // lets the native srcdoc document try to fetch that URL first.
+      function primeAssignedResources(nodes) {
+        const processNode = window.__checkNodeAndChildren;
+        if (typeof processNode !== 'function') return;
+
+        for (const node of nodes || []) {
+          if (!node || node.nodeType !== Node.ELEMENT_NODE) continue;
+
+          const resources = [];
+          if (node.matches?.('link[href], script[src], img[src], audio[src], video[src], source[src], object[data]')) {
+            resources.push(node);
+          }
+          if (node.querySelectorAll) {
+            resources.push(...node.querySelectorAll(
+              'link[href], script[src], img[src], audio[src], video[src], source[src], object[data]'
+            ));
+          }
+
+          for (const resource of resources) {
+            processNode(resource);
+          }
+        }
+      }
+
+      window.__processAssignedNodes = queueAssignedNodes;
+
       Object.defineProperty(Element.prototype, 'innerHTML', {
         configurable: nativeElementInnerHTML.configurable,
         enumerable: nativeElementInnerHTML.enumerable,
         get() { return serializePageElement(this, false); },
-        set(value) { return nativeElementInnerHTML.set.call(this, value); }
+        set(value) {
+          nativeElementInnerHTML.set.call(this, value);
+          const nodes = Array.from(this.childNodes);
+          primeAssignedResources(nodes);
+          queueAssignedNodes(nodes);
+        }
       });
 
       Object.defineProperty(Element.prototype, 'outerHTML', {
         configurable: nativeElementOuterHTML.configurable,
         enumerable: nativeElementOuterHTML.enumerable,
         get() { return serializePageElement(this, true); },
-        set(value) { return nativeElementOuterHTML.set.call(this, value); }
+        set(value) {
+          const parent = this.parentNode;
+          const before = parent ? new Set(parent.childNodes) : null;
+          nativeElementOuterHTML.set.call(this, value);
+
+          if (!parent || !before) return;
+          const nodes = Array.from(parent.childNodes).filter(node => !before.has(node));
+          primeAssignedResources(nodes);
+          queueAssignedNodes(nodes);
+        }
       });
     }
     return `(${interceptorFunction.toString()})("${source_origin}","${base_url || source_url}","${source_url}");//# sourceURL=${name}`;

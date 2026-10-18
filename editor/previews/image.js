@@ -2,7 +2,10 @@
   window.EditorPreviewProviders = window.EditorPreviewProviders || [];
   window.EditorPreviewProviders.push({
     id: 'image',
-    match(file) { return String(file.mime || '').startsWith('image/'); },
+    match(file) {
+      const mime = String(file.mime || '');
+      return mime.startsWith('image/') && !['image/vnd.radiance', 'image/x-exr'].includes(mime);
+    },
     views: [{
       id: 'image-preview',
       label: 'Preview',

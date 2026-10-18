@@ -4,7 +4,7 @@
   const DEFAULTS = {
     readFiles: 'always', searchFiles: 'always', createFiles: 'ask', modifyFiles: 'ask', deleteFiles: 'ask',
     runCommands: 'ask', runScripts: 'ask', runProject: 'ask', readOutput: 'always',
-    readEditor: 'always', modifyEditor: 'ask', browser: 'ask', network: 'ask'
+    readEditor: 'always', modifyEditor: 'ask', browser: 'ask', network: 'ask', githubRead: 'ask', githubWrite: 'ask', extensionActions: 'ask'
   };
   function load() {
     try {

@@ -13,24 +13,6 @@
     return endpoint+'/v1beta/models/'+modelId+':'+(stream?'streamGenerateContent?alt=sse':'generateContent');
   }
 
-  function hordeHeaders(model){
-    const headers={'Content-Type':'application/json','Client-Agent':'Node-Editor-AI/1.0'};
-    const key=model.apiKey||model.anonymousAuth||'0000000000';
-    if(key)headers.apikey=key;
-    return headers;
-  }
-  function hordePrompt(messages){
-    const lines=[];
-    for(const m of messages){
-      const role=m.role||'user';
-      if(role==='system')lines.push('<|system|>\n'+textOf(m.content));
-      else if(role==='assistant')lines.push('<|assistant|>\n'+textOf(m.content));
-      else lines.push('<|user|>\n'+textOf(m.content));
-    }
-    lines.push('<|assistant|>\n');
-    return lines.join('\n');
-  }
-
   function parseSSEBlock(block){const data=String(block||'').split(/\r?\n/).filter(x=>x.startsWith('data:')).map(x=>x.slice(5).trim()).join('\n');if(!data||data==='[DONE]')return null;try{return JSON.parse(data);}catch(_){return data;}}
   async function* streamResponse(response,signal){
     if(!response.body){const text=await response.text();yield text;return;}
@@ -222,7 +204,7 @@
     return unit==='ms'?n/1000:unit==='m'?n*60:n;
   }
   class AIClient {
-    constructor(registry,network){this.registry=registry;this.network=network || window.__sharedBrowserNetwork || null;this.abortController=null;}
+    constructor(registry,network,localManager){this.registry=registry;this.network=network || window.__sharedBrowserNetwork || null;this.localManager=localManager || null;this.abortController=null;}
     model(){return this.registry.active();}
     async request(url,options={}){
       const init={...options};
@@ -269,49 +251,14 @@
         await new Promise(resolve=>setTimeout(resolve,waitMs));
       }
     }
-    cancel(){this.abortController?.abort();this.abortController=null;}
-    async completeHorde(messages,options,model){
-      const base=trimEndpoint(model.endpoint).replace(/\/v2$/i,'/v2');
-      const headers=hordeHeaders(model);
-      const maxLength=Math.min(512,Math.max(16,options.maxTokens??256));
-      const body={prompt:hordePrompt(messages),params:{max_length:maxLength,max_context_length:Math.min(4096,Math.max(512,options.maxContextLength??4096)),temperature:options.temperature??.7,top_p:options.topP??.9,n:1},models:[model.model],trusted_workers:false};
-      const response=await this.request(base+'/generate/text/async',{method:'POST',headers,signal:options.signal,body:JSON.stringify(body)});
-      if(!response.ok)throw new Error(`AI Horde request failed (${response.status}): ${await response.text()}`);
-      const job=await response.json();
-      if(!job?.id)throw new Error(`AI Horde did not return a generation ID: ${JSON.stringify(job)}`);
-      options.onQueueStatus?.({queuePosition:job.queue_position,waitTime:job.wait_time,waiting:true,processing:false,done:false});
-      let lastStatusAt=Date.now();
-      let lastSignature='';
-      while(true){
-        if(options.signal?.aborted)throw new DOMException('Aborted','AbortError');
-        await new Promise(resolve=>setTimeout(resolve,1500));
-        if(options.signal?.aborted)throw new DOMException('Aborted','AbortError');
-        const statusResponse=await this.request(base+'/generate/text/status/'+encodeURIComponent(job.id),{headers:{'Client-Agent':'Node-Editor-AI/1.0',apikey:headers.apikey},signal:options.signal});
-        if(!statusResponse.ok)throw new Error(`AI Horde status failed (${statusResponse.status}): ${await statusResponse.text()}`);
-        const status=await statusResponse.json();
-        const queuePosition=Number.isFinite(status.queue_position)?status.queue_position:null;
-        const waitTime=Number.isFinite(status.wait_time)?status.wait_time:null;
-        const waiting=(status.waiting||0)>0;
-        const processing=(status.processing||0)>0;
-        const finished=!!(status.finished||status.done);
-        const signature=JSON.stringify({queuePosition,waitTime,waiting,processing,finished,faulted:!!status.faulted,generations:Array.isArray(status.generations)?status.generations.length:0});
-        if(signature!==lastSignature){lastSignature=signature;lastStatusAt=Date.now();}
-        options.onQueueStatus?.({queuePosition,waitTime,waiting,processing,done:!!status.done,finished});
-        if(status.faulted)throw new Error(`AI Horde generation faulted: ${JSON.stringify(status)}`);
-        if(status.done || status.finished){
-          const generation=status.generations?.[0];
-          return {role:'assistant',content:textOf(generation?.text||status.text||''),tool_calls:[],reasoning_content:''};
-        }
-        if(!waiting && !processing && Date.now()-lastStatusAt>10*60*1000){
-          throw new Error('AI Horde generation stopped reporting progress for 10 minutes.');
-        }
-      }
-    }
-
+    cancel(){this.abortController?.abort();this.abortController=null;this.localManager?.cancel?.();}
     async complete(messages,options={}){
       const model=options.model||this.model();
+      if(model.protocol==='local-transformers'){
+        if(!this.localManager)throw new Error('Local AI runtime is not initialized.');
+        return await this.localManager.complete(messages,options);
+      }
       if(model.protocol==='gradio-space')return await this.completeGradio(messages,options,model);
-      if(model.protocol==='ai-horde')return await this.completeHorde(messages,options,model);
       let temperature=options.temperature??.7;
       let response=null;
       const prefs=root.getAIPreferences?.()||{};
@@ -341,10 +288,14 @@
     }
     async completeGradio(messages,options,model){const result={role:'assistant',content:'',reasoning_content:''};for await(const chunk of this.streamGradio(messages,options,model)){result.content=chunk.text||result.content;result.reasoning_content=chunk.reasoning||result.reasoning_content;}return result;}
     async *stream(messages,options={}){
-      const model=options.model||this.model();this.cancel();const controller=new AbortController();this.abortController=controller;
+      const model=options.model||this.model();
+      if(model.protocol==='local-transformers'){
+        if(!this.localManager)throw new Error('Local AI runtime is not initialized.');
+        yield* this.localManager.stream(messages,options);return;
+      }
+      this.cancel();const controller=new AbortController();this.abortController=controller;
       try {
         if(model.protocol==='gradio-space')yield* this.streamGradio(messages,{...options,signal:controller.signal},model);
-        else if(model.protocol==='ai-horde') { const result=await this.completeHorde(messages,{...options,signal:controller.signal},model); yield {text:result.content||'',delta:result.content||'',reasoning:''}; }
         else if(model.supportsStreaming===false) { const result=await this.complete(messages,{...options,signal:controller.signal}); yield {text:result.content||'',delta:result.content||'',reasoning:result.reasoning_content||''}; }
         else if(['openai-chat','openai-responses','anthropic-messages','google-gemini'].includes(model.protocol))yield* this.streamNative(messages,{...options,signal:controller.signal},model);
         else {const result=await this.complete(messages,{...options,signal:controller.signal});yield {text:result.content||'',delta:result.content||'',reasoning:result.reasoning_content||''};}

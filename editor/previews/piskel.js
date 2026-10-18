@@ -108,7 +108,11 @@
     iframe.style.cssText = 'border:0;width:100%;height:100%;flex:1;min-height:0;display:block;';
     iframe.src = new URL('editor/previews/piskel/index.html', location.href).href;
 
+    const saveStatus = document.createElement('div');
+    saveStatus.className = 'editor-piskel-save-status';
+    saveStatus.style.cssText = 'position:absolute;right:10px;bottom:10px;z-index:10;pointer-events:none;font-size:12px;opacity:.75;';
     shell.appendChild(iframe);
+    shell.appendChild(saveStatus);
     ctx.host.appendChild(shell);
 
     let saveFunction = null;
