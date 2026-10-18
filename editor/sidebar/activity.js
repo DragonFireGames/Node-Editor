@@ -130,8 +130,24 @@
     tree.addEventListener('contextmenu', e => e.stopPropagation());
     setWidth(MIN_WIDTH);
     state.sidebar = 'explorer';
+    function focus(kind) {
+      const entry = Object.values(activities).find(x => x.kind === kind);
+      if (!entry) return;
+      const button = Object.entries(activities).find(([, x]) => x === entry)?.[0];
+      const previous = state.sidebar;
+      expand();
+      state.sidebar = kind;
+      explorer.hideContextMenu?.();
+      document.querySelectorAll('.activity-button').forEach(x => x.classList.toggle('active', x.id === button));
+      entry.show();
+      scheduleWorkspaceLayoutSave();
+      window.EditorEvents?.emit?.('sidebarChange', {
+        sidebar: kind, previous, collapsed: false, tree,
+        button: document.getElementById(button) || null
+      }, true);
+    }
     return {
-      explorer, runDebug, settings, extensions, search, sourceControl, profile, show, dispose() { extensions.dispose?.(); githubUnsubscribe?.(); },
+      explorer, runDebug, settings, extensions, search, sourceControl, profile, show, focus, dispose() { extensions.dispose?.(); githubUnsubscribe?.(); },
       setActiveActivity(id) { document.querySelectorAll('.activity-button').forEach(x => x.classList.toggle('active', x.id === id)); },
       restoreCollapsed: paths => explorer.restoreCollapsed(paths),
       setWidth, collapse, expand, getWidth: () => width
