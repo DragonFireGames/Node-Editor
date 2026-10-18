@@ -350,6 +350,7 @@
             state.markDirty?.(entry.path);
           }
           state.runDebugRefresh?.();
+          state.sidebarController?.focus?.('explorer');
           state.fileManager?.refresh?.();
           close();
           await refreshStatus();
